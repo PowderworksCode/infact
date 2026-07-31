@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "language": "rust",
+  "version": "1.93.1",
+  "calls": [
+    {
+      "path": "std::env::remove_var",
+      "effects": ["environment-write", "unsafe"]
+    },
+    {
+      "path": "std::env::set_var",
+      "effects": ["environment-write", "unsafe"]
+    },
+    {
+      "path": "std::env::var",
+      "effects": ["environment-read"]
+    },
+    {
+      "path": "std::fs::read",
+      "effects": ["file-read"]
+    },
+    {
+      "path": "std::fs::read_to_string",
+      "effects": ["file-read"]
+    },
+    {
+      "path": "std::fs::write",
+      "effects": ["file-write"]
+    },
+    {
+      "path": "std::net::TcpStream::connect",
+      "effects": ["network"]
+    },
+    {
+      "path": "std::process::Command::output",
+      "effects": ["block", "process"]
+    },
+    {
+      "path": "std::process::Command::status",
+      "effects": ["block", "process"]
+    },
+    {
+      "path": "std::thread::sleep",
+      "effects": ["block", "time"]
+    },
+    {
+      "path": "std::time::SystemTime::now",
+      "effects": ["time"]
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+[package]
+name = "infact-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Backend-independent fact and provenance types for Infact."
+
+[dependencies]
+serde.workspace = true

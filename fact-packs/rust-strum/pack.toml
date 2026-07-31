@@ -1,0 +1,53 @@
+schema = 1
+name = "rust-strum"
+revision = 1
+provides = ["rust.library-behaviors"]
+requires = ["rust.syntax-tree"]
+
+[[contents]]
+path = "macro-behaviors/strum-as-ref-str-kebab-0.28.0.json"
+kind = "macro-behavior"
+media-type = "application/vnd.infact.macro-behavior.v1+json"
+sha256 = "sha256:8e74a7e5bfa7d65e933df39850f26d994a3ce57b5add314a6976f40a58b88c8a"
+
+[[contents]]
+path = "macro-behaviors/strum-as-ref-str-snake-0.28.0.json"
+kind = "macro-behavior"
+media-type = "application/vnd.infact.macro-behavior.v1+json"
+sha256 = "sha256:4b4fd92fc6bb86a871568286c2561c88cdb96b2565c7e7f4f719bef06bd6457c"
+
+[[contents]]
+path = "macro-behaviors/strum-display-kebab-0.28.0.json"
+kind = "macro-behavior"
+media-type = "application/vnd.infact.macro-behavior.v1+json"
+sha256 = "sha256:dead428be4bb8b2381c7080a1ef76c518d6346435b786eb2173d8a939917cb1c"
+
+[[contents]]
+path = "macro-behaviors/strum-variant-array-0.28.0.json"
+kind = "macro-behavior"
+media-type = "application/vnd.infact.macro-behavior.v1+json"
+sha256 = "sha256:26dd447554fb05f2daeeaa9bf9b20dcd8378001b8c07ff26f40d5ebace2f23cb"
+
+[subject]
+kind = "library"
+language = "rust"
+ecosystem = "cargo"
+name = "strum"
+version = "0.28.0"
+
+[[sources]]
+kind = "package"
+name = "strum"
+version = "0.28.0"
+sha256 = "sha256:9628de9b8791db39ceda2b119bbe13134770b56c138ec1d3af810d045c04f9bd"
+
+[[sources]]
+kind = "package"
+name = "strum_macros"
+version = "0.28.0"
+sha256 = "sha256:ab85eea0270ee17587ed4156089e10b9e6880ee688791d45a905f5b1ca36f664"
+
+[derivation]
+generator = "infact"
+generator-version = "0.0.0"
+analyzer-sha256 = "sha256:5f8f5a19584e8394170a99e1b18979a05011dea0a3fed15e0c33f127962e5d98"

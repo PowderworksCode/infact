@@ -1,0 +1,18 @@
+[package]
+name = "infact-fact-registry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "OCI registry transport for Infact fact packs."
+
+[dependencies]
+infact-fact-pack = { path = "../infact-fact-pack" }
+oci-client.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true

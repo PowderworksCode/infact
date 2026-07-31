@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "callable_package": "itertools",
+  "callable_version": "0.15.0",
+  "callable_path": "itertools::Itertools::into_group_map_by",
+  "catalog_sha256": "a09081972a2d12d35f69eb0ad376b24490cea4a4e3f8c54c419263bf6ce4e8a3",
+  "implementation": [
+    {
+      "callable_path": "itertools::Itertools::into_group_map_by",
+      "span": {
+        "path": "src/lib.rs",
+        "start_byte": 142804,
+        "end_byte": 143058,
+        "start_line": 4107,
+        "end_line": 4114
+      },
+      "source_sha256": "cac2e34f5b83156078fbbb0137e173c1b4aa63528259f82100e16d7501692ee8"
+    },
+    {
+      "callable_path": "itertools::group_map::into_group_map_by_with_hasher",
+      "span": {
+        "path": "src/group_map.rs",
+        "start_byte": 665,
+        "end_byte": 961,
+        "start_line": 27,
+        "end_line": 39
+      },
+      "source_sha256": "a34116bc64f73ebff084077843157a11c23b8245f6efac73ff93ff9376156dd8"
+    },
+    {
+      "callable_path": "itertools::group_map::into_group_map_with_hasher",
+      "span": {
+        "path": "src/group_map.rs",
+        "start_byte": 310,
+        "end_byte": 663,
+        "start_line": 12,
+        "end_line": 25
+      },
+      "source_sha256": "a34116bc64f73ebff084077843157a11c23b8245f6efac73ff93ff9376156dd8"
+    }
+  ],
+  "program": {
+    "operations": [
+      {
+        "create-map": {
+          "output": "map"
+        }
+      },
+      {
+        "iterate": {
+          "input": "input",
+          "item": "item",
+          "body": [
+            {
+              "apply": {
+                "function": "parameter:f",
+                "input": "item",
+                "output": "key"
+              }
+            },
+            {
+              "push-map-entry": {
+                "map": "map",
+                "key": "key",
+                "value": "item"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "return": {
+          "value": "map"
+        }
+      }
+    ]
+  }
+}

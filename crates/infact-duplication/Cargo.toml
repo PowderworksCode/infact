@@ -1,0 +1,24 @@
+[package]
+name = "infact-duplication"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Incremental exact and similar syntax-token duplication facts."
+
+[dependencies]
+dbsp.workspace = true
+entl-codebase.workspace = true
+entl-tree-sitter.workspace = true
+feldera-macros.workspace = true
+infact-core = { path = "../infact-core" }
+rkyv.workspace = true
+serde.workspace = true
+sha2.workspace = true
+size-of.workspace = true
+thiserror.workspace = true
+tree-sitter.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

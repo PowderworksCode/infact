@@ -1,0 +1,22 @@
+[parsers]
+search-paths = ["../entl/parser-packs"]
+
+[catalogs]
+search-paths = ["fact-packs/rust-itertools/api"]
+
+[behaviors]
+search-paths = ["fact-packs/rust-itertools/behaviors"]
+
+[macro-behaviors]
+search-paths = ["fact-packs/rust-strum/macro-behaviors"]
+
+[duplication.exact]
+min-tokens = 50
+min-lines = 5
+
+[duplication.near]
+min-tokens = 80
+min-lines = 8
+normalize-identifiers = true
+normalize-literals = true
+max-changed-percent = 30

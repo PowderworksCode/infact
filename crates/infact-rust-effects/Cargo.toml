@@ -1,0 +1,24 @@
+[package]
+name = "infact-rust-effects"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Source-backed effect summaries for the Rust standard library."
+
+[dependencies]
+dbsp.workspace = true
+entl-tree-sitter.workspace = true
+feldera-macros.workspace = true
+infact-core = { path = "../infact-core" }
+infact-fact-pack = { path = "../infact-fact-pack" }
+rkyv.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+size-of.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tree-sitter.workspace = true
+
+[dev-dependencies]

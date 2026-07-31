@@ -1,0 +1,29 @@
+[package]
+name = "infact-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Inspection CLI for Infact-derived codebase facts."
+
+[[bin]]
+name = "infact"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+entl-codebase.workspace = true
+entl-tree-sitter.workspace = true
+infact-catalog = { path = "../infact-catalog" }
+infact-core = { path = "../infact-core" }
+infact-duplication = { path = "../infact-duplication" }
+infact-fact-pack = { path = "../infact-fact-pack" }
+infact-fact-registry = { path = "../infact-fact-registry" }
+infact-rust-behaviors = { path = "../infact-rust-behaviors" }
+infact-rust-effects = { path = "../infact-rust-effects" }
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+toml.workspace = true

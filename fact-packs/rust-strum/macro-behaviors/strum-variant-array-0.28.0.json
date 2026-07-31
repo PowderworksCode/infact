@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "macro_package": "strum",
+  "macro_version": "0.28.0",
+  "derive_path": "strum::VariantArray",
+  "probe_source_sha256": "d33cffd0b5a72187e0d68bccff787578131e21f7fc9c1f647c9d184c6d2a1b08",
+  "expansion_sha256": "7d313d28727a61216492449bc7ada12e65be779356fe903be2e9f40c31fe2bc0",
+  "behavior": "enum-variant-array"
+}

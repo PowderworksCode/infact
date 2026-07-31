@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "macro_package": "strum",
+  "macro_version": "0.28.0",
+  "derive_path": "strum::AsRefStr",
+  "probe_source_sha256": "87c15dcddb53546d907b17e1f69bbbac1139ca42146ba5ad486453df475ccc92",
+  "expansion_sha256": "c73b1d1547df5bebb12082156a9fef0153ce5b25988943cdaafe26eb67e21c2a",
+  "behavior": {
+    "enum-as-ref-str": {
+      "case": "snake"
+    }
+  }
+}

@@ -1,0 +1,33 @@
+schema = 1
+name = "rust-core"
+revision = 1
+provides = ["rust.call-effects"]
+requires = []
+
+[[contents]]
+path = "effects/rust-core-1.93.1.json"
+kind = "call-effects"
+media-type = "application/vnd.infact.call-effects.v1+json"
+sha256 = "sha256:884a82ce314f656d4511fc372054f295e3ad8a4f66d54d19566f5707c281cf02"
+
+[subject]
+kind = "language"
+language = "rust"
+ecosystem = "cargo"
+name = "core"
+version = "1.93.1"
+
+[[sources]]
+kind = "toolchain"
+name = "rust"
+version = "1.93.1"
+sha256 = "sha256:ba12080d1ad1f89836a857ab477a81863e7489def7fce462afdec887d0564e2a"
+
+[derivation]
+generator = "infact"
+generator-version = "0.0.0"
+analyzer-sha256 = "sha256:e723a483f82f467d02786fac0861a510d969d25a50d8b6dc64512ba09bdc28c9"
+
+[compatibility.compiler]
+name = "rustc"
+version = "1.93.1"

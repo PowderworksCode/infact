@@ -1,0 +1,43 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/infact-analysis",
+    "crates/infact-catalog",
+    "crates/infact-core",
+    "crates/infact-duplication",
+    "crates/infact-fact-pack",
+    "crates/infact-fact-builder",
+    "crates/infact-fact-registry",
+    "crates/infact-rust-effects",
+    "crates/infact-rust-behaviors",
+    "crates/infact-cli",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.93.1"
+license = "MIT"
+repository = "https://github.com/zmaril/infact"
+
+[workspace.dependencies]
+clap = { version = "4", features = ["derive"] }
+dbsp = "0.325"
+entl-codebase = { path = "../entl/crates/entl-codebase" }
+entl-tree-sitter = { path = "../entl/crates/entl-tree-sitter" }
+feldera-macros = "0.325"
+heck = "0.5"
+oci-client = { version = "0.17", default-features = false, features = ["rustls-tls"] }
+rkyv = { version = "0.7.45", default-features = false, features = ["std", "size_64", "validation"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+size-of = { package = "feldera-size-of", version = "0.1.7" }
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+toml = "1.1"
+tree-sitter = "0.26"
+
+[profile.release]
+lto = "thin"

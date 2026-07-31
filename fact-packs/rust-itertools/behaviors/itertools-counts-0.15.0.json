@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "callable_package": "itertools",
+  "callable_version": "0.15.0",
+  "callable_path": "itertools::Itertools::counts",
+  "catalog_sha256": "a09081972a2d12d35f69eb0ad376b24490cea4a4e3f8c54c419263bf6ce4e8a3",
+  "implementation": [
+    {
+      "callable_path": "itertools::Itertools::counts",
+      "span": {
+        "path": "src/lib.rs",
+        "start_byte": 173722,
+        "end_byte": 173893,
+        "start_line": 4997,
+        "end_line": 5003
+      },
+      "source_sha256": "cac2e34f5b83156078fbbb0137e173c1b4aa63528259f82100e16d7501692ee8"
+    },
+    {
+      "callable_path": "itertools::Itertools::counts_with_hasher",
+      "span": {
+        "path": "src/lib.rs",
+        "start_byte": 174110,
+        "end_byte": 174433,
+        "start_line": 5008,
+        "end_line": 5017
+      },
+      "source_sha256": "cac2e34f5b83156078fbbb0137e173c1b4aa63528259f82100e16d7501692ee8"
+    }
+  ],
+  "program": {
+    "operations": [
+      {
+        "create-map": {
+          "output": "map"
+        }
+      },
+      {
+        "iterate": {
+          "input": "input",
+          "item": "item",
+          "body": [
+            {
+              "increment-map-entry": {
+                "map": "map",
+                "key": "item",
+                "amount": 1
+              }
+            }
+          ]
+        }
+      },
+      {
+        "return": {
+          "value": "map"
+        }
+      }
+    ]
+  }
+}

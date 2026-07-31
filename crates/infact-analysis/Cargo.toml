@@ -1,0 +1,22 @@
+[package]
+name = "infact-analysis"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Typed consumer facade for running Infact analyses from verified fact packs."
+
+[dependencies]
+entl-tree-sitter.workspace = true
+infact-core = { path = "../infact-core" }
+infact-duplication = { path = "../infact-duplication" }
+infact-fact-pack = { path = "../infact-fact-pack" }
+infact-rust-effects = { path = "../infact-rust-effects" }
+infact-rust-behaviors = { path = "../infact-rust-behaviors" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "infact-fact-builder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Explicit local builder protocol for verified Infact fact packs."
+
+[dependencies]
+infact-fact-pack = { path = "../infact-fact-pack" }
+tempfile = "3"
+thiserror.workspace = true

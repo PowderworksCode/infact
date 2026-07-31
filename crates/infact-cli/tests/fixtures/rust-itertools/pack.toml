@@ -1,0 +1,46 @@
+schema = 1
+name = "rust-itertools"
+revision = 1
+provides = [
+  "rust.call-effects",
+  "rust.library-behaviors",
+]
+requires = ["rust.syntax-tree"]
+
+[[contents]]
+path = "behaviors/counts.json"
+kind = "library-behavior"
+media-type = "application/vnd.infact.library-behavior.v1+json"
+sha256 = "sha256:ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+
+[subject]
+kind = "library"
+language = "rust"
+ecosystem = "cargo"
+name = "itertools"
+version = "0.15.0"
+
+[[sources]]
+kind = "package"
+name = "itertools"
+version = "0.15.0"
+sha256 = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+[derivation]
+generator = "infact"
+generator-version = "0.0.0"
+analyzer-sha256 = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+
+[compatibility]
+package-features = ["use-std"]
+
+[compatibility.compiler]
+name = "rustc"
+version = "1.93.1"
+commit = "abc123"
+
+[compatibility.target]
+triple = "aarch64-apple-darwin"
+cpu = "apple-m2"
+features = ["neon"]
+cfg = ["target-pointer-width=64"]

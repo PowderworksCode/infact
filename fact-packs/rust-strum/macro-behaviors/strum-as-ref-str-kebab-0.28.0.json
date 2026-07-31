@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "macro_package": "strum",
+  "macro_version": "0.28.0",
+  "derive_path": "strum::AsRefStr",
+  "probe_source_sha256": "f149f252084933bb7fb9b883001002af3f5637a6ee08eb6d84ffc20ae780ca9b",
+  "expansion_sha256": "a3ceb4536a3af42c6d27abc3b8ea71482980adaa386af81005a6a394e6a19d1f",
+  "behavior": {
+    "enum-as-ref-str": {
+      "case": "kebab"
+    }
+  }
+}

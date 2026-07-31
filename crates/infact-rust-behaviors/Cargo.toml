@@ -1,0 +1,21 @@
+[package]
+name = "infact-rust-behaviors"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rust library-behavior match facts derived by Infact."
+
+[dependencies]
+entl-codebase.workspace = true
+entl-tree-sitter.workspace = true
+heck.workspace = true
+infact-core = { path = "../infact-core" }
+serde.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tree-sitter.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
