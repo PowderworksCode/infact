@@ -1,5 +1,10 @@
 # Infact
 
+> **Early and unstable.** Infact is under active development, has not been
+> released, and is not ready for use by anyone outside this repository. Fact
+> schemas, pack manifests, and crate interfaces change without notice or
+> migration. Analyzer coverage is deliberately narrow and incomplete.
+
 Infact derives typed, provenance-carrying facts from observations acquired by
 Entl. DBSP maintains relations incrementally. Infact does not decide whether a
 fact violates repository policy; Straitjacket owns that decision.
@@ -235,7 +240,7 @@ ghcr.io/zmaril/infact-facts/rust-itertools@sha256:...
 
 The first form selects a release. The second identifies its exact contents.
 See [the fact-pack design](docs/fact-packs.md) for resolution, local generation,
-compatibility, aspirations, and the implementation sequence.
+compatibility, dependency selection, and the implementation sequence.
 
 The first implemented authoring check validates `pack.toml`, safe content
 paths, and every declared content digest:

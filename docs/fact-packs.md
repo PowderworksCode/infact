@@ -98,12 +98,9 @@ and absolute source paths is not part of a fact pack.
 
 ## Selection
 
-Straitjacket selects fact packs from two sources:
-
-- Dependency packs follow languages and resolved dependencies already present
-  in the codebase.
-- Aspiration packs are explicitly selected libraries whose behavior may offer
-  improvements even when the library is not yet a dependency.
+Straitjacket selects fact packs from the codebase itself. Dependency packs
+follow the languages and resolved dependencies already present in the
+repository's lockfiles, so depending on a library is what asks for its facts.
 
 ```toml
 [facts]
@@ -117,13 +114,11 @@ build-missing = true
 [[facts.builders]]
 ecosystem = "cargo"
 command = ["company-infact-builder", "build"]
-
-[aspirations]
-libraries = [
-  "cargo:itertools@0.15",
-  "cargo:strum@0.28",
-]
 ```
+
+`dependencies = "automatic"` resolves a pack for every dependency the
+repository's lockfiles declare. There is no separate list of libraries to
+request: what the repository depends on is what gets described.
 
 The consumer lockfile records resolved OCI manifest digests. Analysis uses the
 lock without re-resolving tags. A locked run fails when configuration and lock
@@ -308,7 +303,7 @@ the delivery list. Straitjacket will be the normal repository-facing CLI.
 10. Restrict compiler, build-script, and proc-macro execution.
 11. Automate upstream release detection, fact diffs, review, and publication.
 
-The first end-to-end fixture installs an aspirational `rust-itertools` pack,
+The first end-to-end fixture installs a dependency `rust-itertools` pack,
 loads an Entl parser pack, and reports the resulting behavior opportunity
 through Straitjacket. Text, JSON, SARIF, offline cache use, lock enforcement,
 and cross-file suppression share the same reporting path. The checked
