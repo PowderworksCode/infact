@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! What resolved observations buy over syntax, measured on one fixture.
 //!
 //! The fixture writes the same effectful call four ways. Syntax can only

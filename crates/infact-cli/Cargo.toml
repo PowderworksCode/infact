@@ -27,3 +27,6 @@ serde_json.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 toml.workspace = true
+
+[lints]
+workspace = true

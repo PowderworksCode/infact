@@ -311,6 +311,8 @@ mod tests {
             &cache,
         ));
         stopped.store(true, Ordering::Release);
+        // a throwaway connection so the accept loop observes `stopped` and returns
+        #[allow(clippy::let_underscore_must_use)]
         let _ = TcpStream::connect(address);
         server.join().unwrap();
         let pulled = result.unwrap();
@@ -373,6 +375,15 @@ mod tests {
                 }
                 Err(error) => panic!("accepting registry request: {error}"),
             };
+            // The listener is non-blocking so this loop can notice the stop
+            // flag, and an accepted connection inherits that on some platforms.
+            // Reading a request is not something to poll, so put it back.
+            stream
+                .set_nonblocking(false)
+                .expect("serving a connection blocking");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("bounding a stuck request");
             let mut request = Vec::new();
             let mut buffer = [0; 1024];
             while !request.windows(4).any(|window| window == b"\r\n\r\n") {

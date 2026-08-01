@@ -31,6 +31,17 @@ pub enum Pattern {
     Ignored,
 }
 
+impl Pattern {
+    /// Whether this pattern introduces a particular binding.
+    pub fn binds(&self, index: u32) -> bool {
+        match self {
+            Self::Binding(bound) => *bound == index,
+            Self::Ignored => false,
+            Self::Tuple(parts) => parts.iter().any(|part| part.binds(index)),
+        }
+    }
+}
+
 impl Display for Pattern {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
@@ -210,6 +221,66 @@ impl Form {
             .sum::<u32>()
     }
 
+    /// Whether this form mentions a particular local.
+    pub fn references_local(&self, index: u32) -> bool {
+        match self {
+            Self::Local(bound) => *bound == index,
+            Self::Let { pattern, value } => pattern.binds(index) || value.references_local(index),
+            Self::Traverse { item, .. }
+            | Self::Transform { item, .. }
+            | Self::Retain { item, .. }
+                if item.binds(index) =>
+            {
+                true
+            }
+            _ => self
+                .children()
+                .into_iter()
+                .any(|child| child.references_local(index)),
+        }
+    }
+
+    /// How much of this form is specific rather than structural.
+    ///
+    /// Structure alone does not identify an API. Every library has a `map`, and
+    /// they all reduce to the same traversal over holes, so a form built only
+    /// from shape matches any code of that shape. What distinguishes a behavior
+    /// is what it names: a type it constructs, a method it calls, an operator,
+    /// a constant. Counting those separates `counts` — which names `HashMap`,
+    /// `entry`, `or_default`, `+=` and `1` — from a bare transform that names
+    /// nothing.
+    pub fn anchors(&self) -> u32 {
+        let own = match self {
+            Self::Construct(_) | Self::Path(_) | Self::Number(_) => 1,
+            Self::Method { .. } | Self::Field { .. } => 1,
+            Self::Assign { operator, .. } | Self::Binary { operator, .. } => {
+                u32::from(!operator.is_empty())
+            }
+            Self::Collect { container, .. } => u32::from(container.is_some()),
+            _ => 0,
+        };
+        own + self
+            .children()
+            .iter()
+            .map(|child| child.anchors())
+            .sum::<u32>()
+    }
+
+    /// How deeply this form nests.
+    ///
+    /// Behavior is a small shape. A form that nests dozens of levels came from
+    /// a whole subsystem rather than an operation, will never match anything,
+    /// and is deep enough to defeat ordinary readers: `serde_json` refuses more
+    /// than 128 levels by default.
+    pub fn depth(&self) -> u32 {
+        1 + self
+            .children()
+            .iter()
+            .map(|child| child.depth())
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Renumber every role by its first appearance within this form.
     ///
     /// Role numbers are assigned while walking a whole function, so the same
@@ -228,7 +299,7 @@ impl Form {
     /// Repository code rarely consists of nothing but the behavior in question,
     /// so a match is a subtree relationship rather than whole-body equality.
     pub fn contains(&self, pattern: &Self) -> bool {
-        !self.occurrences(pattern).is_empty()
+        self.search(pattern, false)
     }
 
     /// Every position at which `pattern` occurs, outermost first.
@@ -244,12 +315,52 @@ impl Form {
     }
 
     fn find<'a>(&'a self, pattern: &Self, found: &mut Vec<&'a Self>) {
-        if self.matches(pattern) || self.contains_steps(pattern) {
+        if self.matches_with(pattern, false) || self.contains_steps_with(pattern, false) {
             found.push(self);
         }
         for child in self.children() {
             child.find(pattern, found);
         }
+    }
+
+    /// Where in a sequence a pattern matches, as a range of steps.
+    ///
+    /// A finding is only useful if it points at the code. The steps that make
+    /// up a behavior need not be adjacent, so this reports from the first to
+    /// the last of them: the extent the behavior is spread over, which is
+    /// exactly what a reader has to look at.
+    pub fn matching_steps(&self, pattern: &Self) -> Option<std::ops::Range<usize>> {
+        let Self::Sequence(haystack) = self else {
+            return None;
+        };
+        let steps = match pattern {
+            Self::Sequence(steps) => steps.as_slice(),
+            other => std::slice::from_ref(other),
+        };
+        let (first, rest) = steps.split_first()?;
+        if steps.len() > haystack.len() {
+            return None;
+        }
+        haystack.iter().enumerate().find_map(|(start, candidate)| {
+            let mut bindings = Bindings::default();
+            if !bindings.form(candidate, first) {
+                return None;
+            }
+            let mut matched = vec![start];
+            bindings
+                .follow_recording(&haystack[start + 1..], rest, start + 1, &mut matched)
+                .then(|| start..matched.last().map_or(start, |last| last + 1))
+        })
+    }
+
+    /// Where a pattern matches, trying the behavior without its closing
+    /// reference when the whole of it does not appear.
+    pub fn locate(&self, pattern: &Self) -> Option<std::ops::Range<usize>> {
+        self.matching_steps(pattern).or_else(|| {
+            pattern
+                .without_result_reference()
+                .and_then(|work| self.matching_steps(&work))
+        })
     }
 
     /// The same behavior without its closing reference to what it built.
@@ -280,6 +391,70 @@ impl Form {
             .then(|| Self::Sequence(bound.to_vec()))
     }
 
+    /// Whether this form performs `pattern` among other work.
+    ///
+    /// Real loops are rarely dedicated to one thing. A loop that groups values
+    /// and also counts them still groups them, and saying so is useful even
+    /// though the replacement is not mechanical. A loop that `break`s or
+    /// `continue`s is different in kind: it does not visit every element, so it
+    /// is not the behavior at all, however much of the shape it shares.
+    pub fn contains_fused(&self, pattern: &Self) -> bool {
+        self.search(pattern, true)
+    }
+
+    /// Look for a pattern anywhere in this form, by every route that counts as
+    /// finding it: as a whole, as a run of consecutive steps, and without the
+    /// closing reference a library function needs but inline code does not.
+    fn search(&self, pattern: &Self, fused: bool) -> bool {
+        if self.matches_with(pattern, fused) || self.contains_steps_with(pattern, fused) {
+            return true;
+        }
+        if let Some(work) = pattern.without_result_reference()
+            && (self.matches_with(&work, fused) || self.contains_steps_with(&work, fused))
+        {
+            return true;
+        }
+        self.children()
+            .into_iter()
+            .any(|child| child.search(pattern, fused))
+    }
+
+    fn matches_with(&self, pattern: &Self, fused: bool) -> bool {
+        let mut bindings = Bindings {
+            fused,
+            ..Bindings::default()
+        };
+        bindings.form(self, pattern)
+    }
+
+    /// Whether a sequence performs the pattern's steps, in order, ignoring
+    /// unrelated statements written among them.
+    ///
+    /// Code does not lay a behavior out contiguously. An accumulator is
+    /// declared, then something unrelated, then the loop that fills it. Those
+    /// interruptions are only unrelated if they leave the behavior alone, so a
+    /// statement may be stepped over exactly when it touches nothing the match
+    /// has bound. A statement that reads or rewrites the accumulator is part of
+    /// what the code does and cannot be skipped past.
+    fn contains_steps_with(&self, pattern: &Self, fused: bool) -> bool {
+        let (Self::Sequence(haystack), Self::Sequence(steps)) = (self, pattern) else {
+            return false;
+        };
+        let Some((first, rest)) = steps.split_first() else {
+            return false;
+        };
+        if steps.len() > haystack.len() {
+            return false;
+        }
+        haystack.iter().enumerate().any(|(start, candidate)| {
+            let mut bindings = Bindings {
+                fused,
+                ..Bindings::default()
+            };
+            bindings.form(candidate, first) && bindings.follow(&haystack[start + 1..], rest)
+        })
+    }
+
     /// Whether this form is an instance of `pattern`.
     ///
     /// A derived behavior is a pattern, not a literal. What the library takes as
@@ -289,23 +464,6 @@ impl Form {
     pub fn matches(&self, pattern: &Self) -> bool {
         let mut bindings = Bindings::default();
         bindings.form(self, pattern)
-    }
-
-    /// Whether a sequence of steps occurs contiguously inside this sequence.
-    ///
-    /// A behavior rarely arrives alone: repository code declares other locals
-    /// around it and goes on to do more afterwards. The steps that make up the
-    /// behavior still have to appear together and in order.
-    fn contains_steps(&self, pattern: &Self) -> bool {
-        let (Self::Sequence(haystack), Self::Sequence(steps)) = (self, pattern) else {
-            return false;
-        };
-        if steps.is_empty() || steps.len() >= haystack.len() {
-            return false;
-        }
-        haystack
-            .windows(steps.len())
-            .any(|window| Self::Sequence(window.to_vec()).matches(pattern))
     }
 
     /// Whether this form describes no behavior worth comparing.
@@ -433,13 +591,92 @@ impl Display for Form {
 /// A pattern's free variables are holes that match any subterm; its locals must
 /// line up with the subject's locals one-for-one. Both are recorded so that a
 /// role used twice has to mean the same thing twice.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct Bindings {
     holes: Vec<(u32, Form)>,
     locals: Vec<(u32, u32)>,
+    /// Whether a traversal may do more than the pattern describes.
+    fused: bool,
+}
+
+/// Whether a form stops or diverts iteration.
+///
+/// A traversal containing one of these does not visit every element, so it
+/// cannot stand in for a library operation that does.
+fn interrupts_iteration(form: &Form) -> bool {
+    match form {
+        Form::Opaque { kind, .. } => matches!(
+            kind.as_str(),
+            "break_expression" | "continue_expression" | "try_expression"
+        ),
+        Form::Return(_) => true,
+        _ => form.children().into_iter().any(interrupts_iteration),
+    }
 }
 
 impl Bindings {
+    /// Match the remaining steps, stepping over statements that leave the
+    /// behavior alone.
+    fn follow(&mut self, haystack: &[Form], steps: &[Form]) -> bool {
+        let Some((next, rest)) = steps.split_first() else {
+            return true;
+        };
+        for (index, candidate) in haystack.iter().enumerate() {
+            // once something touches what is already bound, the behavior is
+            // entangled with it and no later position can undo that
+            if haystack[..index].iter().any(|passed| self.touches(passed)) {
+                return false;
+            }
+            let mut trial = self.clone();
+            if trial.form(candidate, next) && trial.follow(&haystack[index + 1..], rest) {
+                *self = trial;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The same walk, recording which positions were matched.
+    fn follow_recording(
+        &mut self,
+        haystack: &[Form],
+        steps: &[Form],
+        offset: usize,
+        matched: &mut Vec<usize>,
+    ) -> bool {
+        let Some((next, rest)) = steps.split_first() else {
+            return true;
+        };
+        for (index, candidate) in haystack.iter().enumerate() {
+            if haystack[..index].iter().any(|passed| self.touches(passed)) {
+                return false;
+            }
+            let mut trial = self.clone();
+            let mut found = matched.clone();
+            found.push(offset + index);
+            if trial.form(candidate, next)
+                && trial.follow_recording(
+                    &haystack[index + 1..],
+                    rest,
+                    offset + index + 1,
+                    &mut found,
+                )
+            {
+                *self = trial;
+                *matched = found;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Whether a form mentions anything this match has bound.
+    fn touches(&self, form: &Form) -> bool {
+        self.locals
+            .iter()
+            .any(|(_, subject)| form.references_local(*subject))
+    }
+
     fn bind_hole(&mut self, index: u32, subject: &Form) -> bool {
         match self.holes.iter().find(|(bound, _)| *bound == index) {
             Some((_, existing)) => existing == subject,
@@ -486,6 +723,20 @@ impl Bindings {
                 .iter()
                 .zip(pattern)
                 .all(|(subject, pattern)| self.form(subject, pattern))
+    }
+
+    /// Whether a traversal body performs the pattern's body among other steps.
+    fn fused_body(&mut self, subject: &Form, pattern: &Form) -> bool {
+        if !self.fused {
+            return false;
+        }
+        let Form::Sequence(steps) = subject else {
+            return false;
+        };
+        if steps.iter().any(interrupts_iteration) {
+            return false;
+        }
+        steps.iter().any(|step| self.form(step, pattern))
     }
 
     fn form(&mut self, subject: &Form, pattern: &Form) -> bool {
@@ -577,7 +828,8 @@ impl Bindings {
             ) => {
                 self.form(subject_sequence, pattern_sequence)
                     && self.pattern(subject_item, pattern_item)
-                    && self.form(subject_body, pattern_body)
+                    && (self.form(subject_body, pattern_body)
+                        || self.fused_body(subject_body, pattern_body))
             }
             (
                 Form::Accumulate {

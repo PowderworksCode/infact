@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! A precision suite for library-opportunity findings.
 //!
 //! Recall is easy to claim and precision is what makes a finding worth reading,
@@ -46,9 +47,20 @@ fn packed() -> (Vec<ExternalCatalog>, Vec<DerivedLibraryBehavior>) {
     (vec![catalog], behaviors)
 }
 
+/// How a fixture is expected to be reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Expected {
+    /// Reported as this API, as a direct reimplementation.
+    Exact(String),
+    /// Reported as this API, but done alongside other work.
+    Fused(String),
+    /// Not reported at all.
+    None,
+}
+
 /// What each fixture function should be reported as, keyed by its file and the
 /// line its definition starts on.
-fn expectations() -> BTreeMap<(String, u32), Option<String>> {
+fn expectations() -> BTreeMap<(String, u32), Expected> {
     let mut expected = BTreeMap::new();
     let sources = std::fs::read_dir(corpus().join("src")).expect("corpus sources");
     for entry in sources.filter_map(Result::ok) {
@@ -56,8 +68,14 @@ fn expectations() -> BTreeMap<(String, u32), Option<String>> {
         let text = std::fs::read_to_string(entry.path()).expect("fixture");
         let lines = text.lines().collect::<Vec<_>>();
         for (index, line) in lines.iter().enumerate() {
-            let Some(expectation) = line.trim().strip_prefix("// expect: ") else {
-                continue;
+            let trimmed = line.trim();
+            let (expectation, fused) = match (
+                trimmed.strip_prefix("// expect: "),
+                trimmed.strip_prefix("// expect-fused: "),
+            ) {
+                (Some(api), _) => (api, false),
+                (_, Some(api)) => (api, true),
+                _ => continue,
             };
             // the annotation describes the next definition below it
             let definition = lines
@@ -67,9 +85,10 @@ fn expectations() -> BTreeMap<(String, u32), Option<String>> {
                 .find(|(_, candidate)| candidate.starts_with("pub fn "))
                 .map(|(line, _)| u32::try_from(line + 1).expect("line fits"))
                 .unwrap_or_else(|| panic!("{name}: no definition follows an expectation"));
-            let expectation = match expectation.trim() {
-                "none" => None,
-                api => Some(api.to_owned()),
+            let expectation = match (expectation.trim(), fused) {
+                ("none", _) => Expected::None,
+                (api, true) => Expected::Fused(api.to_owned()),
+                (api, false) => Expected::Exact(api.to_owned()),
             };
             expected.insert((name.clone(), definition), expectation);
         }
@@ -78,43 +97,77 @@ fn expectations() -> BTreeMap<(String, u32), Option<String>> {
     expected
 }
 
-fn reported() -> BTreeMap<(String, u32), String> {
+/// Findings keyed by the fixture function they fall inside.
+///
+/// A finding points at the statements that carry the behavior, which is not
+/// where the function starts, so each is attributed to the nearest definition
+/// above it. Keying on exact lines would tie this suite to how precisely
+/// findings happen to be located.
+fn reported(expectations: &BTreeMap<(String, u32), Expected>) -> BTreeMap<(String, u32), Expected> {
     let (catalogs, behaviors) = packed();
     let report = analyze_repository(corpus(), &parsers(), &catalogs, &behaviors, &[]).unwrap();
     report
         .matches
         .iter()
-        .map(|fact| {
+        .filter_map(|fact| {
             let file = fact
                 .value
                 .span
                 .path
                 .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default()
+                .and_then(|name| name.to_str())?
                 .to_owned();
-            (
-                (file, fact.value.span.start_line),
-                fact.value.target.path().to_owned(),
-            )
+            let enclosing = expectations
+                .keys()
+                .filter(|(candidate, line)| {
+                    candidate == &file && *line <= fact.value.span.start_line
+                })
+                .map(|(_, line)| *line)
+                .max()?;
+            let api = fact.value.target.path().to_owned();
+            Some((
+                (file, enclosing),
+                if fact.value.fused {
+                    Expected::Fused(api)
+                } else {
+                    Expected::Exact(api)
+                },
+            ))
         })
         .collect()
+}
+
+/// A fused finding is a real but weaker claim, and must be told apart from a
+/// direct reimplementation rather than folded in with it.
+#[test]
+fn work_done_alongside_a_behavior_is_reported_as_fused() {
+    let expectations = expectations();
+    let reported = reported(&expectations);
+    let fused = expectations
+        .iter()
+        .filter(|(_, expectation)| matches!(expectation, Expected::Fused(_)))
+        .collect::<Vec<_>>();
+    assert!(!fused.is_empty(), "the corpus states no fused expectations");
+    for (location, expectation) in fused {
+        assert_eq!(reported.get(location), Some(expectation), "at {location:?}");
+    }
 }
 
 /// Everything the corpus says is a reimplementation is found, as the right API.
 #[test]
 fn every_stated_reimplementation_is_reported() {
-    let reported = reported();
+    let expectations = expectations();
+    let reported = reported(&expectations);
     let mut missed = Vec::new();
     let mut misidentified = Vec::new();
-    for (location, expectation) in expectations() {
-        let Some(expected) = expectation else {
+    for (location, expectation) in expectations {
+        if expectation == Expected::None {
             continue;
-        };
+        }
         match reported.get(&location) {
-            None => missed.push((location, expected)),
-            Some(actual) if actual != &expected => {
-                misidentified.push((location, expected, actual.clone()));
+            None => missed.push((location, expectation)),
+            Some(actual) if actual != &expectation => {
+                misidentified.push((location, expectation, actual.clone()));
             }
             Some(_) => {}
         }
@@ -131,10 +184,12 @@ fn every_stated_reimplementation_is_reported() {
 /// This is the half that decides whether the findings are worth reading.
 #[test]
 fn nothing_the_corpus_rules_out_is_reported() {
-    let reported = reported();
-    let spurious = expectations()
+    let expectations = expectations();
+    let reported = reported(&expectations);
+    let spurious = expectations
+        .clone()
         .into_iter()
-        .filter(|(_, expectation)| expectation.is_none())
+        .filter(|(_, expectation)| expectation == &Expected::None)
         .filter_map(|(location, _)| {
             reported
                 .get(&location)
@@ -149,7 +204,7 @@ fn nothing_the_corpus_rules_out_is_reported() {
 #[test]
 fn every_finding_is_accounted_for() {
     let expectations = expectations();
-    let unexplained = reported()
+    let unexplained = reported(&expectations)
         .into_iter()
         .filter(|(location, _)| !expectations.contains_key(location))
         .collect::<Vec<_>>();
@@ -165,7 +220,7 @@ fn the_corpus_is_mostly_negative() {
     let expectations = expectations();
     let negatives = expectations
         .values()
-        .filter(|expectation| expectation.is_none())
+        .filter(|expectation| expectation == &&Expected::None)
         .count();
     assert!(
         negatives >= expectations.len() / 3,

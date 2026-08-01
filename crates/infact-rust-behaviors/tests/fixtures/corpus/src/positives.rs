@@ -80,3 +80,15 @@ pub fn tally_with_combinator(values: Vec<String>) -> HashMap<String, usize> {
     });
     counts
 }
+
+// an unrelated declaration sits between the accumulator and the loop
+// expect: itertools::Itertools::into_group_map
+pub fn grouped_around_other_work(pairs: Vec<(String, u32)>) -> HashMap<String, Vec<u32>> {
+    let mut groups = HashMap::new();
+    let label = String::from("run");
+    let _ = label;
+    for (key, value) in pairs {
+        groups.entry(key).or_default().push(value);
+    }
+    groups
+}

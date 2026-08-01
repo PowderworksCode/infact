@@ -178,7 +178,11 @@ pub struct ExternalCatalog {
 pub struct ExternalCallable {
     pub path: String,
     pub container: CallableContainer,
-    pub signature: CallableSignature,
+    /// The declared signature, when the catalog was built from something that
+    /// knows types. A catalog derived from source alone has none, and saying so
+    /// is better than inventing one.
+    #[serde(default)]
+    pub signature: Option<CallableSignature>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -257,6 +261,13 @@ pub enum ExternalType {
 pub struct LibraryBehaviorMatch {
     pub target: LibraryTarget,
     pub span: SourceSpan,
+    /// Whether the code does this and other work in the same pass.
+    ///
+    /// A fused match is a weaker claim: the behavior is present, but replacing
+    /// it with the library call is not a mechanical substitution, because
+    /// something else is interleaved with it.
+    #[serde(default)]
+    pub fused: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

@@ -2,6 +2,7 @@
 
 mod derivation;
 mod macro_derivation;
+mod pack;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -17,8 +18,9 @@ use infact_core::{
 use serde::{Deserialize, Serialize};
 use tree_sitter::Node;
 
-pub use derivation::derive_behavior;
+pub use derivation::{DerivedLibrary, derive_behavior, derive_catalog, derive_library};
 pub use macro_derivation::{MacroDerivationRequest, derive_macro_behavior};
+pub use pack::{BuiltLibraryPack, LibraryPackRequest, build_library_pack, registry_sources};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnalysisDiagnostic {
@@ -80,6 +82,19 @@ pub enum Error {
     InvalidMacroProbe { derive: String },
     #[error("cannot normalize the expansion of {derive}: {reason}")]
     UnsupportedMacroExpansion { derive: String, reason: String },
+    #[error("writing pack content {}: {source}", path.display())]
+    WritePack {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("building the pack manifest: {source}")]
+    PackManifest {
+        #[source]
+        source: infact_fact_pack::ManifestError,
+    },
+    #[error("encoding pack content: {0}")]
+    Encode(#[source] serde_json::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -146,20 +161,32 @@ pub fn analyze_repository(
             // they derive the same form and would otherwise be reported
             // separately against the same code. Name the one a reader would
             // reach for, which is the least qualified.
-            let mut best: BTreeMap<&Form, &&DerivedLibraryBehavior> = BTreeMap::new();
+            let mut best: BTreeMap<&Form, (&&DerivedLibraryBehavior, bool)> = BTreeMap::new();
             for behavior in &reportable {
-                if !function.form.contains(&behavior.program) {
+                // A behavior derived from this very file is not a finding: the
+                // library is not reimplementing itself. The content digest says
+                // so exactly, without needing to be told which package is being
+                // scanned.
+                if derived_from(behavior, file) {
                     continue;
                 }
+                // an exact match is the stronger claim, so it is tried first
+                let fused = if function.form.contains(&behavior.program) {
+                    false
+                } else if function.form.contains_fused(&behavior.program) {
+                    true
+                } else {
+                    continue;
+                };
                 best.entry(&behavior.program)
                     .and_modify(|chosen| {
-                        if is_plainer(&behavior.callable_path, &chosen.callable_path) {
-                            *chosen = behavior;
+                        if is_plainer(&behavior.callable_path, &chosen.0.callable_path) {
+                            *chosen = (behavior, fused);
                         }
                     })
-                    .or_insert(behavior);
+                    .or_insert((behavior, fused));
             }
-            for behavior in best.into_values() {
+            for (behavior, fused) in best.into_values() {
                 let Some(catalog) = catalogs.iter().find(|catalog| {
                     catalog.package == behavior.callable_package
                         && catalog.version == behavior.callable_version
@@ -167,7 +194,10 @@ pub fn analyze_repository(
                 }) else {
                     continue;
                 };
-                matches.insert(behavior_match(file, &function, catalog, behavior)?);
+                let located = function.form.locate(&behavior.program);
+                matches.insert(behavior_match(
+                    file, &function, located, fused, catalog, behavior,
+                )?);
             }
         }
         collect_enum_macro_matches(file, macro_behaviors, &mut matches)?;
@@ -187,6 +217,20 @@ pub fn analyze_repository(
     })
 }
 
+/// Whether a behavior was derived from the file now being scanned.
+///
+/// Entl records a file's digest as bare hex; a derived behavior records the
+/// same digest prefixed with its algorithm, so the comparison ignores that.
+fn derived_from(behavior: &DerivedLibraryBehavior, file: &ParsedFile) -> bool {
+    behavior.implementation.iter().any(|evidence| {
+        evidence
+            .source_sha256
+            .rsplit(':')
+            .next()
+            .is_some_and(|digest| digest == file.provenance.source_sha256)
+    })
+}
+
 /// Whether one callable path is the plainer way to ask for a behavior.
 ///
 /// Shorter wins, so `counts` is preferred over `counts_with_hasher`; ties break
@@ -195,16 +239,43 @@ fn is_plainer(candidate: &str, current: &str) -> bool {
     (candidate.len(), candidate) < (current.len(), current)
 }
 
-/// Report a match at the enclosing function.
+/// Report a match at the statements that carry it.
 ///
-/// The normalized form carries no source positions, so a finding names the
-/// function that reimplements the behavior rather than the exact statements.
+/// A behavior usually occupies a run of consecutive statements inside a larger
+/// function, and naming the function alone leaves a reader to find it again.
+/// When the run cannot be located — the behavior matched somewhere nested, or
+/// the body is a single expression — the function is the honest answer.
 fn behavior_match(
     file: &ParsedFile,
     function: &infact_rust_normalize::NormalizedFunction,
+    located: Option<std::ops::Range<usize>>,
+    fused: bool,
     catalog: &ExternalCatalog,
     behavior: &DerivedLibraryBehavior,
 ) -> Result<Fact<LibraryBehaviorMatch>> {
+    let span = located
+        .and_then(|steps| {
+            let first = function.statements.get(steps.start)?;
+            let last = function.statements.get(steps.end.checked_sub(1)?)?;
+            Some(SourceSpan {
+                path: file.path.clone(),
+                start_byte: Some(first.start_byte),
+                end_byte: Some(last.end_byte),
+                start_line: first.start_line,
+                end_line: last.end_line,
+                start_column: None,
+                end_column: None,
+            })
+        })
+        .unwrap_or_else(|| SourceSpan {
+            path: file.path.clone(),
+            start_byte: Some(function.start_byte),
+            end_byte: Some(function.end_byte),
+            start_line: function.start_line,
+            end_line: function.end_line,
+            start_column: None,
+            end_column: None,
+        });
     Ok(Fact {
         value: LibraryBehaviorMatch {
             target: LibraryTarget::Callable {
@@ -213,15 +284,8 @@ fn behavior_match(
                 path: behavior.callable_path.clone(),
                 catalog_sha256: catalog.source_sha256.clone(),
             },
-            span: SourceSpan {
-                path: file.path.clone(),
-                start_byte: Some(function.start_byte),
-                end_byte: Some(function.end_byte),
-                start_line: function.start_line,
-                end_line: function.end_line,
-                start_column: None,
-                end_column: None,
-            },
+            span,
+            fused,
         },
         derivation: Derivation {
             analyzer: "rust.library-behaviors".to_owned(),
@@ -595,6 +659,7 @@ fn macro_behavior_match(
                 path: behavior.derive_path.clone(),
                 expansion_sha256: behavior.expansion_sha256.clone(),
             },
+            fused: false,
             span: SourceSpan {
                 path: file.path.clone(),
                 start_byte: Some(start_byte),

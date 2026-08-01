@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! The normalizer's contract: implementations that behave alike normalize
 //! alike, implementations that behave differently do not, and no rule here
 //! knows about any particular library.

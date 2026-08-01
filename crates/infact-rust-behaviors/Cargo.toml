@@ -12,12 +12,18 @@ entl-codebase.workspace = true
 entl-tree-sitter.workspace = true
 heck.workspace = true
 infact-core = { path = "../infact-core" }
+infact-fact-pack = { path = "../infact-fact-pack" }
 infact-normalize = { path = "../infact-normalize" }
 infact-rust-normalize = { path = "../infact-rust-normalize" }
 serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tree-sitter.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -5,10 +5,14 @@
 //! delegation so that a public wrapper describes the work its helper actually
 //! does. One implementation covers every callable in every library.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use entl_tree_sitter::{ParsedFile, ParserCatalog, parse_repository};
-use infact_core::{DerivedLibraryBehavior, ExternalCatalog, Form, ImplementationEvidence};
+use infact_core::{
+    CallableContainer, DerivedLibraryBehavior, EXTERNAL_CATALOG_SCHEMA, ExternalCallable,
+    ExternalCatalog, Form, ImplementationEvidence,
+};
 use tree_sitter::Node;
 
 use crate::{DERIVED_LIBRARY_BEHAVIOR_SCHEMA, Error, Result, source_sha256, span_of};
@@ -23,6 +27,8 @@ struct LibraryFunction<'a> {
     name: String,
     /// The trait or type the function is written inside, when there is one.
     container: Option<String>,
+    /// Whether every inline module enclosing it is public.
+    reachable: bool,
 }
 
 fn node_text<'a>(node: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
@@ -33,6 +39,7 @@ fn collect_functions<'a>(
     node: Node<'a>,
     file: &'a ParsedFile,
     container: Option<&str>,
+    reachable: bool,
     output: &mut Vec<LibraryFunction<'a>>,
 ) {
     if node.kind() == "function_item"
@@ -45,6 +52,7 @@ fn collect_functions<'a>(
             node,
             name: name.to_owned(),
             container: container.map(str::to_owned),
+            reachable,
         });
     }
     // an `impl` names a type, a `trait` names itself; either qualifies the
@@ -59,9 +67,83 @@ fn collect_functions<'a>(
             .and_then(|name| node_text(name, &file.source)),
         _ => container,
     };
+    // an inline `mod` that is not public hides everything inside it
+    let nested_reachable = reachable
+        && (node.kind() != "mod_item" || {
+            let mut cursor = node.walk();
+            node.children(&mut cursor)
+                .any(|child| child.kind() == "visibility_modifier")
+        });
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        collect_functions(child, file, nested, output);
+        collect_functions(child, file, nested, nested_reachable, output);
+    }
+}
+
+/// Names of modules this library declares without making them reachable.
+///
+/// A file-based module is declared elsewhere, so whether `src/lexical/math.rs`
+/// is reachable cannot be seen from that file. Collecting the declarations
+/// first is what makes the answer available where it is needed.
+///
+/// A private module whose contents are re-exported is still reachable, and
+/// libraries lean on that: `mod traits;` beside `pub use self::traits::Iterator;`
+/// is how the standard library presents most of its API. Missing that would
+/// hide exactly the items worth knowing about.
+fn private_modules(files: &[ParsedFile]) -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut private = BTreeSet::new();
+    let mut public = BTreeSet::new();
+    for file in files {
+        if file.pack.language().id != "rust" {
+            continue;
+        }
+        collect_module_declarations(file.tree.root_node(), file, &mut private, &mut public);
+    }
+    // a name made public anywhere is treated as reachable, because suppressing
+    // a real API is worse than admitting one that is only sometimes reachable
+    private.retain(|name| !public.contains(name));
+    (private, public)
+}
+
+fn collect_module_declarations(
+    node: Node<'_>,
+    file: &ParsedFile,
+    private: &mut BTreeSet<String>,
+    public: &mut BTreeSet<String>,
+) {
+    // a public re-export makes everything it names reachable, whatever the
+    // visibility of the module it came from
+    if node.kind() == "use_declaration" {
+        let mut cursor = node.walk();
+        let exported = node
+            .children(&mut cursor)
+            .any(|child| child.kind() == "visibility_modifier");
+        if exported && let Some(text) = node_text(node, &file.source) {
+            public.extend(
+                text.split(|character: char| !character.is_alphanumeric() && character != '_')
+                    .filter(|segment| !segment.is_empty())
+                    .map(str::to_owned),
+            );
+        }
+    }
+    if node.kind() == "mod_item"
+        && let Some(name) = node
+            .child_by_field_name("name")
+            .and_then(|name| node_text(name, &file.source))
+    {
+        let mut cursor = node.walk();
+        let is_public = node
+            .children(&mut cursor)
+            .any(|child| child.kind() == "visibility_modifier");
+        if is_public {
+            public.insert(name.to_owned());
+        } else {
+            private.insert(name.to_owned());
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_module_declarations(child, file, private, public);
     }
 }
 
@@ -93,7 +175,7 @@ fn library_functions(files: &[ParsedFile]) -> Vec<LibraryFunction<'_>> {
         if file.pack.language().id != "rust" || !is_library_source(&file.path) {
             continue;
         }
-        collect_functions(file.tree.root_node(), file, None, &mut functions);
+        collect_functions(file.tree.root_node(), file, None, true, &mut functions);
     }
     functions
 }
@@ -207,6 +289,21 @@ pub fn derive_behavior(
     catalog: &ExternalCatalog,
     callable_path: &str,
 ) -> Result<DerivedLibraryBehavior> {
+    let parsed = parse_repository(source_root, parsers)?;
+    let functions = library_functions(&parsed.files);
+    derive_from(&functions, catalog, callable_path)
+}
+
+/// Derive one behavior from an already parsed library.
+///
+/// Parsing a crate is the expensive part and it does not depend on which
+/// callable is being derived, so deriving a whole library must not repeat it
+/// once per callable.
+fn derive_from(
+    functions: &[LibraryFunction<'_>],
+    catalog: &ExternalCatalog,
+    callable_path: &str,
+) -> Result<DerivedLibraryBehavior> {
     let callable = catalog
         .callables
         .iter()
@@ -214,9 +311,6 @@ pub fn derive_behavior(
         .ok_or_else(|| Error::MissingCallable {
             callable: callable_path.to_owned(),
         })?;
-
-    let parsed = parse_repository(source_root, parsers)?;
-    let functions = library_functions(&parsed.files);
     // Resolve a name to one implementation, preferring the container the
     // catalog qualified the callable with. Without a container to go on, an
     // ambiguous name cannot be resolved by syntax alone.
@@ -285,7 +379,7 @@ pub fn derive_behavior(
     // something, the type it constructs is where to look.
     if !describes_work(&form)
         && let Some(constructed) = constructed_type(&form)
-        && let Some(implementing) = principal_method(&functions, constructed)
+        && let Some(implementing) = principal_method(functions, constructed)
     {
         form = normalize(implementing)?;
         implementation.push(evidence(implementing)?);
@@ -295,6 +389,15 @@ pub fn derive_behavior(
         return Err(Error::UnsupportedImplementation {
             callable: callable_path.to_owned(),
             reason: "the implementation describes no sequence operation to compare".to_owned(),
+        });
+    }
+    if form.depth() > MAXIMUM_FORM_DEPTH {
+        return Err(Error::UnsupportedImplementation {
+            callable: callable_path.to_owned(),
+            reason: format!(
+                "the implementation nests {} levels, which describes a subsystem rather than a behavior",
+                form.depth()
+            ),
         });
     }
 
@@ -322,6 +425,15 @@ fn normalize(function: &LibraryFunction<'_>) -> Result<Form> {
     ))
 }
 
+/// The deepest form still worth keeping.
+///
+/// Each level of a form becomes two or three levels of JSON — a tag, a struct,
+/// sometimes a list — so a reader that refuses 128 container levels gives up
+/// well before a form is that deep. This is set low enough to stay clear of
+/// that, and a behavior anywhere near it describes a subsystem rather than an
+/// operation.
+pub const MAXIMUM_FORM_DEPTH: u32 = 32;
+
 /// The smallest form worth reporting as a match.
 ///
 /// Calibrated against derived behaviors and the code they are matched into.
@@ -331,7 +443,186 @@ fn normalize(function: &LibraryFunction<'_>) -> Result<Form> {
 /// too little to identify an API.
 pub const MINIMUM_REPORTABLE_SIZE: u32 = 6;
 
+/// The least a behavior must name to identify an API rather than a shape.
+///
+/// Measured against the behaviors that matter: `sorted` names a container and a
+/// method, which is two. A traversal that names nothing is every library's
+/// `map` and matches everything.
+pub const MINIMUM_ANCHORS: u32 = 2;
+
 /// Whether a derived behavior is specific enough to report when matched.
 pub fn is_reportable(form: &Form) -> bool {
-    form.size() >= MINIMUM_REPORTABLE_SIZE && describes_work(form)
+    form.size() >= MINIMUM_REPORTABLE_SIZE
+        && form.anchors() >= MINIMUM_ANCHORS
+        && describes_work(form)
+}
+
+/// Whether a function is part of a library's public surface.
+///
+/// A `pub` function is, and so is anything written inside a trait, because a
+/// trait's methods are reachable wherever the trait is. This is a syntactic
+/// approximation: it does not know whether the enclosing module is itself
+/// public, so it errs toward including too much rather than too little.
+fn is_public(
+    function: &LibraryFunction<'_>,
+    private_modules: &BTreeSet<String>,
+    exported: &BTreeSet<String>,
+) -> bool {
+    // A type or trait re-exported by name is reachable however private the
+    // module holding it. `pub use self::traits::Iterator` names the trait, not
+    // the module, which is how most of the standard library is presented.
+    let exported_container = function
+        .container
+        .as_deref()
+        .is_some_and(|container| exported.contains(container));
+
+    // Otherwise a `pub fn` inside a private module is not reachable, and a
+    // catalog full of items nobody can call produces behaviors nobody can be
+    // advised to use.
+    if !exported_container
+        && (!function.reachable
+            || function
+                .file
+                .path
+                .components()
+                .filter_map(|component| component.as_os_str().to_str())
+                .map(|segment| segment.trim_end_matches(".rs"))
+                .any(|segment| private_modules.contains(segment)))
+    {
+        return false;
+    }
+    if function.container.is_some()
+        && function
+            .node
+            .parent()
+            .and_then(|parent| parent.parent())
+            .is_some_and(|item| item.kind() == "trait_item")
+    {
+        return true;
+    }
+    let mut cursor = function.node.walk();
+    function
+        .node
+        .children(&mut cursor)
+        .any(|child| child.kind() == "visibility_modifier")
+}
+
+/// Build a callable catalog from a library's own source.
+///
+/// The published alternative is rustdoc JSON, which is more precise and costs a
+/// nightly toolchain and a successful build of the library. Derivation reads
+/// only a callable's path, so source is enough, and a catalog that needs
+/// nothing but the source keeps every dependency reachable.
+pub fn derive_catalog(
+    source_root: impl AsRef<Path>,
+    parsers: &ParserCatalog,
+    package: &str,
+    version: &str,
+) -> Result<ExternalCatalog> {
+    let parsed = parse_repository(source_root, parsers)?;
+    let functions = library_functions(&parsed.files);
+    catalog_from(&parsed, &functions, package, version)
+}
+
+/// Everything derived from one library, and what could not be read.
+pub struct DerivedLibrary {
+    pub catalog: ExternalCatalog,
+    pub behaviors: Vec<DerivedLibraryBehavior>,
+    /// Files the parser could not read.
+    ///
+    /// A grammar rejects a whole file when any part of it is beyond what it
+    /// knows, so an unsupported item silently removes everything beside it.
+    /// Reporting these keeps "this library has no behaviors" apart from "this
+    /// library could not be read", which look identical otherwise.
+    pub unparsed: Vec<String>,
+}
+
+/// Derive a library's whole catalog and every behavior it yields, parsing once.
+pub fn derive_library(
+    source_root: impl AsRef<Path>,
+    parsers: &ParserCatalog,
+    package: &str,
+    version: &str,
+) -> Result<DerivedLibrary> {
+    let parsed = parse_repository(source_root, parsers)?;
+    let functions = library_functions(&parsed.files);
+    let catalog = catalog_from(&parsed, &functions, package, version)?;
+    let behaviors = catalog
+        .callables
+        .iter()
+        // most callables describe no comparable behavior; that is expected
+        .filter_map(|callable| derive_from(&functions, &catalog, &callable.path).ok())
+        .collect();
+    let mut unparsed = parsed
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.path.display().to_string())
+        .collect::<Vec<_>>();
+    unparsed.sort();
+    unparsed.dedup();
+    Ok(DerivedLibrary {
+        catalog,
+        behaviors,
+        unparsed,
+    })
+}
+
+fn catalog_from(
+    parsed: &entl_tree_sitter::ParsedRepository,
+    functions: &[LibraryFunction<'_>],
+    package: &str,
+    version: &str,
+) -> Result<ExternalCatalog> {
+    use sha2::Digest;
+    let mut digest = sha2::Sha256::new();
+    let mut sources = parsed
+        .files
+        .iter()
+        .filter(|file| is_library_source(&file.path))
+        .map(|file| (file.path.clone(), file.provenance.source_sha256.clone()))
+        .collect::<Vec<_>>();
+    sources.sort();
+    for (path, content) in &sources {
+        digest.update(path.to_string_lossy().as_bytes());
+        digest.update(content.as_bytes());
+    }
+    let source_sha256 = format!("sha256:{:x}", digest.finalize());
+
+    let (private, exported) = private_modules(&parsed.files);
+    let mut callables = functions
+        .iter()
+        .filter(|function| is_public(function, &private, &exported))
+        .map(|function| {
+            let path = match &function.container {
+                Some(container) => format!("{package}::{container}::{}", function.name),
+                None => format!("{package}::{}", function.name),
+            };
+            let container = match &function.container {
+                Some(container) => CallableContainer::Trait {
+                    path: format!("{package}::{container}"),
+                },
+                None => CallableContainer::Module {
+                    path: package.to_owned(),
+                },
+            };
+            ExternalCallable {
+                path,
+                container,
+                // source says nothing about types
+                signature: None,
+            }
+        })
+        .collect::<Vec<_>>();
+    callables.sort();
+    callables.dedup();
+
+    Ok(ExternalCatalog {
+        schema: EXTERNAL_CATALOG_SCHEMA,
+        package: package.to_owned(),
+        version: version.to_owned(),
+        // zero records that no rustdoc format was involved
+        rustdoc_format: 0,
+        source_sha256,
+        callables,
+    })
 }

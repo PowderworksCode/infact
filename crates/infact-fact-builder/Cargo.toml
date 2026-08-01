@@ -11,3 +11,6 @@ description = "Explicit local builder protocol for verified Infact fact packs."
 infact-fact-pack = { path = "../infact-fact-pack" }
 tempfile = "3"
 thiserror.workspace = true
+
+[lints]
+workspace = true

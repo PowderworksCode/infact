@@ -90,12 +90,25 @@ pub fn collected(values: Vec<u32>) -> Vec<u32> {
     ordered
 }
 
-// counts, but also logs, so the behavior is not equivalent
-// expect: none
+// counts, and also logs. The counting is really there, but swapping in the
+// library call is not mechanical, so this is the weaker kind of finding.
+// expect-fused: itertools::Itertools::counts
 pub fn tally_and_log(values: Vec<String>) -> HashMap<String, usize> {
     let mut counts = HashMap::new();
     for value in values {
         eprintln!("{value}");
+        *counts.entry(value).or_default() += 1;
+    }
+    counts
+}
+
+// the statement in between seeds the accumulator, so the result is not what
+// the library would produce
+// expect: none
+pub fn seeded_before_counting(values: Vec<String>) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    counts.insert(String::from("seed"), 1);
+    for value in values {
         *counts.entry(value).or_default() += 1;
     }
     counts

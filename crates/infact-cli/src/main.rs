@@ -14,8 +14,8 @@ use infact_fact_pack::{
 };
 use infact_fact_registry::{FactPackRegistry, FactPackRegistryAuth};
 use infact_rust_behaviors::{
-    MacroDerivationRequest, analyze_repository as analyze_rust_behaviors, derive_behavior,
-    derive_macro_behavior,
+    LibraryPackRequest, MacroDerivationRequest, analyze_repository as analyze_rust_behaviors,
+    build_library_pack, derive_behavior, derive_library, derive_macro_behavior, registry_sources,
 };
 use infact_rust_effects::{RustStdFactPackRequest, build_std_fact_pack, derive_std_effects};
 use serde::Deserialize;
@@ -261,6 +261,31 @@ enum FactsLockCommand {
 
 #[derive(Debug, Subcommand)]
 enum BehaviorCommand {
+    /// Derive a whole library's behaviors from its source.
+    Library {
+        source_root: PathBuf,
+
+        #[arg(long)]
+        package: String,
+
+        #[arg(long)]
+        version: String,
+
+        #[arg(long)]
+        config: Option<PathBuf>,
+
+        #[arg(long = "parser-path")]
+        parser_paths: Vec<PathBuf>,
+
+        /// Directory to write the catalog and behaviors into.
+        #[arg(long)]
+        output: PathBuf,
+
+        /// Accept a pack built from source the parser could not fully read.
+        #[arg(long)]
+        allow_unread: bool,
+    },
+
     /// Derive a normalized behavior from a library implementation.
     Derive {
         source_root: PathBuf,
@@ -489,11 +514,51 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     mut parser_paths,
                 },
         } => {
-            if ecosystem != "cargo" || package != "core" {
+            if ecosystem != "cargo" {
                 return Err(format!(
-                    "fact-pack authoring is not implemented for {ecosystem}/{package}; supported subject is cargo/core"
+                    "Infact-pack authoring is not implemented for {ecosystem}; supported ecosystem is cargo"
                 )
                 .into());
+            }
+            // Any package other than the language itself is a library, and a
+            // library's behaviors come from its source, which Cargo has already
+            // unpacked locally.
+            if package != "core" {
+                let (file_config, base) = load_config(&repository, config.as_deref())?;
+                parser_paths.extend(
+                    file_config
+                        .parsers
+                        .search_paths
+                        .into_iter()
+                        .map(|path| resolve(&base, path)),
+                );
+                let parsers = parser_catalog(parser_paths)?;
+                let source_root = registry_sources(&package, &version)
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| {
+                        format!(
+                            "no unpacked source for {package} {version}; run `cargo fetch` first"
+                        )
+                    })?;
+                let built = build_library_pack(LibraryPackRequest {
+                    source_root: &source_root,
+                    package: &package,
+                    version: &version,
+                    revision,
+                    parsers: &parsers,
+                    output: &output,
+                })?;
+                println!(
+                    "{} {} revision {}  {}  {} callables  {} behaviors",
+                    built.manifest.name,
+                    built.manifest.subject.version,
+                    built.manifest.revision,
+                    built.layout.manifest_digest,
+                    built.callables,
+                    built.behaviors
+                );
+                return Ok(());
             }
             let (file_config, base) = load_config(&repository, config.as_deref())?;
             parser_paths.extend(
@@ -674,6 +739,71 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         .map(|origin| format!("  {origin}"))
                         .unwrap_or_default()
                 );
+            }
+        }
+        Command::Behavior {
+            command:
+                BehaviorCommand::Library {
+                    source_root,
+                    package,
+                    version,
+                    config,
+                    mut parser_paths,
+                    output,
+                    allow_unread,
+                },
+        } => {
+            let (file_config, base) = load_config(&source_root, config.as_deref())?;
+            parser_paths.extend(
+                file_config
+                    .parsers
+                    .search_paths
+                    .into_iter()
+                    .map(|path| resolve(&base, path)),
+            );
+            let parsers = parser_catalog(parser_paths)?;
+            let derived = derive_library(&source_root, &parsers, &package, &version)?;
+            let (catalog, behaviors) = (&derived.catalog, &derived.behaviors);
+
+            std::fs::create_dir_all(output.join("api"))?;
+            std::fs::create_dir_all(output.join("behaviors"))?;
+            std::fs::write(
+                output.join("api").join(format!("{package}-{version}.json")),
+                serde_json::to_vec_pretty(&catalog)?,
+            )?;
+
+            for behavior in behaviors {
+                let leaf = behavior
+                    .callable_path
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(&behavior.callable_path)
+                    .replace('_', "-");
+                std::fs::write(
+                    output
+                        .join("behaviors")
+                        .join(format!("{package}-{leaf}-{version}.json")),
+                    serde_json::to_vec_pretty(behavior)?,
+                )?;
+            }
+            println!(
+                "{package} {version}  {} public callables  {} behaviors",
+                catalog.callables.len(),
+                behaviors.len()
+            );
+            // Source the parser cannot read is a hole in the result, not a
+            // property of the library. Reporting it quietly invites the hole to
+            // be mistaken for an answer, so this fails.
+            if !derived.unparsed.is_empty() && !allow_unread {
+                for path in &derived.unparsed {
+                    eprintln!("  unread: {path}");
+                }
+                return Err(format!(
+                    "{} of the library's files could not be parsed, so anything they define is missing from this pack; \
+                     add a rewrite in entl-tree-sitter's dialect module, or pass --allow-unread to accept the gap",
+                    derived.unparsed.len()
+                )
+                .into());
             }
         }
         Command::Behavior {

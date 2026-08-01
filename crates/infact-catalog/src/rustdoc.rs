@@ -79,7 +79,7 @@ pub fn build_catalog(request: CatalogRequest<'_>) -> Result<ExternalCatalog> {
                 container: CallableContainer::Trait {
                     path: trait_path.clone(),
                 },
-                signature: signature(function)?,
+                signature: Some(signature(function)?),
             });
         }
     }
@@ -110,7 +110,7 @@ pub fn build_catalog(request: CatalogRequest<'_>) -> Result<ExternalCatalog> {
         callables.push(ExternalCallable {
             path,
             container: CallableContainer::Module { path: module },
-            signature: signature(function)?,
+            signature: Some(signature(function)?),
         });
     }
 
@@ -420,7 +420,7 @@ mod tests {
         assert_eq!(catalog.callables.len(), 2);
         assert_eq!(catalog.callables[0].path, "example::ExampleTools::render");
         assert!(matches!(
-            catalog.callables[0].signature.output,
+            catalog.callables[0].signature.as_ref().unwrap().output,
             Some(ExternalType::Path { ref path, .. }) if path == "String"
         ));
         assert_eq!(catalog.callables[1].path, "example::render_all");

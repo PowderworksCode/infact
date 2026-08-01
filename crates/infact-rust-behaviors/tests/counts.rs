@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! End-to-end derivation and matching, with no per-API machinery involved.
 
 use std::collections::BTreeSet;
@@ -145,9 +146,13 @@ fn grouping_and_counting_are_matched_separately() {
     );
 }
 
-/// A loop that does something extra is not the library's behavior.
+/// A loop that also does something else still counts, but not interchangeably.
+///
+/// The behavior is genuinely present, so hiding it would lose a real finding.
+/// Replacing the loop with the library call is not a mechanical substitution,
+/// so it cannot be reported as though it were.
 #[test]
-fn an_extra_effect_in_the_loop_prevents_a_match() {
+fn an_extra_effect_in_the_loop_makes_the_match_fused() {
     let report = analyze_repository(
         crate_root().join("tests/fixtures/counts"),
         &parsers(),
@@ -156,15 +161,32 @@ fn an_extra_effect_in_the_loop_prevents_a_match() {
         &[],
     )
     .unwrap();
-    let files = report
+    let logging = report
         .matches
         .iter()
-        .filter_map(|fact| fact.value.span.path.file_name()?.to_str())
-        .collect::<BTreeSet<_>>();
-    assert!(
-        !files.contains("not_counts.rs"),
-        "a loop that also logs is not `counts`: {files:?}"
-    );
+        .find(|fact| {
+            fact.value
+                .span
+                .path
+                .file_name()
+                .is_some_and(|name| name == "not_counts.rs")
+        })
+        .expect("the loop that counts and logs is still counting");
+    assert!(logging.value.fused, "counting alongside logging is fused");
+
+    // the plain reimplementation is not weakened by the existence of fused ones
+    let plain = report
+        .matches
+        .iter()
+        .find(|fact| {
+            fact.value
+                .span
+                .path
+                .file_name()
+                .is_some_and(|name| name == "lib.rs")
+        })
+        .expect("the plain loop still matches");
+    assert!(!plain.value.fused);
 }
 
 /// A library spells one behavior several ways. Reporting every spelling
@@ -237,6 +259,30 @@ fn a_behavior_matches_when_its_result_is_consumed_rather_than_returned() {
         .map(|fact| fact.value.target.path())
         .collect::<Vec<_>>();
     assert_eq!(matched, ["itertools::Itertools::counts"]);
+}
+
+/// A finding has to point at the code, not the function around it.
+#[test]
+fn a_match_is_reported_against_the_statements_that_carry_it() {
+    let report = analyze_repository(
+        crate_root().join("tests/fixtures/consumed"),
+        &parsers(),
+        &[catalog()],
+        &[behavior("itertools::Itertools::counts")],
+        &[],
+    )
+    .unwrap();
+    let span = &report.matches[0].value.span;
+    // the fixture's function spans several lines; the behavior is the two
+    // statements that build the map
+    let width = span.end_line - span.start_line + 1;
+    assert!(
+        width <= 5,
+        "expected the statements, got {width} lines ({}-{})",
+        span.start_line,
+        span.end_line
+    );
+    assert!(span.start_line > 4, "the report should skip the signature");
 }
 
 /// Matching requires a catalog that vouches for the behavior's provenance.

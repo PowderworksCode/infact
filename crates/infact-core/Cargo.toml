@@ -10,3 +10,6 @@ description = "Backend-independent fact and provenance types for Infact."
 [dependencies]
 infact-normalize = { path = "../infact-normalize" }
 serde.workspace = true
+
+[lints]
+workspace = true

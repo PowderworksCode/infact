@@ -66,6 +66,19 @@ pub struct NormalizedFunction {
     pub start_line: u32,
     pub end_line: u32,
     pub form: Form,
+    /// Where each top-level statement of the body is, in the same order as the
+    /// steps of `form` when `form` is a sequence. This is what lets a match be
+    /// reported against statements rather than the whole function.
+    pub statements: Vec<StatementSpan>,
+}
+
+/// The source extent of one statement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatementSpan {
+    pub start_byte: u64,
+    pub end_byte: u64,
+    pub start_line: u32,
+    pub end_line: u32,
 }
 
 fn text<'a>(node: Node<'_>, source: &'a [u8]) -> &'a str {
@@ -640,6 +653,28 @@ fn parameter_names<'a>(node: Node<'a>, source: &'a [u8], names: &mut Vec<&'a str
     }
 }
 
+/// The source extent of each top-level statement in a body.
+///
+/// Kept in the order `block` walks them, so step *n* of a sequence form is
+/// statement *n* here.
+fn statement_spans(body: Node<'_>) -> Vec<StatementSpan> {
+    named_children(body)
+        .into_iter()
+        .filter(|child| {
+            !matches!(
+                child.kind(),
+                "line_comment" | "block_comment" | "attribute_item"
+            )
+        })
+        .map(|child| StatementSpan {
+            start_byte: child.start_byte() as u64,
+            end_byte: child.end_byte() as u64,
+            start_line: u32::try_from(child.start_position().row + 1).unwrap_or(u32::MAX),
+            end_line: u32::try_from(child.end_position().row + 1).unwrap_or(u32::MAX),
+        })
+        .collect()
+}
+
 /// Normalize one function, declaring its parameters before its body.
 ///
 /// Parameters are what let a call be read correctly: without them every bare
@@ -693,6 +728,10 @@ pub fn normalize_file(file: &ParsedFile) -> Vec<NormalizedFunction> {
                 start_line: u32::try_from(node.start_position().row + 1).unwrap_or(u32::MAX),
                 end_line: u32::try_from(node.end_position().row + 1).unwrap_or(u32::MAX),
                 form: normalize_function(node, &file.source),
+                statements: node
+                    .child_by_field_name("body")
+                    .map(statement_spans)
+                    .unwrap_or_default(),
             })
         })
         .collect()
