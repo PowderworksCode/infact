@@ -1,0 +1,92 @@
+{
+  "schema": 1,
+  "callable_package": "itertools",
+  "callable_version": "0.15.0",
+  "callable_path": "itertools::Itertools::into_group_map_by",
+  "catalog_sha256": "a09081972a2d12d35f69eb0ad376b24490cea4a4e3f8c54c419263bf6ce4e8a3",
+  "implementation": [
+    {
+      "callable_path": "into_group_map_by",
+      "span": {
+        "path": "src/lib.rs",
+        "start_byte": 142804,
+        "end_byte": 143058,
+        "start_line": 4107,
+        "end_line": 4114,
+        "start_column": null,
+        "end_column": null
+      },
+      "source_sha256": "sha256:cac2e34f5b83156078fbbb0137e173c1b4aa63528259f82100e16d7501692ee8"
+    },
+    {
+      "callable_path": "into_group_map_by_with_hasher",
+      "span": {
+        "path": "src/lib.rs",
+        "start_byte": 144502,
+        "end_byte": 144840,
+        "start_line": 4147,
+        "end_line": 4159,
+        "start_column": null,
+        "end_column": null
+      },
+      "source_sha256": "sha256:cac2e34f5b83156078fbbb0137e173c1b4aa63528259f82100e16d7501692ee8"
+    },
+    {
+      "callable_path": "into_group_map_by_with_hasher",
+      "span": {
+        "path": "src/group_map.rs",
+        "start_byte": 665,
+        "end_byte": 961,
+        "start_line": 27,
+        "end_line": 39,
+        "start_column": null,
+        "end_column": null
+      },
+      "source_sha256": "sha256:a34116bc64f73ebff084077843157a11c23b8245f6efac73ff93ff9376156dd8"
+    }
+  ],
+  "program": {
+    "call": {
+      "callee": {
+        "path": "into_group_map_with_hasher"
+      },
+      "arguments": [
+        {
+          "transform": {
+            "sequence": {
+              "free": 0
+            },
+            "item": {
+              "binding": 0
+            },
+            "body": {
+              "opaque": {
+                "kind": "tuple_expression",
+                "parts": [
+                  {
+                    "call": {
+                      "callee": {
+                        "free": 1
+                      },
+                      "arguments": [
+                        {
+                          "local": 0
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "local": 0
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "free": 2
+        }
+      ]
+    }
+  }
+}

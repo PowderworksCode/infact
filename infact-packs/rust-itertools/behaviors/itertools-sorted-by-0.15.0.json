@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "callable_package": "itertools",
+  "callable_version": "0.15.0",
+  "callable_path": "itertools::Itertools::sorted_by",
+  "catalog_sha256": "a09081972a2d12d35f69eb0ad376b24490cea4a4e3f8c54c419263bf6ce4e8a3",
+  "implementation": [
+    {
+      "callable_path": "sorted_by",
+      "span": {
+        "path": "src/lib.rs",
+        "start_byte": 117354,
+        "end_byte": 117597,
+        "start_line": 3409,
+        "end_line": 3417,
+        "start_column": null,
+        "end_column": null
+      },
+      "source_sha256": "sha256:cac2e34f5b83156078fbbb0137e173c1b4aa63528259f82100e16d7501692ee8"
+    }
+  ],
+  "program": {
+    "sequence": [
+      {
+        "let": {
+          "pattern": {
+            "binding": 0
+          },
+          "value": {
+            "collect": {
+              "sequence": {
+                "free": 0
+              },
+              "container": "Vec"
+            }
+          }
+        }
+      },
+      {
+        "method": {
+          "name": "sort_by",
+          "receiver": {
+            "local": 0
+          },
+          "arguments": [
+            {
+              "free": 1
+            }
+          ]
+        }
+      },
+      {
+        "local": 0
+      }
+    ]
+  }
+}

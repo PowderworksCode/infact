@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Typed consumer facade for running Infact analyses from verified fact packs."
 
 [dependencies]
+entl-semantics = { path = "../../../entl/crates/entl-semantics" }
 entl-tree-sitter.workspace = true
 infact-core = { path = "../infact-core" }
 infact-duplication = { path = "../infact-duplication" }

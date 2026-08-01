@@ -12,6 +12,8 @@ entl-codebase.workspace = true
 entl-tree-sitter.workspace = true
 heck.workspace = true
 infact-core = { path = "../infact-core" }
+infact-normalize = { path = "../infact-normalize" }
+infact-rust-normalize = { path = "../infact-rust-normalize" }
 serde.workspace = true
 sha2.workspace = true
 thiserror.workspace = true

@@ -1,150 +1,267 @@
+//! End-to-end derivation and matching, with no per-API machinery involved.
+
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use entl_tree_sitter::ParserCatalog;
-use infact_core::{
-    DerivedLibraryBehavior, ExternalCatalog, LibraryBehaviorPattern, NormalizedOperation,
-    NormalizedValue,
-};
+use infact_core::{ExternalCatalog, LibraryTarget};
 use infact_rust_behaviors::{analyze_repository, derive_behavior};
 
-#[test]
-fn derives_counts_from_a_bound_accumulator_loop_and_catalog_signature() {
-    let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let parser_discovery = ParserCatalog::discover([crate_root.join("../../../entl/parser-packs")]);
-    assert!(
-        parser_discovery.errors.is_empty(),
-        "{:?}",
-        parser_discovery.errors
-    );
-    let catalog: ExternalCatalog = serde_json::from_slice(
+fn crate_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn parsers() -> ParserCatalog {
+    let discovery = ParserCatalog::discover([crate_root().join("../../../entl/parser-packs")]);
+    assert!(discovery.errors.is_empty(), "{:?}", discovery.errors);
+    discovery.catalog
+}
+
+fn catalog() -> ExternalCatalog {
+    serde_json::from_slice(
         &std::fs::read(
-            crate_root.join("../../fact-packs/rust-itertools/api/itertools-0.15.0.json"),
+            crate_root().join("../../infact-packs/rust-itertools/api/itertools-0.15.0.json"),
         )
         .unwrap(),
     )
-    .unwrap();
-    let behaviors = [
-        "itertools-counts-0.15.0.json",
-        "itertools-counts-by-0.15.0.json",
-        "itertools-into-group-map-0.15.0.json",
-        "itertools-into-group-map-by-0.15.0.json",
-    ]
-    .map(|filename| {
-        serde_json::from_slice::<DerivedLibraryBehavior>(
-            &std::fs::read(
-                crate_root
-                    .join("../../fact-packs/rust-itertools/behaviors")
-                    .join(filename),
-            )
-            .unwrap(),
-        )
-        .unwrap()
-    });
-    let repository = crate_root.join("tests/fixtures/counts");
+    .unwrap()
+}
 
-    let derived = derive_behavior(
-        crate_root.join("tests/fixtures/itertools-source"),
-        &parser_discovery.catalog,
-        &catalog,
-        "itertools::Itertools::counts",
+fn behavior(callable: &str) -> infact_core::DerivedLibraryBehavior {
+    derive_behavior(
+        crate_root().join("tests/fixtures/itertools-source"),
+        &parsers(),
+        &catalog(),
+        callable,
     )
-    .unwrap();
-    assert_eq!(derived.implementation.len(), 2);
-    assert_eq!(
-        derived.program.operations,
-        vec![
-            NormalizedOperation::CreateMap {
-                output: NormalizedValue("map".to_owned()),
-            },
-            NormalizedOperation::Iterate {
-                input: NormalizedValue("input".to_owned()),
-                item: NormalizedValue("item".to_owned()),
-                body: vec![NormalizedOperation::IncrementMapEntry {
-                    map: NormalizedValue("map".to_owned()),
-                    key: NormalizedValue("item".to_owned()),
-                    amount: 1,
-                }],
-            },
-            NormalizedOperation::Return {
-                value: NormalizedValue("map".to_owned()),
-            },
-        ]
-    );
-    for (callable, expected) in [
-        ("itertools::Itertools::counts", &behaviors[0]),
-        ("itertools::Itertools::counts_by", &behaviors[1]),
-        ("itertools::Itertools::into_group_map", &behaviors[2]),
-        ("itertools::Itertools::into_group_map_by", &behaviors[3]),
-    ] {
-        let derived = derive_behavior(
-            crate_root.join("tests/fixtures/itertools-source"),
-            &parser_discovery.catalog,
-            &catalog,
-            callable,
-        )
-        .unwrap();
-        assert_eq!(derived.program, expected.program);
-    }
+    .unwrap()
+}
 
+/// Derivation follows a public wrapper into the helper that does the work,
+/// without being told that this particular API delegates.
+#[test]
+fn derivation_follows_delegation_to_the_implementing_helper() {
+    let derived = behavior("itertools::Itertools::counts");
+
+    assert_eq!(
+        derived.implementation.len(),
+        2,
+        "the wrapper and the helper it delegates to are both evidence"
+    );
+    assert_eq!(derived.callable_path, "itertools::Itertools::counts");
+    assert_eq!(
+        derived.program.to_string(),
+        "(do (let v0 (construct HashMap)) \
+         (traverse f0 v1 (assign += (method or_default (method entry v0 v1)) (num 1))) v0)"
+    );
+}
+
+/// A hand-written loop matches a combinator implementation of the same
+/// behavior. This is the whole point of the mechanism.
+#[test]
+fn a_repository_loop_matches_the_derived_library_behavior() {
     let report = analyze_repository(
-        &repository,
-        &parser_discovery.catalog,
-        std::slice::from_ref(&catalog),
-        &behaviors,
+        crate_root().join("tests/fixtures/counts"),
+        &parsers(),
+        &[catalog()],
+        &[behavior("itertools::Itertools::counts")],
         &[],
     )
     .unwrap();
-    assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
-    assert_eq!(report.matches.len(), 4);
-    let behavior_match = report
+
+    let paths = report
         .matches
         .iter()
-        .find(|fact| fact.value.target.path() == "itertools::Itertools::counts")
-        .unwrap();
-    let behavior_match = &behavior_match.value;
-    assert_eq!(behavior_match.span.path, Path::new("src/lib.rs"));
-    assert_eq!(behavior_match.span.start_line, 4);
-    assert_eq!(behavior_match.span.end_line, 8);
-    assert_eq!(
-        behavior_match.pattern,
-        LibraryBehaviorPattern::IteratorManualCounts
-    );
-    assert_eq!(behavior_match.target.path(), "itertools::Itertools::counts");
-    assert_eq!(
-        report
-            .matches
-            .iter()
-            .map(|fact| fact.value.target.path())
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            "itertools::Itertools::counts",
-            "itertools::Itertools::counts_by",
-            "itertools::Itertools::into_group_map",
-            "itertools::Itertools::into_group_map_by",
-        ])
-    );
+        .map(|fact| fact.value.target.path())
+        .collect::<Vec<_>>();
+    assert!(paths.contains(&"itertools::Itertools::counts"), "{paths:?}");
+    let matched = &report.matches[0].value;
+    assert!(matched.span.path.ends_with("lib.rs"), "{matched:?}");
+    assert!(matches!(matched.target, LibraryTarget::Callable { .. }));
+}
 
-    let mut incompatible = catalog.clone();
-    incompatible
-        .callables
-        .retain(|callable| callable.path != "itertools::Itertools::counts");
+/// Code that does something else must not match, or every finding is noise.
+#[test]
+fn unrelated_repository_code_does_not_match() {
+    // the join fixture collects and joins; it counts nothing
     let report = analyze_repository(
-        &repository,
-        &parser_discovery.catalog,
-        &[incompatible],
-        &behaviors,
+        crate_root().join("tests/fixtures/join"),
+        &parsers(),
+        &[catalog()],
+        &[behavior("itertools::Itertools::counts")],
         &[],
     )
     .unwrap();
-    assert!(
-        report
-            .matches
-            .iter()
-            .all(|fact| fact.value.target.path() != "itertools::Itertools::counts")
+    assert!(report.matches.is_empty(), "{:?}", report.matches);
+}
+
+/// Two behaviors that differ only in what the loop body does stay distinct, and
+/// each is reported against the function that actually reimplements it.
+#[test]
+fn grouping_and_counting_are_matched_separately() {
+    let counts = behavior("itertools::Itertools::counts");
+    let group_map = behavior("itertools::Itertools::into_group_map");
+    assert_ne!(
+        counts.program, group_map.program,
+        "incrementing an entry is not pushing to one"
     );
 
-    let report =
-        analyze_repository(repository, &parser_discovery.catalog, &[catalog], &[], &[]).unwrap();
+    let report = analyze_repository(
+        crate_root().join("tests/fixtures/counts"),
+        &parsers(),
+        &[catalog()],
+        &[counts, group_map],
+        &[],
+    )
+    .unwrap();
+
+    // the fixture reimplements counting in lib.rs and grouping in more.rs
+    let located = report
+        .matches
+        .iter()
+        .map(|fact| {
+            (
+                fact.value.target.path(),
+                fact.value
+                    .span
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    assert!(
+        located.contains(&("itertools::Itertools::counts", "lib.rs")),
+        "{located:?}"
+    );
+    assert!(
+        located.contains(&("itertools::Itertools::into_group_map", "more.rs")),
+        "{located:?}"
+    );
+    assert!(
+        !located.contains(&("itertools::Itertools::counts", "more.rs")),
+        "grouping must not be reported as counting: {located:?}"
+    );
+}
+
+/// A loop that does something extra is not the library's behavior.
+#[test]
+fn an_extra_effect_in_the_loop_prevents_a_match() {
+    let report = analyze_repository(
+        crate_root().join("tests/fixtures/counts"),
+        &parsers(),
+        &[catalog()],
+        &[behavior("itertools::Itertools::counts")],
+        &[],
+    )
+    .unwrap();
+    let files = report
+        .matches
+        .iter()
+        .filter_map(|fact| fact.value.span.path.file_name()?.to_str())
+        .collect::<BTreeSet<_>>();
+    assert!(
+        !files.contains("not_counts.rs"),
+        "a loop that also logs is not `counts`: {files:?}"
+    );
+}
+
+/// A library spells one behavior several ways. Reporting every spelling
+/// against the same code is noise, so only the plainest is named.
+#[test]
+fn behaviors_that_differ_only_in_spelling_are_reported_once() {
+    let variants = [
+        "itertools::Itertools::counts",
+        "itertools::Itertools::counts_with_hasher",
+    ]
+    .map(behavior);
+    assert_eq!(
+        variants[0].program, variants[1].program,
+        "the hasher is supplied by the caller, so the behavior is the same"
+    );
+
+    let report = analyze_repository(
+        crate_root().join("tests/fixtures/counts"),
+        &parsers(),
+        &[catalog()],
+        &variants,
+        &[],
+    )
+    .unwrap();
+    let counting = report
+        .matches
+        .iter()
+        .filter(|fact| {
+            fact.value
+                .span
+                .path
+                .file_name()
+                .is_some_and(|name| name == "lib.rs")
+        })
+        .map(|fact| fact.value.target.path())
+        .collect::<Vec<_>>();
+    assert_eq!(counting, ["itertools::Itertools::counts"]);
+}
+
+/// A combinator does its work in the type it returns, not where it is called.
+#[test]
+fn a_returned_adaptor_is_followed_into_its_implementation() {
+    let derived = behavior("itertools::Itertools::map_into");
+    let steps = derived
+        .implementation
+        .iter()
+        .map(|evidence| evidence.callable_path.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        steps.contains(&"next"),
+        "derivation should reach the adaptor's iterator method: {steps:?}"
+    );
+}
+
+/// Real code rarely ends a behavior by naming what it built; it uses the value.
+/// Requiring that closing step would miss most genuine reimplementations.
+#[test]
+fn a_behavior_matches_when_its_result_is_consumed_rather_than_returned() {
+    let report = analyze_repository(
+        crate_root().join("tests/fixtures/consumed"),
+        &parsers(),
+        &[catalog()],
+        &[behavior("itertools::Itertools::counts")],
+        &[],
+    )
+    .unwrap();
+    let matched = report
+        .matches
+        .iter()
+        .map(|fact| fact.value.target.path())
+        .collect::<Vec<_>>();
+    assert_eq!(matched, ["itertools::Itertools::counts"]);
+}
+
+/// Matching requires a catalog that vouches for the behavior's provenance.
+#[test]
+fn a_behavior_without_its_catalog_is_not_reported() {
+    let report = analyze_repository(
+        crate_root().join("tests/fixtures/counts"),
+        &parsers(),
+        &[],
+        &[behavior("itertools::Itertools::counts")],
+        &[],
+    )
+    .unwrap();
+    assert!(report.matches.is_empty(), "{:?}", report.matches);
+}
+
+#[test]
+fn no_behaviors_means_no_matches() {
+    let report = analyze_repository(
+        crate_root().join("tests/fixtures/counts"),
+        &parsers(),
+        &[catalog()],
+        &[],
+        &[],
+    )
+    .unwrap();
     assert!(report.matches.is_empty());
 }

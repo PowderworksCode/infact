@@ -1,0 +1,150 @@
+{
+  "schema": 1,
+  "provenance": {
+    "provider": "rust.mir",
+    "provider_version": "0.0.0",
+    "toolchain": "rustc 1.99.0-nightly (b6839f4d0 2026-07-17)",
+    "unit": "imports"
+  },
+  "coverage": {
+    "definitions": true,
+    "references": false,
+    "call_edges": true,
+    "types": false,
+    "implements": false
+  },
+  "definitions": [
+    {
+      "id": "imports::caller",
+      "kind": "function",
+      "name": "imports::caller",
+      "container": null,
+      "visibility": "unknown",
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/imports/src/lib.rs",
+        "start_line": 17,
+        "start_column": 1,
+        "end_line": 17,
+        "end_column": 16
+      }
+    },
+    {
+      "id": "imports::pure",
+      "kind": "function",
+      "name": "imports::pure",
+      "container": null,
+      "visibility": "unknown",
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/imports/src/lib.rs",
+        "start_line": 21,
+        "start_column": 1,
+        "end_line": 21,
+        "end_column": 23
+      }
+    },
+    {
+      "id": "imports::qualified",
+      "kind": "function",
+      "name": "imports::qualified",
+      "container": null,
+      "visibility": "unknown",
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/imports/src/lib.rs",
+        "start_line": 5,
+        "start_column": 1,
+        "end_line": 5,
+        "end_column": 19
+      }
+    },
+    {
+      "id": "imports::via_item",
+      "kind": "function",
+      "name": "imports::via_item",
+      "container": null,
+      "visibility": "unknown",
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/imports/src/lib.rs",
+        "start_line": 13,
+        "start_column": 1,
+        "end_line": 13,
+        "end_column": 18
+      }
+    },
+    {
+      "id": "imports::via_module",
+      "kind": "function",
+      "name": "imports::via_module",
+      "container": null,
+      "visibility": "unknown",
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/imports/src/lib.rs",
+        "start_line": 9,
+        "start_column": 1,
+        "end_line": 9,
+        "end_column": 20
+      }
+    }
+  ],
+  "references": [],
+  "call_edges": [
+    {
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/imports/src/lib.rs",
+        "start_line": 6,
+        "start_column": 13,
+        "end_line": 6,
+        "end_column": 31
+      },
+      "from": "imports::qualified",
+      "to": [
+        "std::fs::read"
+      ],
+      "dispatch": "static"
+    },
+    {
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/imports/src/lib.rs",
+        "start_line": 10,
+        "start_column": 13,
+        "end_line": 10,
+        "end_column": 26
+      },
+      "from": "imports::via_module",
+      "to": [
+        "std::fs::read"
+      ],
+      "dispatch": "static"
+    },
+    {
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/imports/src/lib.rs",
+        "start_line": 14,
+        "start_column": 13,
+        "end_line": 14,
+        "end_column": 32
+      },
+      "from": "imports::via_item",
+      "to": [
+        "std::fs::read_to_string"
+      ],
+      "dispatch": "static"
+    },
+    {
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/imports/src/lib.rs",
+        "start_line": 18,
+        "start_column": 5,
+        "end_line": 18,
+        "end_column": 17
+      },
+      "from": "imports::caller",
+      "to": [
+        "imports::via_module"
+      ],
+      "dispatch": "static"
+    }
+  ],
+  "types": [],
+  "implements": [],
+  "gaps": []
+}

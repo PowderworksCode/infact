@@ -1,5 +1,9 @@
 //! Source-backed effect summaries for selected Rust standard-library modules.
 
+mod observed;
+
+pub use observed::{analyze_observed_effects, unexplained_destinations};
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -229,6 +233,11 @@ pub fn analyze_repository_effects(
         .iter()
         .map(|callable| (callable.id, callable))
         .collect::<BTreeMap<_, _>>();
+    // the evidence search needs only names
+    let paths_by_id = callables
+        .iter()
+        .map(|callable| (callable.id, callable.path.clone()))
+        .collect::<BTreeMap<_, _>>();
 
     let mut effects = Vec::new();
     let mut effectful = BTreeSet::new();
@@ -242,7 +251,7 @@ pub fn analyze_repository_effects(
             effect,
             &calls_by_caller,
             &seeds_by_callable,
-            &callable_by_id,
+            &paths_by_id,
         ) else {
             continue;
         };
@@ -409,6 +418,11 @@ pub fn derive_std_effects(
         .iter()
         .map(|callable| (callable.id, callable))
         .collect::<BTreeMap<_, _>>();
+    // the evidence search needs only names
+    let paths_by_id = callables
+        .iter()
+        .map(|callable| (callable.id, callable.path.clone()))
+        .collect::<BTreeMap<_, _>>();
 
     let mut summaries = BTreeMap::<String, Vec<Effect>>::new();
     for relation in propagated {
@@ -440,7 +454,7 @@ pub fn derive_std_effects(
                         *effect,
                         &calls_by_caller,
                         &seeds_by_callable,
-                        &callable_by_id,
+                        &paths_by_id,
                     )
                 })
                 .collect();
@@ -979,7 +993,9 @@ fn evidence_path(
     effect: Effect,
     calls: &BTreeMap<u64, Vec<&ResolvedCall>>,
     seeds: &BTreeMap<u64, Vec<&EffectSeed>>,
-    callables: &BTreeMap<u64, &Callable>,
+    // only each callable's path is needed, so the syntax-resolved and the
+    // observation-resolved graphs can share this search
+    callables: &BTreeMap<u64, String>,
 ) -> Option<CallEffectEvidence> {
     let mut queue = VecDeque::from([(start, Vec::<CallEdgeEvidence>::new())]);
     let mut seen = BTreeSet::new();
@@ -992,7 +1008,7 @@ fn evidence_path(
             .and_then(|seeds| seeds.iter().find(|seed| seed.effect == effect))
         {
             let mut complete = path;
-            let caller = callables.get(&current)?.path.clone();
+            let caller = callables.get(&current)?.clone();
             complete.push(CallEdgeEvidence {
                 caller,
                 callee: seed.origin.clone(),
@@ -1014,8 +1030,8 @@ fn evidence_path(
                 };
                 let mut next_path = path.clone();
                 next_path.push(CallEdgeEvidence {
-                    caller: caller.path.clone(),
-                    callee: callee.path.clone(),
+                    caller: caller.clone(),
+                    callee: callee.clone(),
                     call: call.span.clone(),
                 });
                 queue.push_back((call.callee, next_path));
@@ -1156,14 +1172,20 @@ fn decode_effect(effect: u8) -> Effect {
 fn source_span(path: &Path, node: Node<'_>) -> Result<SourceSpan> {
     Ok(SourceSpan {
         path: path.to_path_buf(),
-        start_byte: u64::try_from(node.start_byte())
-            .map_err(|_| Error::SourceTooLarge { path: path.into() })?,
-        end_byte: u64::try_from(node.end_byte())
-            .map_err(|_| Error::SourceTooLarge { path: path.into() })?,
+        start_byte: Some(
+            u64::try_from(node.start_byte())
+                .map_err(|_| Error::SourceTooLarge { path: path.into() })?,
+        ),
+        end_byte: Some(
+            u64::try_from(node.end_byte())
+                .map_err(|_| Error::SourceTooLarge { path: path.into() })?,
+        ),
         start_line: u32::try_from(node.start_position().row + 1)
             .map_err(|_| Error::SourceTooLarge { path: path.into() })?,
         end_line: u32::try_from(node.end_position().row + 1)
             .map_err(|_| Error::SourceTooLarge { path: path.into() })?,
+        start_column: u32::try_from(node.start_position().column + 1).ok(),
+        end_column: u32::try_from(node.end_position().column + 1).ok(),
     })
 }
 
@@ -1272,10 +1294,12 @@ mod tests {
             is_unsafe: false,
             span: SourceSpan {
                 path: "std/src/env.rs".into(),
-                start_byte: 0,
-                end_byte: 1,
+                start_byte: Some(0),
+                end_byte: Some(1),
                 start_line: 1,
                 end_line: 1,
+                start_column: None,
+                end_column: None,
             },
             syntax_calls: Vec::new(),
         };
@@ -1306,10 +1330,12 @@ mod tests {
     fn propagates_effects_across_calls() {
         let span = SourceSpan {
             path: "std/src/fs.rs".into(),
-            start_byte: 0,
-            end_byte: 1,
+            start_byte: Some(0),
+            end_byte: Some(1),
             start_line: 1,
             end_line: 1,
+            start_column: None,
+            end_column: None,
         };
         let calls = vec![
             ResolvedCall {

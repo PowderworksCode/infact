@@ -458,28 +458,40 @@ fn substantially_overlaps(left: &SourceSpan, right: &SourceSpan) -> bool {
     if left.path != right.path {
         return false;
     }
-    let overlap = left
-        .end_byte
-        .min(right.end_byte)
-        .saturating_sub(left.start_byte.max(right.start_byte));
-    let shorter = left
-        .end_byte
-        .saturating_sub(left.start_byte)
-        .min(right.end_byte.saturating_sub(right.start_byte));
+    // overlap is a question about exact offsets, so a span without them
+    // cannot answer it
+    let (Some((left_start, left_end)), Some((right_start, right_end))) =
+        (left.byte_range(), right.byte_range())
+    else {
+        return false;
+    };
+    let overlap = left_end
+        .min(right_end)
+        .saturating_sub(left_start.max(right_start));
+    let shorter = left_end
+        .saturating_sub(left_start)
+        .min(right_end.saturating_sub(right_start));
     shorter > 0 && overlap.saturating_mul(5) >= shorter.saturating_mul(4)
 }
 
 fn comparison_unit(file: &TokenizedFile, matched: &SourceSpan) -> SourceSpan {
+    // the enclosing unit is found by offset, so a span without offsets is
+    // already the best answer available
+    let Some((matched_start, matched_end)) = matched.byte_range() else {
+        return matched.clone();
+    };
     file.units
         .iter()
-        .filter(|unit| unit.start_byte <= matched.start_byte && unit.end_byte >= matched.end_byte)
+        .filter(|unit| unit.start_byte <= matched_start && unit.end_byte >= matched_end)
         .min_by_key(|unit| unit.end_byte.saturating_sub(unit.start_byte))
         .map(|unit| SourceSpan {
             path: file.path.clone(),
-            start_byte: unit.start_byte,
-            end_byte: unit.end_byte,
+            start_byte: Some(unit.start_byte),
+            end_byte: Some(unit.end_byte),
             start_line: unit.start_line,
             end_line: unit.end_line,
+            start_column: None,
+            end_column: None,
         })
         .unwrap_or_else(|| matched.clone())
 }
@@ -594,10 +606,12 @@ fn same_tokens(left: &[SyntaxToken], right: &[SyntaxToken]) -> bool {
 fn span(path: &Path, tokens: &[SyntaxToken]) -> Option<SourceSpan> {
     Some(SourceSpan {
         path: path.to_path_buf(),
-        start_byte: tokens.first()?.start_byte,
-        end_byte: tokens.last()?.end_byte,
+        start_byte: Some(tokens.first()?.start_byte),
+        end_byte: Some(tokens.last()?.end_byte),
         start_line: tokens.first()?.start_line,
         end_line: tokens.last()?.end_line,
+        start_column: None,
+        end_column: None,
     })
 }
 

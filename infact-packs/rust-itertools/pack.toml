@@ -17,61 +17,61 @@ sha256 = "sha256:0c51e2a3559dc0a33e1f1781269a0024d0f7fbbda7301a33f9f2fa101c552d4
 path = "behaviors/itertools-counts-0.15.0.json"
 kind = "library-behavior"
 media-type = "application/vnd.infact.library-behavior.v1+json"
-sha256 = "sha256:3cfea3deab2b0ab068bb0c48c8d1a8d4032a37c94cf76a03334ee2c10a359d2a"
+sha256 = "sha256:2a75654c95d569e5a98a618944cd1b910e77c310afb7b95ddc555bf01f1ab595"
 
 [[contents]]
 path = "behaviors/itertools-counts-by-0.15.0.json"
 kind = "library-behavior"
 media-type = "application/vnd.infact.library-behavior.v1+json"
-sha256 = "sha256:dd51356d8345967b5256f92c45979f1be95b4453314d9d08259317847d637ba8"
+sha256 = "sha256:a7ab72cd28d19cdda5e860582e211d35ce44b00f78ae7157e4a9912cbd1ce630"
 
 [[contents]]
 path = "behaviors/itertools-into-group-map-0.15.0.json"
 kind = "library-behavior"
 media-type = "application/vnd.infact.library-behavior.v1+json"
-sha256 = "sha256:1e4539938cd27dd66127d9be45c5b9151a7fe79509c7fe6e7b4e920c25163c5d"
+sha256 = "sha256:9efff0413a83acbb2b334a45a5208e4b9b652530a126bfedfa0cccc83065110c"
 
 [[contents]]
 path = "behaviors/itertools-into-group-map-by-0.15.0.json"
 kind = "library-behavior"
 media-type = "application/vnd.infact.library-behavior.v1+json"
-sha256 = "sha256:81a8b936ea38a2812881f5d287e93cc994d8ac74eefea882ca3c43fbebec33c6"
+sha256 = "sha256:59a654c69f455d58c03b3a4a72b5a07b7e652cae4aca93ad4d018e8ac88e6472"
 
 [[contents]]
 path = "behaviors/itertools-sorted-0.15.0.json"
 kind = "library-behavior"
 media-type = "application/vnd.infact.library-behavior.v1+json"
-sha256 = "sha256:0b9adf6c70f2f7ead8cd677c54553a9bc5be69841eef6559b5a1de859a7c71f2"
+sha256 = "sha256:c25089d55bfc49ba4c918338d7f6113ce4ada0c95ceda34bf93e0d953b4e92d7"
 
 [[contents]]
 path = "behaviors/itertools-sorted-by-0.15.0.json"
 kind = "library-behavior"
 media-type = "application/vnd.infact.library-behavior.v1+json"
-sha256 = "sha256:e290028308ad2575415420f75cc8f7e79f4a7d284a634e40990c64e1d93be0bf"
+sha256 = "sha256:feed5d43b66329f27a8d59253fbe2745345208433f2edc0b071bc999b2418385"
 
 [[contents]]
 path = "behaviors/itertools-sorted-by-key-0.15.0.json"
 kind = "library-behavior"
 media-type = "application/vnd.infact.library-behavior.v1+json"
-sha256 = "sha256:86ec9cdb0c914e54ecb81ff44b0f4ccda1e4ad7b9c39715ca0c7fce021bb7f6f"
+sha256 = "sha256:9d1c218d42306920dfbc3d749dab74c3133abc6e470fc17f9972b3fb140d449d"
 
 [[contents]]
 path = "behaviors/itertools-sorted-unstable-0.15.0.json"
 kind = "library-behavior"
 media-type = "application/vnd.infact.library-behavior.v1+json"
-sha256 = "sha256:a5d9015944d68fda7f2cd03c54a0929e69452789365c29aba3e9b1693ad93cd3"
+sha256 = "sha256:1159e92370412a932d2863c4026407a3e7eccb42a34b2370681b6bb709f1f0ca"
 
 [[contents]]
 path = "behaviors/itertools-sorted-unstable-by-0.15.0.json"
 kind = "library-behavior"
 media-type = "application/vnd.infact.library-behavior.v1+json"
-sha256 = "sha256:2c24e44f7bd8d67e24e3b6f8b320d123af54c59290752436cafe94d86ee84eb4"
+sha256 = "sha256:d448ff53be3f9fb6b9c220a9f6d68f04e6c7a213f2fa82648706d20769933c40"
 
 [[contents]]
 path = "behaviors/itertools-sorted-unstable-by-key-0.15.0.json"
 kind = "library-behavior"
 media-type = "application/vnd.infact.library-behavior.v1+json"
-sha256 = "sha256:f09cbf9bdedbd07bc21e57d4a14d7199f4b143dd77c2737e96b95729e681e56f"
+sha256 = "sha256:9d87e61ae9f3a2e3a93904c37713c1cae4637f1a4c9e2adc0d2daf9f60f3f246"
 
 [subject]
 kind = "library"
@@ -84,9 +84,9 @@ version = "0.15.0"
 kind = "package"
 name = "itertools"
 version = "0.15.0"
-sha256 = "sha256:8b4baf93f58d4425749ca49a51c50ebab072c5df6994d08fed93541c331481dc"
+sha256 = "sha256:9d87e61ae9f3a2e3a93904c37713c1cae4637f1a4c9e2adc0d2daf9f60f3f246"
 
 [derivation]
 generator = "infact"
 generator-version = "0.0.0"
-analyzer-sha256 = "sha256:5f8f5a19584e8394170a99e1b18979a05011dea0a3fed15e0c33f127962e5d98"
+analyzer-sha256 = "sha256:9d87e61ae9f3a2e3a93904c37713c1cae4637f1a4c9e2adc0d2daf9f60f3f246"

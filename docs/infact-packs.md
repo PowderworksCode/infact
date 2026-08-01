@@ -1,4 +1,4 @@
-# Fact packs
+# Infact packs
 
 ## Purpose
 

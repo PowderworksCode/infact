@@ -1,0 +1,89 @@
+{
+  "schema": 1,
+  "callable_package": "itertools",
+  "callable_version": "0.15.0",
+  "callable_path": "itertools::Itertools::counts",
+  "catalog_sha256": "a09081972a2d12d35f69eb0ad376b24490cea4a4e3f8c54c419263bf6ce4e8a3",
+  "implementation": [
+    {
+      "callable_path": "counts",
+      "span": {
+        "path": "src/lib.rs",
+        "start_byte": 173722,
+        "end_byte": 173893,
+        "start_line": 4997,
+        "end_line": 5003,
+        "start_column": null,
+        "end_column": null
+      },
+      "source_sha256": "sha256:cac2e34f5b83156078fbbb0137e173c1b4aa63528259f82100e16d7501692ee8"
+    },
+    {
+      "callable_path": "counts_with_hasher",
+      "span": {
+        "path": "src/lib.rs",
+        "start_byte": 174110,
+        "end_byte": 174433,
+        "start_line": 5008,
+        "end_line": 5017,
+        "start_column": null,
+        "end_column": null
+      },
+      "source_sha256": "sha256:cac2e34f5b83156078fbbb0137e173c1b4aa63528259f82100e16d7501692ee8"
+    }
+  ],
+  "program": {
+    "sequence": [
+      {
+        "let": {
+          "pattern": {
+            "binding": 0
+          },
+          "value": {
+            "construct": "HashMap"
+          }
+        }
+      },
+      {
+        "traverse": {
+          "sequence": {
+            "free": 0
+          },
+          "item": {
+            "binding": 1
+          },
+          "body": {
+            "assign": {
+              "operator": "+=",
+              "target": {
+                "method": {
+                  "name": "or_default",
+                  "receiver": {
+                    "method": {
+                      "name": "entry",
+                      "receiver": {
+                        "local": 0
+                      },
+                      "arguments": [
+                        {
+                          "local": 1
+                        }
+                      ]
+                    }
+                  },
+                  "arguments": []
+                }
+              },
+              "value": {
+                "number": "1"
+              }
+            }
+          }
+        }
+      },
+      {
+        "local": 0
+      }
+    ]
+  }
+}

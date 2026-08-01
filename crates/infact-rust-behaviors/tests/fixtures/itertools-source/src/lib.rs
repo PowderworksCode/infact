@@ -2,6 +2,14 @@ use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash, RandomState};
 
 trait Itertools: Iterator {
+    fn map_into<R>(self) -> MapInto<Self, R>
+    where
+        Self: Sized,
+        Self::Item: Into<R>,
+    {
+        map_into(self)
+    }
+
     fn counts(self) -> HashMap<Self::Item, usize>
     where
         Self: Sized,
@@ -125,3 +133,33 @@ trait Itertools: Iterator {
 }
 
 mod group_map;
+
+/// An adaptor: the public method builds a value and returns immediately, and
+/// the behavior runs later, in the type's iterator implementation.
+pub struct MapInto<I, R> {
+    iter: I,
+    marker: std::marker::PhantomData<R>,
+}
+
+pub fn map_into<I, R>(iter: I) -> MapInto<I, R> {
+    MapInto {
+        iter,
+        marker: std::marker::PhantomData,
+    }
+}
+
+impl<I, R> Iterator for MapInto<I, R>
+where
+    I: Iterator,
+    I::Item: Into<R>,
+{
+    type Item = R;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next().map(|item| item.into())
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
+    }
+}

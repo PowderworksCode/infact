@@ -8,6 +8,8 @@ members = [
     "crates/infact-fact-pack",
     "crates/infact-fact-builder",
     "crates/infact-fact-registry",
+    "crates/infact-normalize",
+    "crates/infact-rust-normalize",
     "crates/infact-rust-effects",
     "crates/infact-rust-behaviors",
     "crates/infact-cli",

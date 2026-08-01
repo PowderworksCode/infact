@@ -1,1 +1,7 @@
 /target
+
+# Generated Infact packs. Deriving a library's full behavior set produces a
+# large amount of JSON that is reproducible from the library source, so it is
+# built on demand rather than committed. The small packs under `infact-packs/`
+# are the ones this repository's own tests and documentation depend on.
+/generated-packs

@@ -9,6 +9,7 @@ description = "Source-backed effect summaries for the Rust standard library."
 
 [dependencies]
 dbsp.workspace = true
+entl-semantics = { path = "../../../entl/crates/entl-semantics" }
 entl-tree-sitter.workspace = true
 feldera-macros.workspace = true
 infact-core = { path = "../infact-core" }

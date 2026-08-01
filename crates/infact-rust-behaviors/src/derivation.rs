@@ -1,146 +1,212 @@
+//! Derives a library callable's behavior by normalizing its implementation.
+//!
+//! Derivation knows no callable paths. It locates whatever function the catalog
+//! names, normalizes its body into the language-neutral form, and follows
+//! delegation so that a public wrapper describes the work its helper actually
+//! does. One implementation covers every callable in every library.
+
 use std::path::Path;
 
 use entl_tree_sitter::{ParsedFile, ParserCatalog, parse_repository};
-use infact_core::{
-    DERIVED_LIBRARY_BEHAVIOR_SCHEMA, DerivedLibraryBehavior, ExternalCatalog,
-    ImplementationEvidence, NormalizedBehavior, NormalizedOperation, NormalizedValue,
-    SortComparison, SortStability, SourceSpan,
-};
+use infact_core::{DerivedLibraryBehavior, ExternalCatalog, Form, ImplementationEvidence};
 use tree_sitter::Node;
 
-use crate::{Error, Result};
+use crate::{DERIVED_LIBRARY_BEHAVIOR_SCHEMA, Error, Result, source_sha256, span_of};
 
-const COUNTS: &str = "itertools::Itertools::counts";
-const COUNTS_WITH_HASHER: &str = "itertools::Itertools::counts_with_hasher";
-const COUNTS_BY: &str = "itertools::Itertools::counts_by";
-const COUNTS_BY_WITH_HASHER: &str = "itertools::Itertools::counts_by_with_hasher";
-const GROUP_MAP: &str = "itertools::Itertools::into_group_map";
-const GROUP_MAP_WITH_HASHER: &str = "itertools::group_map::into_group_map_with_hasher";
-const GROUP_MAP_BY: &str = "itertools::Itertools::into_group_map_by";
-const GROUP_MAP_BY_WITH_HASHER: &str = "itertools::group_map::into_group_map_by_with_hasher";
+/// How many delegating wrappers to follow before giving up.
+const MAX_DELEGATION_DEPTH: usize = 4;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SortedKind {
-    Stable,
-    StableBy,
-    StableByKey,
-    Unstable,
-    UnstableBy,
-    UnstableByKey,
+/// A function found in the library source.
+struct LibraryFunction<'a> {
+    file: &'a ParsedFile,
+    node: Node<'a>,
+    name: String,
+    /// The trait or type the function is written inside, when there is one.
+    container: Option<String>,
 }
 
-impl SortedKind {
-    pub(crate) const ALL: [Self; 6] = [
-        Self::Stable,
-        Self::StableBy,
-        Self::StableByKey,
-        Self::Unstable,
-        Self::UnstableBy,
-        Self::UnstableByKey,
-    ];
+fn node_text<'a>(node: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
+    std::str::from_utf8(source.get(node.byte_range())?).ok()
+}
 
-    pub(crate) fn path(self) -> &'static str {
-        match self {
-            Self::Stable => "itertools::Itertools::sorted",
-            Self::StableBy => "itertools::Itertools::sorted_by",
-            Self::StableByKey => "itertools::Itertools::sorted_by_key",
-            Self::Unstable => "itertools::Itertools::sorted_unstable",
-            Self::UnstableBy => "itertools::Itertools::sorted_unstable_by",
-            Self::UnstableByKey => "itertools::Itertools::sorted_unstable_by_key",
-        }
+fn collect_functions<'a>(
+    node: Node<'a>,
+    file: &'a ParsedFile,
+    container: Option<&str>,
+    output: &mut Vec<LibraryFunction<'a>>,
+) {
+    if node.kind() == "function_item"
+        && let Some(name) = node
+            .child_by_field_name("name")
+            .and_then(|name| node_text(name, &file.source))
+    {
+        output.push(LibraryFunction {
+            file,
+            node,
+            name: name.to_owned(),
+            container: container.map(str::to_owned),
+        });
     }
-
-    pub(crate) fn method(self) -> &'static str {
-        match self {
-            Self::Stable => "sort",
-            Self::StableBy => "sort_by",
-            Self::StableByKey => "sort_by_key",
-            Self::Unstable => "sort_unstable",
-            Self::UnstableBy => "sort_unstable_by",
-            Self::UnstableByKey => "sort_unstable_by_key",
-        }
-    }
-
-    fn stability(self) -> SortStability {
-        match self {
-            Self::Stable | Self::StableBy | Self::StableByKey => SortStability::Stable,
-            Self::Unstable | Self::UnstableBy | Self::UnstableByKey => SortStability::Unstable,
-        }
-    }
-
-    fn comparison(self) -> SortComparison {
-        match self {
-            Self::Stable | Self::Unstable => SortComparison::Natural,
-            Self::StableBy | Self::UnstableBy => SortComparison::Comparator {
-                function: value("parameter:cmp"),
-            },
-            Self::StableByKey | Self::UnstableByKey => SortComparison::Key {
-                function: value("parameter:f"),
-            },
-        }
+    // an `impl` names a type, a `trait` names itself; either qualifies the
+    // functions written inside it
+    let nested = match node.kind() {
+        "impl_item" => node
+            .child_by_field_name("type")
+            .and_then(|ty| node_text(ty, &file.source))
+            .map(bare_type_name),
+        "trait_item" => node
+            .child_by_field_name("name")
+            .and_then(|name| node_text(name, &file.source)),
+        _ => container,
+    };
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_functions(child, file, nested, output);
     }
 }
 
+/// A type name without its generic arguments, so `impl Iterator for MapInto<I>`
+/// is recognized as describing `MapInto`.
+fn bare_type_name(name: &str) -> &str {
+    name.split_once('<').map_or(name, |(bare, _)| bare).trim()
+}
+
+/// Whether a path is the library's own source rather than its tests, benchmarks,
+/// or examples.
+///
+/// Cargo gives those directories a fixed meaning, so this is a language
+/// convention rather than a fact about any particular crate. It matters because
+/// test suites routinely define functions named after the API they exercise.
+fn is_library_source(path: &Path) -> bool {
+    let mut components = path.components().map(|component| component.as_os_str());
+    !components.any(|component| {
+        matches!(
+            component.to_str(),
+            Some("tests" | "benches" | "examples" | "target")
+        )
+    })
+}
+
+fn library_functions(files: &[ParsedFile]) -> Vec<LibraryFunction<'_>> {
+    let mut functions = Vec::new();
+    for file in files {
+        if file.pack.language().id != "rust" || !is_library_source(&file.path) {
+            continue;
+        }
+        collect_functions(file.tree.root_node(), file, None, &mut functions);
+    }
+    functions
+}
+
+/// The name a callable path ends in.
+fn leaf_name(callable_path: &str) -> &str {
+    callable_path.rsplit("::").next().unwrap_or(callable_path)
+}
+
+/// The trait or type a callable path is qualified by, when it has one.
+fn container_name(callable_path: &str) -> Option<&str> {
+    let mut segments = callable_path.rsplit("::");
+    segments.next()?;
+    segments
+        .next()
+        .filter(|segment| segment.starts_with(|first: char| first.is_ascii_uppercase()))
+}
+
+/// Whether a form is nothing but a call to somewhere else.
+///
+/// A public API is frequently a one-line wrapper: `counts` exists to call
+/// `counts_with_hasher` with a default. The wrapper describes no behavior of
+/// its own, so derivation follows it. This is a shape test, not a list of known
+/// wrappers.
+fn delegation_target(form: &Form) -> Option<&str> {
+    match form {
+        Form::Method { name, .. } => Some(name),
+        Form::Call { callee, .. } => match callee.as_ref() {
+            Form::Path(path) => Some(leaf_name(path)),
+            _ => None,
+        },
+        Form::Return(inner) => delegation_target(inner),
+        Form::Sequence(parts) => match parts.as_slice() {
+            [only] => delegation_target(only),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether a form describes work rather than plumbing.
+fn describes_work(form: &Form) -> bool {
+    match form {
+        Form::Traverse { .. }
+        | Form::Transform { .. }
+        | Form::Retain { .. }
+        | Form::Accumulate { .. }
+        | Form::Collect { .. } => true,
+        _ => form.children().into_iter().any(describes_work),
+    }
+}
+
+/// The type a form does nothing but construct.
+fn constructed_type(form: &Form) -> Option<&str> {
+    match form {
+        Form::Construct(name) => Some(name),
+        Form::Return(inner) => constructed_type(inner),
+        Form::Sequence(parts) => match parts.as_slice() {
+            [only] => constructed_type(only),
+            _ => None,
+        },
+        // `MapInto { iter: self }` and similar struct literals reach here as
+        // opaque syntax; the constructed type is whatever the parts construct
+        _ => form.children().into_iter().find_map(constructed_type),
+    }
+}
+
+/// Methods that define what a type is, rather than merely optimizing it.
+///
+/// An iterator's `next` is its whole contract; its `fold` and `size_hint` are
+/// specializations of that contract. These are the language's own trait
+/// requirements, so the list holds for every library.
+const PRINCIPAL_METHODS: &[&str] = &["next", "next_back", "poll", "poll_next"];
+
+/// The method that carries a type's behavior.
+///
+/// A type's work is spread across its implementations and most of those methods
+/// are bookkeeping. Prefer the one the language requires; failing that, take
+/// whichever describes the most work. This is a good enough answer, because a
+/// finding here is a prompt to look rather than a proof.
+fn principal_method<'a>(
+    functions: &'a [LibraryFunction<'a>],
+    type_name: &str,
+) -> Option<&'a LibraryFunction<'a>> {
+    functions
+        .iter()
+        .filter(|function| function.container.as_deref() == Some(type_name))
+        .filter_map(|function| {
+            let form = normalize(function).ok()?;
+            describes_work(&form).then(|| {
+                let principal = PRINCIPAL_METHODS.contains(&function.name.as_str());
+                ((principal, form.size()), function)
+            })
+        })
+        .max_by_key(|(rank, _)| *rank)
+        .map(|(_, function)| function)
+}
+
+fn evidence(function: &LibraryFunction<'_>) -> Result<ImplementationEvidence> {
+    Ok(ImplementationEvidence {
+        callable_path: function.name.clone(),
+        span: span_of(function.file, function.node)?,
+        source_sha256: source_sha256(&function.file.source),
+    })
+}
+
+/// Derive the behavior of `callable_path` from a library checkout.
 pub fn derive_behavior(
     source_root: impl AsRef<Path>,
     parsers: &ParserCatalog,
     catalog: &ExternalCatalog,
     callable_path: &str,
 ) -> Result<DerivedLibraryBehavior> {
-    match callable_path {
-        COUNTS => derive_counts(source_root, parsers, catalog),
-        COUNTS_BY => derive_counts_by(source_root, parsers, catalog),
-        GROUP_MAP => derive_group_map(source_root, parsers, catalog),
-        GROUP_MAP_BY => derive_group_map_by(source_root, parsers, catalog),
-        path if SortedKind::ALL.iter().any(|kind| kind.path() == path) => {
-            let kind = SortedKind::ALL
-                .into_iter()
-                .find(|kind| kind.path() == path)
-                .expect("guard found a sorting method");
-            derive_sorted(source_root, parsers, catalog, kind)
-        }
-        _ => Err(Error::UnsupportedDerivation {
-            callable: callable_path.to_owned(),
-        }),
-    }
-}
-
-fn derive_sorted(
-    source_root: impl AsRef<Path>,
-    parsers: &ParserCatalog,
-    catalog: &ExternalCatalog,
-    kind: SortedKind,
-) -> Result<DerivedLibraryBehavior> {
-    require_callable(catalog, kind.path(), |signature| {
-        crate::is_sorted_signature(signature, kind)
-    })?;
-    let parsed = parse_repository(source_root, parsers)?;
-    let (file, function) = required_method(
-        &parsed.files,
-        kind.path().rsplit("::").next().unwrap(),
-        kind.path(),
-    )?;
-    let body = required_body(function, kind.path())?;
-    let program = normalize_sorted(body, &file.source, kind).ok_or_else(|| {
-        Error::UnsupportedImplementation {
-            callable: kind.path().to_owned(),
-            reason: "body is not Vec::from_iter, the expected slice sort, and into_iter".to_owned(),
-        }
-    })?;
-    derived(
-        catalog,
-        kind.path(),
-        program,
-        vec![evidence(file, function, kind.path())?],
-    )
-}
-
-fn derive_counts(
-    source_root: impl AsRef<Path>,
-    parsers: &ParserCatalog,
-    catalog: &ExternalCatalog,
-) -> Result<DerivedLibraryBehavior> {
-    let callable_path = COUNTS;
     let callable = catalog
         .callables
         .iter()
@@ -148,910 +214,124 @@ fn derive_counts(
         .ok_or_else(|| Error::MissingCallable {
             callable: callable_path.to_owned(),
         })?;
-    if !crate::is_counts_signature(&callable.signature) {
-        return Err(Error::IncompatibleCallable {
-            callable: callable_path.to_owned(),
-        });
-    }
 
     let parsed = parse_repository(source_root, parsers)?;
-    let (entry_file, entry) =
-        find_function(&parsed.files, "counts").ok_or_else(|| Error::MissingImplementation {
-            callable: callable_path.to_owned(),
-        })?;
-    let entry_body =
-        entry
-            .child_by_field_name("body")
-            .ok_or_else(|| Error::UnsupportedImplementation {
-                callable: callable_path.to_owned(),
-                reason: "entry method has no body".to_owned(),
-            })?;
-    if !calls_method(entry_body, &entry_file.source, "counts_with_hasher") {
+    let functions = library_functions(&parsed.files);
+    // Resolve a name to one implementation, preferring the container the
+    // catalog qualified the callable with. Without a container to go on, an
+    // ambiguous name cannot be resolved by syntax alone.
+    // `exclude` drops the function doing the delegating: a wrapper and the
+    // helper it forwards to routinely share a name across a trait and a module,
+    // and the wrapper is never its own implementation.
+    let resolve = |name: &str, container: Option<&str>, exclude: Option<&LibraryFunction<'_>>| {
+        let candidates = || {
+            functions.iter().filter(move |function| {
+                function.name == name
+                    && exclude.is_none_or(|excluded| !std::ptr::eq(*function, excluded))
+            })
+        };
+        if let Some(container) = container {
+            let mut qualified =
+                candidates().filter(|function| function.container.as_deref() == Some(container));
+            if let Some(first) = qualified.next()
+                && qualified.next().is_none()
+            {
+                return Some(first);
+            }
+        }
+        let mut matching = candidates();
+        let first = matching.next()?;
+        matching.next().is_none().then_some(first)
+    };
+
+    let mut current = resolve(
+        leaf_name(&callable.path),
+        container_name(&callable.path),
+        None,
+    )
+    .ok_or_else(|| Error::MissingImplementation {
+        callable: callable_path.to_owned(),
+    })?;
+    let mut implementation = vec![evidence(current)?];
+    let mut form = normalize(current)?;
+    let mut visited = vec![std::ptr::from_ref(current)];
+
+    // Follow delegation until the form describes actual work.
+    for _ in 0..MAX_DELEGATION_DEPTH {
+        if describes_work(&form) {
+            break;
+        }
+        let Some(target) = delegation_target(&form) else {
+            break;
+        };
+        // a delegate is looked up in the same container first
+        let Some(next) = resolve(target, current.container.as_deref(), Some(current)) else {
+            break;
+        };
+        // a trait wrapper and the free function it forwards to commonly share
+        // a name, so identity rather than name decides whether this is a cycle
+        if visited.contains(&std::ptr::from_ref(next)) {
+            break;
+        }
+        visited.push(std::ptr::from_ref(next));
+        current = next;
+        form = normalize(current)?;
+        implementation.push(evidence(current)?);
+    }
+
+    // A combinator does not do its work where it is called. `map_into` only
+    // builds a `MapInto`, and the behavior lives in that type's `Iterator`
+    // implementation, which runs later. When a callable just constructs
+    // something, the type it constructs is where to look.
+    if !describes_work(&form)
+        && let Some(constructed) = constructed_type(&form)
+        && let Some(implementing) = principal_method(&functions, constructed)
+    {
+        form = normalize(implementing)?;
+        implementation.push(evidence(implementing)?);
+    }
+
+    if !describes_work(&form) {
         return Err(Error::UnsupportedImplementation {
             callable: callable_path.to_owned(),
-            reason: "entry method does not delegate to counts_with_hasher".to_owned(),
+            reason: "the implementation describes no sequence operation to compare".to_owned(),
         });
     }
-
-    let (helper_file, helper) =
-        find_function(&parsed.files, "counts_with_hasher").ok_or_else(|| {
-            Error::MissingImplementation {
-                callable: COUNTS_WITH_HASHER.to_owned(),
-            }
-        })?;
-    let helper_body =
-        helper
-            .child_by_field_name("body")
-            .ok_or_else(|| Error::UnsupportedImplementation {
-                callable: COUNTS_WITH_HASHER.to_owned(),
-                reason: "helper method has no body".to_owned(),
-            })?;
-    let program = normalize_counts_helper(helper_body, &helper_file.source).ok_or_else(|| {
-        Error::UnsupportedImplementation {
-            callable: COUNTS_WITH_HASHER.to_owned(),
-            reason:
-                "body is not a map initializer, iterator traversal, entry increment, and map return"
-                    .to_owned(),
-        }
-    })?;
 
     Ok(DerivedLibraryBehavior {
         schema: DERIVED_LIBRARY_BEHAVIOR_SCHEMA,
         callable_package: catalog.package.clone(),
         callable_version: catalog.version.clone(),
-        callable_path: callable_path.to_owned(),
-        catalog_sha256: catalog.source_sha256.clone(),
-        implementation: vec![
-            evidence(entry_file, entry, COUNTS)?,
-            evidence(helper_file, helper, COUNTS_WITH_HASHER)?,
-        ],
-        program,
-    })
-}
-
-fn derive_counts_by(
-    source_root: impl AsRef<Path>,
-    parsers: &ParserCatalog,
-    catalog: &ExternalCatalog,
-) -> Result<DerivedLibraryBehavior> {
-    require_callable(catalog, COUNTS_BY, crate::is_counts_by_signature)?;
-    let parsed = parse_repository(source_root, parsers)?;
-    let (entry_file, entry) = required_function(&parsed.files, "counts_by", COUNTS_BY)?;
-    require_call(entry_file, entry, COUNTS_BY, "counts_by_with_hasher")?;
-    let (mapped_file, mapped) = required_function(
-        &parsed.files,
-        "counts_by_with_hasher",
-        COUNTS_BY_WITH_HASHER,
-    )?;
-    require_call(
-        mapped_file,
-        mapped,
-        COUNTS_BY_WITH_HASHER,
-        "counts_with_hasher",
-    )?;
-    require_call(mapped_file, mapped, COUNTS_BY_WITH_HASHER, "map")?;
-    let (base_file, base) =
-        required_function(&parsed.files, "counts_with_hasher", COUNTS_WITH_HASHER)?;
-    let base_body = required_body(base, COUNTS_WITH_HASHER)?;
-    if normalize_counts_helper(base_body, &base_file.source).is_none() {
-        return unsupported(COUNTS_WITH_HASHER, "base histogram body did not normalize");
-    }
-    derived(
-        catalog,
-        COUNTS_BY,
-        counts_by_program(),
-        vec![
-            evidence(entry_file, entry, COUNTS_BY)?,
-            evidence(mapped_file, mapped, COUNTS_BY_WITH_HASHER)?,
-            evidence(base_file, base, COUNTS_WITH_HASHER)?,
-        ],
-    )
-}
-
-fn derive_group_map(
-    source_root: impl AsRef<Path>,
-    parsers: &ParserCatalog,
-    catalog: &ExternalCatalog,
-) -> Result<DerivedLibraryBehavior> {
-    require_callable(catalog, GROUP_MAP, crate::is_group_map_signature)?;
-    let parsed = parse_repository(source_root, parsers)?;
-    let (entry_file, entry) = required_function(&parsed.files, "into_group_map", GROUP_MAP)?;
-    require_named_call(entry_file, entry, GROUP_MAP, "into_group_map_with_hasher")?;
-    let (base_file, base) = required_function_in(
-        &parsed.files,
-        Path::new("src/group_map.rs"),
-        "into_group_map_with_hasher",
-        GROUP_MAP_WITH_HASHER,
-    )?;
-    let base_body = required_body(base, GROUP_MAP_WITH_HASHER)?;
-    if normalize_group_map_helper(base_body, &base_file.source).is_none() {
-        return unsupported(GROUP_MAP_WITH_HASHER, "grouping body did not normalize");
-    }
-    derived(
-        catalog,
-        GROUP_MAP,
-        group_map_program(),
-        vec![
-            evidence(entry_file, entry, GROUP_MAP)?,
-            evidence(base_file, base, GROUP_MAP_WITH_HASHER)?,
-        ],
-    )
-}
-
-fn derive_group_map_by(
-    source_root: impl AsRef<Path>,
-    parsers: &ParserCatalog,
-    catalog: &ExternalCatalog,
-) -> Result<DerivedLibraryBehavior> {
-    require_callable(catalog, GROUP_MAP_BY, crate::is_group_map_by_signature)?;
-    let parsed = parse_repository(source_root, parsers)?;
-    let (entry_file, entry) = required_function(&parsed.files, "into_group_map_by", GROUP_MAP_BY)?;
-    require_named_call(
-        entry_file,
-        entry,
-        GROUP_MAP_BY,
-        "into_group_map_by_with_hasher",
-    )?;
-    let (mapped_file, mapped) = required_function_in(
-        &parsed.files,
-        Path::new("src/group_map.rs"),
-        "into_group_map_by_with_hasher",
-        GROUP_MAP_BY_WITH_HASHER,
-    )?;
-    require_named_call(
-        mapped_file,
-        mapped,
-        GROUP_MAP_BY_WITH_HASHER,
-        "into_group_map_with_hasher",
-    )?;
-    require_call(mapped_file, mapped, GROUP_MAP_BY_WITH_HASHER, "map")?;
-    let (base_file, base) = required_function_in(
-        &parsed.files,
-        Path::new("src/group_map.rs"),
-        "into_group_map_with_hasher",
-        GROUP_MAP_WITH_HASHER,
-    )?;
-    let base_body = required_body(base, GROUP_MAP_WITH_HASHER)?;
-    if normalize_group_map_helper(base_body, &base_file.source).is_none() {
-        return unsupported(GROUP_MAP_WITH_HASHER, "grouping body did not normalize");
-    }
-    derived(
-        catalog,
-        GROUP_MAP_BY,
-        group_map_by_program(),
-        vec![
-            evidence(entry_file, entry, GROUP_MAP_BY)?,
-            evidence(mapped_file, mapped, GROUP_MAP_BY_WITH_HASHER)?,
-            evidence(base_file, base, GROUP_MAP_WITH_HASHER)?,
-        ],
-    )
-}
-
-fn require_callable(
-    catalog: &ExternalCatalog,
-    path: &str,
-    compatible: impl FnOnce(&infact_core::CallableSignature) -> bool,
-) -> Result<()> {
-    let callable = catalog
-        .callables
-        .iter()
-        .find(|callable| callable.path == path)
-        .ok_or_else(|| Error::MissingCallable {
-            callable: path.to_owned(),
-        })?;
-    if !compatible(&callable.signature) {
-        return Err(Error::IncompatibleCallable {
-            callable: path.to_owned(),
-        });
-    }
-    Ok(())
-}
-
-fn derived(
-    catalog: &ExternalCatalog,
-    callable_path: &str,
-    program: NormalizedBehavior,
-    implementation: Vec<ImplementationEvidence>,
-) -> Result<DerivedLibraryBehavior> {
-    Ok(DerivedLibraryBehavior {
-        schema: DERIVED_LIBRARY_BEHAVIOR_SCHEMA,
-        callable_package: catalog.package.clone(),
-        callable_version: catalog.version.clone(),
-        callable_path: callable_path.to_owned(),
+        callable_path: callable.path.clone(),
         catalog_sha256: catalog.source_sha256.clone(),
         implementation,
-        program,
+        program: form,
     })
 }
 
-pub(crate) fn counts_program() -> NormalizedBehavior {
-    NormalizedBehavior {
-        operations: vec![
-            NormalizedOperation::CreateMap {
-                output: value("map"),
-            },
-            NormalizedOperation::Iterate {
-                input: value("input"),
-                item: value("item"),
-                body: vec![NormalizedOperation::IncrementMapEntry {
-                    map: value("map"),
-                    key: value("item"),
-                    amount: 1,
-                }],
-            },
-            NormalizedOperation::Return {
-                value: value("map"),
-            },
-        ],
+fn normalize(function: &LibraryFunction<'_>) -> Result<Form> {
+    if function.node.child_by_field_name("body").is_none() {
+        return Err(Error::UnsupportedImplementation {
+            callable: function.name.clone(),
+            reason: "the implementation has no body".to_owned(),
+        });
     }
+    Ok(infact_rust_normalize::normalize_function(
+        function.node,
+        &function.file.source,
+    ))
 }
 
-pub(crate) fn counts_by_program() -> NormalizedBehavior {
-    NormalizedBehavior {
-        operations: vec![
-            NormalizedOperation::CreateMap {
-                output: value("map"),
-            },
-            NormalizedOperation::Iterate {
-                input: value("input"),
-                item: value("item"),
-                body: vec![
-                    NormalizedOperation::Apply {
-                        function: value("parameter:f"),
-                        input: value("item"),
-                        output: value("key"),
-                    },
-                    NormalizedOperation::IncrementMapEntry {
-                        map: value("map"),
-                        key: value("key"),
-                        amount: 1,
-                    },
-                ],
-            },
-            NormalizedOperation::Return {
-                value: value("map"),
-            },
-        ],
-    }
-}
+/// The smallest form worth reporting as a match.
+///
+/// Calibrated against derived behaviors and the code they are matched into.
+/// The smallest genuine behavior measured here is seven nodes, while the forms
+/// that collide across unrelated code are two or three: a field accessor, a
+/// one-line delegation, a struct literal. Anything below this floor describes
+/// too little to identify an API.
+pub const MINIMUM_REPORTABLE_SIZE: u32 = 6;
 
-pub(crate) fn group_map_program() -> NormalizedBehavior {
-    NormalizedBehavior {
-        operations: vec![
-            NormalizedOperation::CreateMap {
-                output: value("map"),
-            },
-            NormalizedOperation::Iterate {
-                input: value("input"),
-                item: value("item"),
-                body: vec![
-                    NormalizedOperation::DestructurePair {
-                        input: value("item"),
-                        first: value("key"),
-                        second: value("value"),
-                    },
-                    NormalizedOperation::PushMapEntry {
-                        map: value("map"),
-                        key: value("key"),
-                        value: value("value"),
-                    },
-                ],
-            },
-            NormalizedOperation::Return {
-                value: value("map"),
-            },
-        ],
-    }
-}
-
-pub(crate) fn group_map_by_program() -> NormalizedBehavior {
-    NormalizedBehavior {
-        operations: vec![
-            NormalizedOperation::CreateMap {
-                output: value("map"),
-            },
-            NormalizedOperation::Iterate {
-                input: value("input"),
-                item: value("item"),
-                body: vec![
-                    NormalizedOperation::Apply {
-                        function: value("parameter:f"),
-                        input: value("item"),
-                        output: value("key"),
-                    },
-                    NormalizedOperation::PushMapEntry {
-                        map: value("map"),
-                        key: value("key"),
-                        value: value("item"),
-                    },
-                ],
-            },
-            NormalizedOperation::Return {
-                value: value("map"),
-            },
-        ],
-    }
-}
-
-pub(crate) fn sorted_program(kind: SortedKind) -> NormalizedBehavior {
-    NormalizedBehavior {
-        operations: vec![
-            NormalizedOperation::CollectVec {
-                input: value("input"),
-                output: value("values"),
-            },
-            NormalizedOperation::Sort {
-                value: value("values"),
-                stability: kind.stability(),
-                comparison: kind.comparison(),
-            },
-            NormalizedOperation::IntoIterator {
-                input: value("values"),
-                output: value("output"),
-            },
-            NormalizedOperation::Return {
-                value: value("output"),
-            },
-        ],
-    }
-}
-
-fn value(name: &str) -> NormalizedValue {
-    NormalizedValue(name.to_owned())
-}
-
-fn find_function<'a>(
-    files: &'a [ParsedFile],
-    expected: &str,
-) -> Option<(&'a ParsedFile, Node<'a>)> {
-    for file in files {
-        if file.pack.language().id != "rust" {
-            continue;
-        }
-        let mut stack = vec![file.tree.root_node()];
-        while let Some(node) = stack.pop() {
-            if node.kind() == "function_item"
-                && field_text(node, "name", &file.source) == Some(expected)
-            {
-                return Some((file, node));
-            }
-            let mut cursor = node.walk();
-            stack.extend(node.children(&mut cursor));
-        }
-    }
-    None
-}
-
-fn find_method<'a>(files: &'a [ParsedFile], expected: &str) -> Option<(&'a ParsedFile, Node<'a>)> {
-    for file in files {
-        if file.pack.language().id != "rust" {
-            continue;
-        }
-        let mut stack = vec![file.tree.root_node()];
-        while let Some(node) = stack.pop() {
-            if node.kind() == "function_item"
-                && field_text(node, "name", &file.source) == Some(expected)
-                && node
-                    .child_by_field_name("parameters")
-                    .and_then(|parameters| parameters.named_child(0))
-                    .is_some_and(|parameter| parameter.kind() == "self_parameter")
-            {
-                return Some((file, node));
-            }
-            let mut cursor = node.walk();
-            stack.extend(node.children(&mut cursor));
-        }
-    }
-    None
-}
-
-fn find_function_in<'a>(
-    files: &'a [ParsedFile],
-    path: &Path,
-    expected: &str,
-) -> Option<(&'a ParsedFile, Node<'a>)> {
-    let file = files.iter().find(|file| file.path == path)?;
-    find_function(std::slice::from_ref(file), expected)
-}
-
-fn required_function<'a>(
-    files: &'a [ParsedFile],
-    name: &str,
-    callable: &str,
-) -> Result<(&'a ParsedFile, Node<'a>)> {
-    find_function(files, name).ok_or_else(|| Error::MissingImplementation {
-        callable: callable.to_owned(),
-    })
-}
-
-fn required_method<'a>(
-    files: &'a [ParsedFile],
-    name: &str,
-    callable: &str,
-) -> Result<(&'a ParsedFile, Node<'a>)> {
-    find_method(files, name).ok_or_else(|| Error::MissingImplementation {
-        callable: callable.to_owned(),
-    })
-}
-
-fn required_function_in<'a>(
-    files: &'a [ParsedFile],
-    path: &Path,
-    name: &str,
-    callable: &str,
-) -> Result<(&'a ParsedFile, Node<'a>)> {
-    find_function_in(files, path, name).ok_or_else(|| Error::MissingImplementation {
-        callable: callable.to_owned(),
-    })
-}
-
-fn required_body<'a>(function: Node<'a>, callable: &str) -> Result<Node<'a>> {
-    function
-        .child_by_field_name("body")
-        .ok_or_else(|| Error::UnsupportedImplementation {
-            callable: callable.to_owned(),
-            reason: "implementation has no body".to_owned(),
-        })
-}
-
-fn require_call(file: &ParsedFile, function: Node<'_>, callable: &str, method: &str) -> Result<()> {
-    let body = required_body(function, callable)?;
-    if !calls_method(body, &file.source, method) {
-        return unsupported(callable, &format!("implementation does not call {method}"));
-    }
-    Ok(())
-}
-
-fn require_named_call(
-    file: &ParsedFile,
-    function: Node<'_>,
-    callable: &str,
-    called: &str,
-) -> Result<()> {
-    let body = required_body(function, callable)?;
-    if !calls_named(body, &file.source, called) {
-        return unsupported(callable, &format!("implementation does not call {called}"));
-    }
-    Ok(())
-}
-
-fn unsupported<T>(callable: &str, reason: &str) -> Result<T> {
-    Err(Error::UnsupportedImplementation {
-        callable: callable.to_owned(),
-        reason: reason.to_owned(),
-    })
-}
-
-fn calls_method(node: Node<'_>, source: &[u8], method: &str) -> bool {
-    let mut stack = vec![node];
-    while let Some(node) = stack.pop() {
-        if node.kind() == "field_expression" && field_text(node, "field", source) == Some(method) {
-            return true;
-        }
-        let mut cursor = node.walk();
-        stack.extend(node.children(&mut cursor));
-    }
-    false
-}
-
-fn calls_named(node: Node<'_>, source: &[u8], expected: &str) -> bool {
-    let mut stack = vec![node];
-    while let Some(node) = stack.pop() {
-        if node.kind() == "call_expression"
-            && node
-                .child_by_field_name("function")
-                .is_some_and(|function| match function.kind() {
-                    "identifier" => text(function, source) == Some(expected),
-                    "scoped_identifier" => field_text(function, "name", source) == Some(expected),
-                    "field_expression" => field_text(function, "field", source) == Some(expected),
-                    _ => false,
-                })
-        {
-            return true;
-        }
-        let mut cursor = node.walk();
-        stack.extend(node.children(&mut cursor));
-    }
-    false
-}
-
-fn normalize_counts_helper(body: Node<'_>, source: &[u8]) -> Option<NormalizedBehavior> {
-    let mut cursor = body.walk();
-    let statements = body
-        .named_children(&mut cursor)
-        .filter(|node| !node.is_extra())
-        .collect::<Vec<_>>();
-    let [declaration, traversal, result] = statements.as_slice() else {
-        return None;
-    };
-    if declaration.kind() != "let_declaration" || result.kind() != "identifier" {
-        return None;
-    }
-    let accumulator = declaration.child_by_field_name("pattern")?;
-    let initializer = declaration.child_by_field_name("value")?;
-    if accumulator.kind() != "identifier"
-        || text(accumulator, source) != text(*result, source)
-        || !is_map_initializer(initializer, source)
-        || !is_for_each_increment(*traversal, accumulator, source)
-    {
-        return None;
-    }
-    Some(counts_program())
-}
-
-fn normalize_sorted(body: Node<'_>, source: &[u8], kind: SortedKind) -> Option<NormalizedBehavior> {
-    let mut cursor = body.walk();
-    let statements = body
-        .named_children(&mut cursor)
-        .filter(|node| !node.is_extra())
-        .collect::<Vec<_>>();
-    let [declaration, sort_statement, result] = statements.as_slice() else {
-        return None;
-    };
-    let values = declaration.child_by_field_name("pattern")?;
-    let initializer = declaration.child_by_field_name("value")?;
-    if declaration.kind() != "let_declaration"
-        || values.kind() != "identifier"
-        || !is_vec_from_iter(initializer, source)
-        || !is_sort_call(*sort_statement, values, kind, source)
-        || !is_into_iter_call(*result, values, source)
-    {
-        return None;
-    }
-    Some(sorted_program(kind))
-}
-
-fn is_vec_from_iter(node: Node<'_>, source: &[u8]) -> bool {
-    let function = node.child_by_field_name("function");
-    let arguments = node.child_by_field_name("arguments");
-    node.kind() == "call_expression"
-        && function.is_some_and(|function| {
-            function.kind() == "scoped_identifier"
-                && field_text(function, "name", source) == Some("from_iter")
-                && function
-                    .child_by_field_name("path")
-                    .is_some_and(|path| text(path, source) == Some("Vec"))
-        })
-        && arguments.is_some_and(|arguments| {
-            arguments.named_child_count() == 1
-                && arguments
-                    .named_child(0)
-                    .is_some_and(|input| text(input, source) == Some("self"))
-        })
-}
-
-fn is_sort_call(statement: Node<'_>, values: Node<'_>, kind: SortedKind, source: &[u8]) -> bool {
-    let call = statement.named_child(0).unwrap_or(statement);
-    let Some(function) = call.child_by_field_name("function") else {
-        return false;
-    };
-    let Some(arguments) = call.child_by_field_name("arguments") else {
-        return false;
-    };
-    let expected_argument = match kind {
-        SortedKind::Stable | SortedKind::Unstable => None,
-        SortedKind::StableBy | SortedKind::UnstableBy => Some("cmp"),
-        SortedKind::StableByKey | SortedKind::UnstableByKey => Some("f"),
-    };
-    call.kind() == "call_expression"
-        && function.kind() == "field_expression"
-        && field_text(function, "field", source) == Some(kind.method())
-        && function
-            .child_by_field_name("value")
-            .is_some_and(|receiver| text(receiver, source) == text(values, source))
-        && match expected_argument {
-            None => arguments.named_child_count() == 0,
-            Some(expected) => {
-                arguments.named_child_count() == 1
-                    && arguments
-                        .named_child(0)
-                        .is_some_and(|argument| text(argument, source) == Some(expected))
-            }
-        }
-}
-
-fn is_into_iter_call(node: Node<'_>, values: Node<'_>, source: &[u8]) -> bool {
-    let call = if node.kind() == "expression_statement" {
-        let Some(call) = node.named_child(0) else {
-            return false;
-        };
-        call
-    } else {
-        node
-    };
-    let Some(function) = call.child_by_field_name("function") else {
-        return false;
-    };
-    call.kind() == "call_expression"
-        && function.kind() == "field_expression"
-        && field_text(function, "field", source) == Some("into_iter")
-        && function
-            .child_by_field_name("value")
-            .is_some_and(|receiver| text(receiver, source) == text(values, source))
-        && call
-            .child_by_field_name("arguments")
-            .is_some_and(|arguments| arguments.named_child_count() == 0)
-}
-
-fn is_map_initializer(initializer: Node<'_>, source: &[u8]) -> bool {
-    if initializer.kind() != "call_expression" {
-        return false;
-    }
-    let Some(function) = initializer.child_by_field_name("function") else {
-        return false;
-    };
-    match function.kind() {
-        "field_expression" => {
-            matches!(
-                field_text(function, "field", source),
-                Some("new" | "with_hasher")
-            ) && function
-                .child_by_field_name("value")
-                .is_some_and(|value| text(value, source) == Some("HashMap"))
-        }
-        "scoped_identifier" => {
-            matches!(
-                field_text(function, "name", source),
-                Some("new" | "with_hasher")
-            ) && function
-                .child_by_field_name("path")
-                .is_some_and(|path| is_hashmap_type(path, source))
-        }
-        _ => false,
-    }
-}
-
-fn is_hashmap_type(node: Node<'_>, source: &[u8]) -> bool {
-    text(node, source) == Some("HashMap")
-        || (node.kind() == "generic_type" && field_text(node, "type", source) == Some("HashMap"))
-}
-
-fn normalize_group_map_helper(body: Node<'_>, source: &[u8]) -> Option<NormalizedBehavior> {
-    let mut cursor = body.walk();
-    let statements = body.named_children(&mut cursor).collect::<Vec<_>>();
-    let [declaration, traversal, result] = statements.as_slice() else {
-        return None;
-    };
-    let accumulator = declaration.child_by_field_name("pattern")?;
-    let initializer = declaration.child_by_field_name("value")?;
-    if declaration.kind() != "let_declaration"
-        || accumulator.kind() != "identifier"
-        || result.kind() != "identifier"
-        || text(accumulator, source) != text(*result, source)
-        || !is_map_initializer(initializer, source)
-        || !is_for_each_push(*traversal, accumulator, source)
-    {
-        return None;
-    }
-    Some(group_map_program())
-}
-
-fn is_for_each_push(statement: Node<'_>, accumulator: Node<'_>, source: &[u8]) -> bool {
-    (|| {
-        let call = statement.named_child(0).unwrap_or(statement);
-        let function = call.child_by_field_name("function")?;
-        if call.kind() != "call_expression"
-            || function.kind() != "field_expression"
-            || field_text(function, "field", source) != Some("for_each")
-        {
-            return Some(false);
-        }
-        let arguments = call.child_by_field_name("arguments")?;
-        let closure = arguments.named_child(0)?;
-        let parameters = closure.child_by_field_name("parameters")?;
-        let pair = parameters.named_child(0)?;
-        if arguments.named_child_count() != 1
-            || closure.kind() != "closure_expression"
-            || pair.kind() != "tuple_pattern"
-            || pair.named_child_count() != 2
-        {
-            return Some(false);
-        }
-        let key = pair.named_child(0)?;
-        let value = pair.named_child(1)?;
-        let closure_body = closure.child_by_field_name("body")?;
-        let push_statement = if closure_body.kind() == "block" {
-            if closure_body.named_child_count() != 1 {
-                return Some(false);
-            }
-            closure_body.named_child(0)?
-        } else {
-            closure_body
-        };
-        Some(is_entry_push(
-            push_statement,
-            accumulator,
-            key,
-            value,
-            source,
-        ))
-    })()
-    .unwrap_or(false)
-}
-
-fn is_entry_push(
-    statement: Node<'_>,
-    accumulator: Node<'_>,
-    key: Node<'_>,
-    value: Node<'_>,
-    source: &[u8],
-) -> bool {
-    let push_call = statement.named_child(0).unwrap_or(statement);
-    let Some(push_field) = push_call.child_by_field_name("function") else {
-        return false;
-    };
-    let Some(push_arguments) = push_call.child_by_field_name("arguments") else {
-        return false;
-    };
-    let Some(or_default_call) = push_field.child_by_field_name("value") else {
-        return false;
-    };
-    let Some(or_default_field) = or_default_call.child_by_field_name("function") else {
-        return false;
-    };
-    let Some(entry_call) = or_default_field.child_by_field_name("value") else {
-        return false;
-    };
-    let Some(entry_field) = entry_call.child_by_field_name("function") else {
-        return false;
-    };
-    let Some(entry_arguments) = entry_call.child_by_field_name("arguments") else {
-        return false;
-    };
-    push_call.kind() == "call_expression"
-        && field_text(push_field, "field", source) == Some("push")
-        && push_arguments.named_child_count() == 1
-        && push_arguments
-            .named_child(0)
-            .is_some_and(|argument| text(argument, source) == text(value, source))
-        && field_text(or_default_field, "field", source) == Some("or_default")
-        && field_text(entry_field, "field", source) == Some("entry")
-        && entry_field
-            .child_by_field_name("value")
-            .is_some_and(|map| text(map, source) == text(accumulator, source))
-        && entry_arguments.named_child_count() == 1
-        && entry_arguments
-            .named_child(0)
-            .is_some_and(|argument| text(argument, source) == text(key, source))
-}
-
-fn is_for_each_increment(statement: Node<'_>, accumulator: Node<'_>, source: &[u8]) -> bool {
-    let call = statement.named_child(0).unwrap_or(statement);
-    if call.kind() != "call_expression" {
-        return false;
-    }
-    let Some(function) = call.child_by_field_name("function") else {
-        return false;
-    };
-    if function.kind() != "field_expression"
-        || field_text(function, "field", source) != Some("for_each")
-        || function
-            .child_by_field_name("value")
-            .is_none_or(|input| text(input, source) != Some("self"))
-    {
-        return false;
-    }
-    let Some(arguments) = call.child_by_field_name("arguments") else {
-        return false;
-    };
-    let Some(closure) = arguments.named_child(0) else {
-        return false;
-    };
-    if arguments.named_child_count() != 1 || closure.kind() != "closure_expression" {
-        return false;
-    }
-    let Some(parameters) = closure.child_by_field_name("parameters") else {
-        return false;
-    };
-    let Some(item) = parameters.named_child(0) else {
-        return false;
-    };
-    let Some(assignment) = closure.child_by_field_name("body") else {
-        return false;
-    };
-    parameters.named_child_count() == 1
-        && item.kind() == "identifier"
-        && is_entry_increment(assignment, accumulator, item, source)
-}
-
-fn is_entry_increment(
-    assignment: Node<'_>,
-    accumulator: Node<'_>,
-    item: Node<'_>,
-    source: &[u8],
-) -> bool {
-    if assignment.kind() != "compound_assignment_expr"
-        || !has_child_kind(assignment, "+=")
-        || assignment
-            .child_by_field_name("right")
-            .and_then(|right| text(right, source))
-            != Some("1")
-    {
-        return false;
-    }
-    let Some(left) = assignment.child_by_field_name("left") else {
-        return false;
-    };
-    let Some(or_default_call) = left.named_child(0) else {
-        return false;
-    };
-    let Some(or_default_field) = or_default_call.child_by_field_name("function") else {
-        return false;
-    };
-    let Some(entry_call) = or_default_field.child_by_field_name("value") else {
-        return false;
-    };
-    let Some(entry_field) = entry_call.child_by_field_name("function") else {
-        return false;
-    };
-    let Some(entry_arguments) = entry_call.child_by_field_name("arguments") else {
-        return false;
-    };
-    left.kind() == "unary_expression"
-        && has_child_kind(left, "*")
-        && or_default_call.kind() == "call_expression"
-        && field_text(or_default_field, "field", source) == Some("or_default")
-        && entry_call.kind() == "call_expression"
-        && field_text(entry_field, "field", source) == Some("entry")
-        && entry_field
-            .child_by_field_name("value")
-            .is_some_and(|value| text(value, source) == text(accumulator, source))
-        && entry_arguments.named_child_count() == 1
-        && entry_arguments
-            .named_child(0)
-            .is_some_and(|key| text(key, source) == text(item, source))
-}
-
-fn evidence(
-    file: &ParsedFile,
-    function: Node<'_>,
-    callable_path: &str,
-) -> Result<ImplementationEvidence> {
-    Ok(ImplementationEvidence {
-        callable_path: callable_path.to_owned(),
-        span: source_span(file, function)?,
-        source_sha256: file.provenance.source_sha256.clone(),
-    })
-}
-
-fn source_span(file: &ParsedFile, node: Node<'_>) -> Result<SourceSpan> {
-    Ok(SourceSpan {
-        path: file.path.clone(),
-        start_byte: node
-            .start_byte()
-            .try_into()
-            .map_err(|_| Error::SourceTooLarge {
-                path: file.path.clone(),
-            })?,
-        end_byte: node
-            .end_byte()
-            .try_into()
-            .map_err(|_| Error::SourceTooLarge {
-                path: file.path.clone(),
-            })?,
-        start_line: (node.start_position().row + 1).try_into().map_err(|_| {
-            Error::SourceTooLarge {
-                path: file.path.clone(),
-            }
-        })?,
-        end_line: (node.end_position().row + 1)
-            .try_into()
-            .map_err(|_| Error::SourceTooLarge {
-                path: file.path.clone(),
-            })?,
-    })
-}
-
-fn has_child_kind(node: Node<'_>, expected: &str) -> bool {
-    let mut cursor = node.walk();
-    node.children(&mut cursor)
-        .any(|child| child.kind() == expected)
-}
-
-fn field_text<'a>(node: Node<'_>, field: &str, source: &'a [u8]) -> Option<&'a str> {
-    text(node.child_by_field_name(field)?, source)
-}
-
-fn text<'a>(node: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
-    std::str::from_utf8(source.get(node.byte_range())?).ok()
+/// Whether a derived behavior is specific enough to report when matched.
+pub fn is_reportable(form: &Form) -> bool {
+    form.size() >= MINIMUM_REPORTABLE_SIZE && describes_work(form)
 }

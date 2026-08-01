@@ -1,0 +1,111 @@
+{
+  "schema": 1,
+  "callable_package": "itertools",
+  "callable_version": "0.15.0",
+  "callable_path": "itertools::Itertools::into_group_map",
+  "catalog_sha256": "a09081972a2d12d35f69eb0ad376b24490cea4a4e3f8c54c419263bf6ce4e8a3",
+  "implementation": [
+    {
+      "callable_path": "into_group_map",
+      "span": {
+        "path": "src/lib.rs",
+        "start_byte": 140243,
+        "end_byte": 140457,
+        "start_line": 4042,
+        "end_line": 4048,
+        "start_column": null,
+        "end_column": null
+      },
+      "source_sha256": "sha256:cac2e34f5b83156078fbbb0137e173c1b4aa63528259f82100e16d7501692ee8"
+    },
+    {
+      "callable_path": "into_group_map_with_hasher",
+      "span": {
+        "path": "src/lib.rs",
+        "start_byte": 141422,
+        "end_byte": 141689,
+        "start_line": 4070,
+        "end_line": 4077,
+        "start_column": null,
+        "end_column": null
+      },
+      "source_sha256": "sha256:cac2e34f5b83156078fbbb0137e173c1b4aa63528259f82100e16d7501692ee8"
+    },
+    {
+      "callable_path": "into_group_map_with_hasher",
+      "span": {
+        "path": "src/group_map.rs",
+        "start_byte": 310,
+        "end_byte": 663,
+        "start_line": 12,
+        "end_line": 25,
+        "start_column": null,
+        "end_column": null
+      },
+      "source_sha256": "sha256:a34116bc64f73ebff084077843157a11c23b8245f6efac73ff93ff9376156dd8"
+    }
+  ],
+  "program": {
+    "sequence": [
+      {
+        "let": {
+          "pattern": {
+            "binding": 0
+          },
+          "value": {
+            "construct": "HashMap"
+          }
+        }
+      },
+      {
+        "traverse": {
+          "sequence": {
+            "free": 0
+          },
+          "item": {
+            "tuple": [
+              {
+                "binding": 1
+              },
+              {
+                "binding": 2
+              }
+            ]
+          },
+          "body": {
+            "method": {
+              "name": "push",
+              "receiver": {
+                "method": {
+                  "name": "or_default",
+                  "receiver": {
+                    "method": {
+                      "name": "entry",
+                      "receiver": {
+                        "local": 0
+                      },
+                      "arguments": [
+                        {
+                          "local": 1
+                        }
+                      ]
+                    }
+                  },
+                  "arguments": []
+                }
+              },
+              "arguments": [
+                {
+                  "local": 2
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "local": 0
+      }
+    ]
+  }
+}

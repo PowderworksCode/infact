@@ -42,7 +42,7 @@ infact duplication . --parser-path /path/to/parser-packs --jsonl
 ## Library behavior matches
 
 `infact catalog` reduces rustdoc JSON to stable, typed API facts. The checked-in
-`fact-packs/rust-itertools/api/itertools-0.15.0.json` contains 193 public callables from
+`infact-packs/rust-itertools/api/itertools-0.15.0.json` contains 193 public callables from
 `itertools 0.15.0`: 170 trait methods and 23 free functions.
 
 ```sh
@@ -50,20 +50,20 @@ cargo +nightly rustdoc --manifest-path /path/to/itertools/Cargo.toml \
   --lib -Z unstable-options --output-format json
 infact catalog /path/to/target/doc/itertools.json \
   --package itertools --version 0.15.0 \
-  --output fact-packs/rust-itertools/api/itertools-0.15.0.json
+  --output infact-packs/rust-itertools/api/itertools-0.15.0.json
 ```
 
 Catalog files are data. Infact configuration remains TOML:
 
 ```toml
 [catalogs]
-search-paths = ["fact-packs/rust-itertools/api"]
+search-paths = ["infact-packs/rust-itertools/api"]
 
 [behaviors]
-search-paths = ["fact-packs/rust-itertools/behaviors"]
+search-paths = ["infact-packs/rust-itertools/behaviors"]
 
 [macro-behaviors]
-search-paths = ["fact-packs/rust-strum/macro-behaviors"]
+search-paths = ["infact-packs/rust-strum/macro-behaviors"]
 ```
 
 Derive a behavior from library source:
@@ -72,7 +72,7 @@ Derive a behavior from library source:
 infact behavior derive /path/to/itertools-0.15.0 \
   --callable itertools::Itertools::counts \
   --config infact.toml \
-  --output fact-packs/rust-itertools/behaviors/itertools-counts-0.15.0.json
+  --output infact-packs/rust-itertools/behaviors/itertools-counts-0.15.0.json
 ```
 
 For `counts`, derivation follows the public method into
@@ -81,6 +81,12 @@ input, bound item, entry key, and returned value. Loop operations are nested
 inside `iterate`, so dataflow and control scope are explicit rather than
 implied by a flat operation list. Behavior matching requires this derived
 artifact as well as the compatible external signature.
+
+Deriving a library's full behavior set produces a large amount of JSON that is
+reproducible from the library source, so it is generated on demand rather than
+committed. `infact-packs/` holds only what this repository's own tests and
+documentation depend on; `/generated-packs` is ignored and is the place to build
+a complete pack.
 
 The checked-in family currently contains:
 
@@ -127,7 +133,7 @@ infact behavior derive-macro /path/to/probe-crate \
   --macro-version 0.28.0 \
   --derive-path strum::Display \
   --config infact.toml \
-  --output fact-packs/rust-strum/macro-behaviors/strum-display-kebab-0.28.0.json
+  --output infact-packs/rust-strum/macro-behaviors/strum-display-kebab-0.28.0.json
 ```
 
 The checked macro artifacts cover `Display`, `AsRefStr` in kebab and snake
@@ -174,7 +180,7 @@ This is deliberately incomplete. Call edges are not yet compiler-resolved,
 left unresolved. `--source` and `--version` can select another Rust checkout
 without using the active toolchain.
 
-The corresponding local fact-pack builder implements Straitjacket's external
+The corresponding local Infact-pack builder implements Straitjacket's external
 builder protocol:
 
 ```sh
@@ -220,10 +226,10 @@ Entl observations -> Infact facts -> Straitjacket findings
 Tree-sitter grammars are runtime-loaded Wasm artifacts. No language grammar is
 linked into the Infact binary.
 
-## Fact packs
+## Infact packs
 
-One fact pack contains all knowledge derived about a language or library:
-signatures, behaviors, effects, types, and optional Wasm extractors. Fact packs
+One Infact pack contains all knowledge derived about a language or library:
+signatures, behaviors, effects, types, and optional Wasm extractors. Infact packs
 are OCI artifacts. GHCR provides public prebuilt artifacts, while local builds
 and private registries use the same format. Publication is always explicit.
 
@@ -239,14 +245,14 @@ ghcr.io/zmaril/infact-facts/rust-itertools@sha256:...
 ```
 
 The first form selects a release. The second identifies its exact contents.
-See [the fact-pack design](docs/fact-packs.md) for resolution, local generation,
+See [the fact-pack design](docs/infact-packs.md) for resolution, local generation,
 compatibility, dependency selection, and the implementation sequence.
 
 The first implemented authoring check validates `pack.toml`, safe content
 paths, and every declared content digest:
 
 ```sh
-infact facts validate /path/to/fact-pack/pack.toml
+infact facts validate /path/to/infact-pack/pack.toml
 ```
 
 Analyzer source trees use a deterministic path-and-content digest:
@@ -259,7 +265,7 @@ A validated directory can be packaged into a deterministic local OCI image
 layout without registry access:
 
 ```sh
-infact facts package /path/to/fact-pack/pack.toml --output /path/to/layout
+infact facts package /path/to/infact-pack/pack.toml --output /path/to/layout
 ```
 
 Import verifies the OCI index, manifest, canonical `pack.toml`, every descriptor

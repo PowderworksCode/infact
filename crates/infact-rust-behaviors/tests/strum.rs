@@ -2,9 +2,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use entl_tree_sitter::ParserCatalog;
-use infact_core::{
-    DerivedMacroBehavior, LibraryBehaviorPattern, LibraryTarget, MacroBehavior, StringCase,
-};
+use infact_core::{DerivedMacroBehavior, LibraryTarget, MacroBehavior, StringCase};
 use infact_rust_behaviors::{MacroDerivationRequest, analyze_repository, derive_macro_behavior};
 
 #[test]
@@ -74,7 +72,7 @@ fn derives_strum_behaviors_and_finds_equivalent_manual_enums() {
         serde_json::from_slice::<DerivedMacroBehavior>(
             &std::fs::read(
                 crate_root
-                    .join("../../fact-packs/rust-strum/macro-behaviors")
+                    .join("../../infact-packs/rust-strum/macro-behaviors")
                     .join(filename),
             )
             .unwrap(),
@@ -96,10 +94,6 @@ fn derives_strum_behaviors_and_finds_equivalent_manual_enums() {
     assert_eq!(behavior_match.span.path, Path::new("src/lib.rs"));
     assert_eq!(behavior_match.span.start_line, 2);
     assert_eq!(behavior_match.span.end_line, 22);
-    assert_eq!(
-        behavior_match.pattern,
-        LibraryBehaviorPattern::EnumManualDisplay
-    );
     assert!(matches!(
         behavior_match.target,
         LibraryTarget::DeriveMacro {
@@ -109,17 +103,14 @@ fn derives_strum_behaviors_and_finds_equivalent_manual_enums() {
             ..
         } if package == "strum" && version == "0.28.0" && path == "strum::Display"
     ));
+    // the matched derive identifies itself; there is no separate pattern name
     assert_eq!(
         report
             .matches
             .iter()
-            .map(|fact| fact.value.pattern)
+            .map(|fact| fact.value.target.path())
             .collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            LibraryBehaviorPattern::EnumManualDisplay,
-            LibraryBehaviorPattern::EnumManualAsRefStr,
-            LibraryBehaviorPattern::EnumManualVariantArray,
-        ])
+        BTreeSet::from(["strum::AsRefStr", "strum::Display", "strum::VariantArray"])
     );
     assert_eq!(
         report

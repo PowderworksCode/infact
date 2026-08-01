@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+pub use infact_normalize::{Form, Pattern};
 use serde::{Deserialize, Serialize};
 
 pub const EXTERNAL_CATALOG_SCHEMA: u32 = 1;
@@ -12,13 +13,31 @@ pub const CALL_EFFECT_CATALOG_SCHEMA: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SourceSpan {
     pub path: PathBuf,
-    pub start_byte: u64,
-    pub end_byte: u64,
+    /// Byte offsets into the file as the producer read it.
+    ///
+    /// A parser knows these because it read the bytes. A compiler reports
+    /// lines and columns, so a span it produced has none, and a reporter must
+    /// not invent them.
+    pub start_byte: Option<u64>,
+    pub end_byte: Option<u64>,
     pub start_line: u32,
     pub end_line: u32,
+    /// Columns, when the producer supplies them. A whole-line span has none.
+    #[serde(default)]
+    pub start_column: Option<u32>,
+    #[serde(default)]
+    pub end_column: Option<u32>,
 }
 
 impl SourceSpan {
+    /// The byte range, when the producer supplied one.
+    ///
+    /// Comparisons that need exact offsets — overlap, containment — cannot be
+    /// made without them, and should decline rather than assume.
+    pub fn byte_range(&self) -> Option<(u64, u64)> {
+        Some((self.start_byte?, self.end_byte?))
+    }
+
     pub fn line_count(&self) -> u32 {
         self.end_line.saturating_sub(self.start_line) + 1
     }
@@ -237,7 +256,6 @@ pub enum ExternalType {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct LibraryBehaviorMatch {
     pub target: LibraryTarget,
-    pub pattern: LibraryBehaviorPattern,
     pub span: SourceSpan,
 }
 
@@ -266,25 +284,6 @@ impl LibraryTarget {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum LibraryBehaviorPattern {
-    IteratorCollectVecJoin,
-    IteratorManualCounts,
-    IteratorManualCountsBy,
-    IteratorManualGroupMap,
-    IteratorManualGroupMapBy,
-    IteratorCollectThenSort,
-    IteratorCollectThenSortBy,
-    IteratorCollectThenSortByKey,
-    IteratorCollectThenSortUnstable,
-    IteratorCollectThenSortUnstableBy,
-    IteratorCollectThenSortUnstableByKey,
-    EnumManualDisplay,
-    EnumManualAsRefStr,
-    EnumManualVariantArray,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct DerivedLibraryBehavior {
     pub schema: u32,
@@ -293,7 +292,7 @@ pub struct DerivedLibraryBehavior {
     pub callable_path: String,
     pub catalog_sha256: String,
     pub implementation: Vec<ImplementationEvidence>,
-    pub program: NormalizedBehavior,
+    pub program: Form,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -302,79 +301,6 @@ pub struct ImplementationEvidence {
     pub span: SourceSpan,
     pub source_sha256: String,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct NormalizedBehavior {
-    pub operations: Vec<NormalizedOperation>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum NormalizedOperation {
-    CreateMap {
-        output: NormalizedValue,
-    },
-    Iterate {
-        input: NormalizedValue,
-        item: NormalizedValue,
-        body: Vec<NormalizedOperation>,
-    },
-    Apply {
-        function: NormalizedValue,
-        input: NormalizedValue,
-        output: NormalizedValue,
-    },
-    DestructurePair {
-        input: NormalizedValue,
-        first: NormalizedValue,
-        second: NormalizedValue,
-    },
-    IncrementMapEntry {
-        map: NormalizedValue,
-        key: NormalizedValue,
-        amount: u64,
-    },
-    PushMapEntry {
-        map: NormalizedValue,
-        key: NormalizedValue,
-        value: NormalizedValue,
-    },
-    CollectVec {
-        input: NormalizedValue,
-        output: NormalizedValue,
-    },
-    Sort {
-        value: NormalizedValue,
-        stability: SortStability,
-        comparison: SortComparison,
-    },
-    IntoIterator {
-        input: NormalizedValue,
-        output: NormalizedValue,
-    },
-    Return {
-        value: NormalizedValue,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum SortStability {
-    Stable,
-    Unstable,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum SortComparison {
-    Natural,
-    Comparator { function: NormalizedValue },
-    Key { function: NormalizedValue },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct NormalizedValue(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct DerivedMacroBehavior {

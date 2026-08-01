@@ -144,7 +144,7 @@ fn imports_and_lists_a_pack_in_the_local_cache() {
 fn checked_in_fact_packs_are_complete() {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     for name in ["rust-core", "rust-itertools", "rust-strum"] {
-        let manifest = repository.join("fact-packs").join(name).join("pack.toml");
+        let manifest = repository.join("infact-packs").join(name).join("pack.toml");
         let output = binary()
             .args(["facts", "validate"])
             .arg(manifest)

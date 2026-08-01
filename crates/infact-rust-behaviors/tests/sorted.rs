@@ -16,7 +16,7 @@ fn derives_and_matches_the_six_iterator_sorting_methods() {
     );
     let catalog: ExternalCatalog = serde_json::from_slice(
         &std::fs::read(
-            crate_root.join("../../fact-packs/rust-itertools/api/itertools-0.15.0.json"),
+            crate_root.join("../../infact-packs/rust-itertools/api/itertools-0.15.0.json"),
         )
         .unwrap(),
     )
@@ -32,7 +32,7 @@ fn derives_and_matches_the_six_iterator_sorting_methods() {
     let behaviors = methods.map(|method| {
         serde_json::from_slice::<DerivedLibraryBehavior>(
             &std::fs::read(crate_root.join(format!(
-                "../../fact-packs/rust-itertools/behaviors/itertools-{}-0.15.0.json",
+                "../../infact-packs/rust-itertools/behaviors/itertools-{}-0.15.0.json",
                 method.replace('_', "-")
             )))
             .unwrap(),

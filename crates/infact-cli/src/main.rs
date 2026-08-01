@@ -714,6 +714,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .ok_or_else(|| format!("no external catalog contains {callable}"))?;
             let behavior = derive_behavior(source_root, &parsers, catalog, &callable)?;
+            println!(
+                "{}  size {}  from {}",
+                behavior.callable_path,
+                behavior.program.size(),
+                behavior
+                    .implementation
+                    .iter()
+                    .map(|evidence| evidence.callable_path.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" -> ")
+            );
             std::fs::write(output, serde_json::to_vec_pretty(&behavior)?)?;
         }
         Command::Behavior {

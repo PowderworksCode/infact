@@ -2,13 +2,13 @@
 search-paths = ["../entl/parser-packs"]
 
 [catalogs]
-search-paths = ["fact-packs/rust-itertools/api"]
+search-paths = ["infact-packs/rust-itertools/api"]
 
 [behaviors]
-search-paths = ["fact-packs/rust-itertools/behaviors"]
+search-paths = ["infact-packs/rust-itertools/behaviors"]
 
 [macro-behaviors]
-search-paths = ["fact-packs/rust-strum/macro-behaviors"]
+search-paths = ["infact-packs/rust-strum/macro-behaviors"]
 
 [duplication.exact]
 min-tokens = 50

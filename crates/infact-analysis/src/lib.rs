@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use entl_semantics::SemanticObservations;
 use entl_tree_sitter::ParserCatalog;
 use infact_core::{
     CallEffectCatalog, DerivedLibraryBehavior, DerivedMacroBehavior, EffectTrace, ExactTokenClone,
@@ -32,6 +33,23 @@ pub struct AnalysisSelection {
     pub call_effects: bool,
 }
 
+/// How the effect call graph was resolved.
+///
+/// A consumer needs this to say what a clean report means. Syntax resolution
+/// cannot see a call written through an import, so "no effects found" is a
+/// weaker claim than it looks; resolved observations make it a real one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EffectResolution {
+    /// No effect analysis ran.
+    #[default]
+    None,
+    /// Call destinations were guessed from syntax.
+    Syntax,
+    /// Call destinations came from a compiler that had already resolved them.
+    Observed,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactBatch {
     pub exact_clones: Vec<Fact<ExactTokenClone>>,
@@ -40,6 +58,8 @@ pub struct FactBatch {
     pub call_effects: Vec<CallEffectCatalog>,
     pub effect_traces: Vec<Fact<EffectTrace>>,
     pub diagnostics: Vec<AnalysisDiagnostic>,
+    #[serde(default)]
+    pub effect_resolution: EffectResolution,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,13 +174,41 @@ pub fn analyze_repository(
     packs: &FactPackSet,
     selection: &AnalysisSelection,
 ) -> Result<FactBatch, Error> {
+    analyze_repository_with_observations(root, parsers, packs, selection, &[])
+}
+
+/// Analyze a repository, using resolved semantic observations where they exist.
+///
+/// Observations sharpen the result; syntax is the floor. A repository with no
+/// observations, in a language with no provider, or one that will not compile
+/// still gets analyzed — less precisely, and the diagnostics say so.
+pub fn analyze_repository_with_observations(
+    root: impl AsRef<Path>,
+    parsers: &ParserCatalog,
+    packs: &FactPackSet,
+    selection: &AnalysisSelection,
+    observations: &[SemanticObservations],
+) -> Result<FactBatch, Error> {
     packs.validate_runtime(parsers)?;
     let root = root.as_ref();
     let mut batch = FactBatch::default();
     if selection.call_effects {
         batch.call_effects.clone_from(&packs.call_effects);
-        let report =
-            infact_rust_effects::analyze_repository_effects(root, parsers, &packs.call_effects)?;
+        let resolved = SemanticObservations::merge(observations.to_vec(), "repository")
+            .filter(|merged| merged.coverage.call_edges);
+        let report = match &resolved {
+            Some(merged) => {
+                infact_rust_effects::analyze_observed_effects(merged, &packs.call_effects)?
+            }
+            None => {
+                infact_rust_effects::analyze_repository_effects(root, parsers, &packs.call_effects)?
+            }
+        };
+        batch.effect_resolution = if resolved.is_some() {
+            EffectResolution::Observed
+        } else {
+            EffectResolution::Syntax
+        };
         batch.effect_traces = report.effects;
         batch
             .diagnostics
@@ -264,7 +312,7 @@ mod tests {
     fn install_pack(name: &str, cache: &FactPackCache) -> CachedFactPack {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("fact-packs")
+            .join("infact-packs")
             .join(name);
         let manifest =
             FactPackManifest::parse(&fs::read_to_string(root.join("pack.toml")).unwrap()).unwrap();
@@ -272,6 +320,98 @@ mod tests {
         let layout = output_root.path().join("layout");
         build_oci_layout(&manifest, &root, &layout).unwrap();
         cache.import_oci_layout(layout).unwrap()
+    }
+
+    fn effects_fixture() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../infact-rust-effects/tests/fixtures/imports")
+    }
+
+    fn parsers() -> ParserCatalog {
+        let discovery = ParserCatalog::discover([
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../entl/parser-packs")
+        ]);
+        assert!(discovery.errors.is_empty(), "{:?}", discovery.errors);
+        discovery.catalog
+    }
+
+    fn effect_packs(cache: &FactPackCache) -> FactPackSet {
+        FactPackSet::load(&[install_pack("rust-core", cache)]).unwrap()
+    }
+
+    /// Observations sharpen the analysis; without them it still runs.
+    #[test]
+    fn observations_replace_syntax_resolution_when_they_are_available() {
+        let cache_root = tempfile::tempdir().unwrap();
+        let cache = FactPackCache::open(cache_root.path().join("cache")).unwrap();
+        let packs = effect_packs(&cache);
+        let parsers = parsers();
+        let selection = AnalysisSelection {
+            call_effects: true,
+            ..AnalysisSelection::default()
+        };
+
+        let syntax = analyze_repository(effects_fixture(), &parsers, &packs, &selection).unwrap();
+        assert_eq!(syntax.effect_resolution, EffectResolution::Syntax);
+
+        let observed_input: SemanticObservations =
+            read_json(&effects_fixture().join("observations.json"), "observations").unwrap();
+        let observed = analyze_repository_with_observations(
+            effects_fixture(),
+            &parsers,
+            &packs,
+            &selection,
+            &[observed_input],
+        )
+        .unwrap();
+        assert_eq!(observed.effect_resolution, EffectResolution::Observed);
+
+        // the import spellings only resolve on the observed path
+        let callables = |batch: &FactBatch| {
+            let mut names = batch
+                .effect_traces
+                .iter()
+                .map(|fact| fact.value.callable.clone())
+                .collect::<Vec<_>>();
+            names.sort();
+            names.dedup();
+            names
+        };
+        assert!(
+            callables(&observed).len() > callables(&syntax).len(),
+            "syntax {:?} should see less than observed {:?}",
+            callables(&syntax),
+            callables(&observed)
+        );
+        assert!(
+            callables(&observed)
+                .iter()
+                .any(|name| name.ends_with("via_module"))
+        );
+    }
+
+    /// Observations that never looked for calls must not be trusted for calls.
+    #[test]
+    fn observations_without_call_coverage_fall_back_to_syntax() {
+        let cache_root = tempfile::tempdir().unwrap();
+        let cache = FactPackCache::open(cache_root.path().join("cache")).unwrap();
+        let packs = effect_packs(&cache);
+        let mut observations: SemanticObservations =
+            read_json(&effects_fixture().join("observations.json"), "observations").unwrap();
+        observations.coverage.call_edges = false;
+
+        let batch = analyze_repository_with_observations(
+            effects_fixture(),
+            &parsers(),
+            &packs,
+            &AnalysisSelection {
+                call_effects: true,
+                ..AnalysisSelection::default()
+            },
+            &[observations],
+        )
+        .unwrap();
+        assert_eq!(batch.effect_resolution, EffectResolution::Syntax);
     }
 
     #[test]

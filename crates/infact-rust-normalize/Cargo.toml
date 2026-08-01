@@ -1,0 +1,16 @@
+[package]
+name = "infact-rust-normalize"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Normalizes Rust syntax into Infact's language-neutral behavior form."
+
+[dependencies]
+entl-tree-sitter.workspace = true
+infact-normalize = { path = "../infact-normalize" }
+tree-sitter.workspace = true
+
+[dev-dependencies]
+entl-tree-sitter.workspace = true
