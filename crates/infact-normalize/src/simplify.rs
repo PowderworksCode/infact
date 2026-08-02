@@ -20,7 +20,7 @@
 //!
 //! Applied to a fixpoint, they carry both sides toward the same shape.
 
-use crate::{Form, Pattern};
+use crate::{Direction, Form, Pattern};
 
 /// How many times to sweep before giving up.
 ///
@@ -138,6 +138,9 @@ impl Form {
         let rebuilt = self.map_children(&|child| child.sweep());
         rebuilt
             .as_fused()
+            .or_else(|| rebuilt.as_searched())
+            .or_else(|| rebuilt.as_returned_sequence())
+            .or_else(|| rebuilt.as_optional_search())
             .or_else(|| rebuilt.as_escape())
             .or_else(|| rebuilt.as_traversal())
             .or_else(|| rebuilt.as_recovered_escape())
@@ -191,6 +194,149 @@ impl Form {
                 })),
             }),
         })
+    }
+
+    /// A walk that escapes with a value and otherwise yields nothing is a
+    /// search for an optional.
+    ///
+    /// Rust says this in its types: `find` returns `Option<T>`, so the form
+    /// already carries `Some` around what it escaped with. JavaScript says it
+    /// in a convention — return the element, or fall off the end and yield
+    /// `undefined` — and the type is `T | undefined`, which is the same claim
+    /// spelled without a constructor. Making the constructor explicit is what
+    /// lets one behavior derived from either language match code written in the
+    /// other, and it is why `find` and `some` do not collapse: `some` yields a
+    /// literal, not an absence.
+    ///
+    /// Only a walk whose escapes are all bare is wrapped, so a form that
+    /// already speaks in optionals is left exactly as it is.
+    fn as_optional_search(&self) -> Option<Self> {
+        let Self::Sequence(steps) = self else {
+            return None;
+        };
+        let [
+            Self::Traverse {
+                sequence,
+                item,
+                body,
+                direction,
+            },
+            tail,
+        ] = steps.as_slice()
+        else {
+            return None;
+        };
+        if !matches!(tail, Self::Variant { name, payload } if name == "None" && payload.is_empty())
+        {
+            return None;
+        }
+        let mut escapes = Vec::new();
+        escape_values(body, &mut escapes);
+        // nothing escapes: this walks for effect and yields nothing, which is a
+        // traversal rather than a search
+        if escapes.is_empty() {
+            return None;
+        }
+        if escapes
+            .iter()
+            .any(|value| matches!(value, Self::Variant { name, .. } if name == "Some"))
+        {
+            return None;
+        }
+        Some(Self::Sequence(vec![
+            Self::Traverse {
+                sequence: sequence.clone(),
+                item: item.clone(),
+                body: Box::new(body.escapes_wrapped()),
+                direction: *direction,
+            },
+            tail.clone(),
+        ]))
+    }
+
+    /// Returning what a sequence of steps produces is doing them and returning.
+    ///
+    /// A block's value is its last step, so `return (do A B)` performs `A` and
+    /// returns `B`, which is what `do A (return B)` says. The two arise from
+    /// writing one computation as an expression or as statements — a library
+    /// implementing a search writes the loop, and a caller writes
+    /// `return xs.filter(p)[0]` — and they have to meet.
+    fn as_returned_sequence(&self) -> Option<Self> {
+        let Self::Return(value) = self else {
+            return None;
+        };
+        let Self::Sequence(steps) = value.as_ref() else {
+            return None;
+        };
+        let (last, rest) = steps.split_last()?;
+        // a block with one step is that step, and moving a return into it would
+        // only shuffle the same form back and forth
+        if rest.is_empty() {
+            return None;
+        }
+        let mut moved = rest.to_vec();
+        moved.push(Self::Return(Box::new(last.clone())));
+        Some(Self::Sequence(moved))
+    }
+
+    /// The first of what was retained is a search.
+    ///
+    /// Filtering a sequence and taking the first survivor visits every element
+    /// only because that is how it is written; what it describes is stopping at
+    /// the first one that satisfies the test. That is the same computation a
+    /// loop with an early return performs, and it is what a library offers as a
+    /// single operation.
+    ///
+    /// Taking the *last* survivor is the same search run the other way, and it
+    /// reduces to the same shape walking backwards. The direction lives inside
+    /// the traversal precisely so that these two do not collapse: expressed as
+    /// a reversal wrapped around the sequence it would sit where the derived
+    /// behavior has a hole, and a hole absorbs it, so `find` would match
+    /// `findLast` code and name the wrong API.
+    fn as_searched(&self) -> Option<Self> {
+        let Self::Method {
+            name,
+            receiver,
+            arguments,
+        } = self
+        else {
+            return None;
+        };
+        if !arguments.is_empty() {
+            return None;
+        }
+        let direction = match name.as_str() {
+            "first" => Direction::Forward,
+            "last" => Direction::Backward,
+            _ => return None,
+        };
+        let Self::Retain {
+            sequence,
+            item,
+            body,
+        } = receiver.as_ref()
+        else {
+            return None;
+        };
+        let Pattern::Binding(index) = item.as_ref() else {
+            return None;
+        };
+        Some(Self::Sequence(vec![
+            Self::Traverse {
+                sequence: sequence.clone(),
+                item: item.clone(),
+                body: Box::new(Self::Branch {
+                    condition: body.clone(),
+                    consequence: Box::new(Self::Return(Box::new(Self::Local(*index)))),
+                    alternative: None,
+                }),
+                direction,
+            },
+            Self::Variant {
+                name: "None".to_owned(),
+                payload: Vec::new(),
+            },
+        ]))
     }
 
     /// Breaking out of a fold is returning from a loop, and continuing is
@@ -253,6 +399,7 @@ impl Form {
             sequence: receiver.clone(),
             item: Box::new(item),
             body: body.clone(),
+            direction: Direction::Forward,
         })
     }
 
@@ -384,6 +531,16 @@ fn collect_pattern(pattern: &Pattern, bound: &mut Vec<u32>) {
     }
 }
 
+/// Every value a form escapes with, however deeply nested.
+fn escape_values<'a>(form: &'a Form, into: &mut Vec<&'a Form>) {
+    if let Form::Return(value) = form {
+        into.push(value.as_ref());
+    }
+    for child in form.children() {
+        escape_values(child, into);
+    }
+}
+
 fn is_unit(form: &Form) -> bool {
     matches!(form, Form::Literal)
 }
@@ -430,6 +587,7 @@ impl Form {
                 sequence,
                 item,
                 body,
+                direction,
             },
             exhausted,
         ] = parts.as_slice()
@@ -437,6 +595,12 @@ impl Form {
             return None;
         };
         if !is_none_variant(exhausted) {
+            return None;
+        }
+        // A lazy adaptor walks its sequence forwards. Lifting a backwards
+        // search into one would describe an operation nobody wrote, so the
+        // backwards case declines rather than being quietly turned around.
+        if !direction.is_forward() {
             return None;
         }
         // A stateful adaptor's `next` is not one step of anything expressible
@@ -609,6 +773,7 @@ mod lifting {
                 sequence: Box::new(Form::Free(0)),
                 item: Box::new(Pattern::Binding(1)),
                 body: Box::new(body),
+                direction: Direction::Forward,
             },
             none(),
         ])
@@ -687,6 +852,7 @@ mod lifting {
                     sequence: Box::new(Form::Free(0)),
                     item: Box::new(Pattern::Binding(1)),
                     body: Box::new(produced()),
+                    direction: Direction::Forward,
                 },
                 Form::Literal,
             ])
@@ -743,7 +909,9 @@ mod lifting {
                     sequence: Box::new(Form::Free(2)),
                     item: Box::new(Pattern::Binding(3)),
                     body: Box::new(produced()),
+                    direction: Direction::Forward,
                 }),
+                direction: Direction::Forward,
             },
             none(),
         ]);
@@ -804,6 +972,7 @@ mod tests {
         let traversal = Form::Method {
             name: "break_value".to_owned(),
             receiver: Box::new(Form::Traverse {
+                direction: Direction::Forward,
                 sequence: Box::new(Form::Free(0)),
                 item: Box::new(Pattern::Binding(1)),
                 body: Box::new(Form::Return(Box::new(Form::Local(1)))),
@@ -891,8 +1060,61 @@ mod tests {
     }
 
     #[test]
+    fn taking_the_first_of_what_was_retained_is_a_search() {
+        let first_of_filtered = Form::Method {
+            name: "first".to_owned(),
+            receiver: Box::new(Form::Retain {
+                sequence: Box::new(Form::Free(0)),
+                item: Box::new(Pattern::Binding(1)),
+                body: Box::new(Form::Method {
+                    name: "is_ready".to_owned(),
+                    receiver: Box::new(Form::Local(1)),
+                    arguments: Vec::new(),
+                }),
+            }),
+            arguments: Vec::new(),
+        };
+        assert_eq!(
+            first_of_filtered.simplify().to_string(),
+            "(do (traverse f0 v1 (branch (method is_ready v1) \
+             (return (variant Some v1)))) (variant None))",
+            "a search that yields the element or nothing yields an optional, \
+             which is the shape a language with an option type writes directly"
+        );
+    }
+
+    /// Searching backwards is not searching forwards.
+    ///
+    /// `filter(p)` then taking the LAST survivor answers a different question,
+    /// and rewriting it to a forward search would name the wrong API. It is
+    /// left alone, so it fails to match rather than matching wrongly.
+    #[test]
+    fn taking_the_last_of_what_was_retained_is_left_alone() {
+        let end_of_filtered = |end: &str| Form::Method {
+            name: end.to_owned(),
+            receiver: Box::new(Form::Retain {
+                sequence: Box::new(Form::Free(0)),
+                item: Box::new(Pattern::Binding(1)),
+                body: Box::new(Form::Local(1)),
+            }),
+            arguments: Vec::new(),
+        };
+        let last = end_of_filtered("last").simplify();
+        assert_ne!(
+            last,
+            end_of_filtered("first").simplify(),
+            "a backwards search must not reduce to a forwards one"
+        );
+        assert!(
+            last.to_string().contains("traverse-back"),
+            "a backwards search walks the other way: {last}"
+        );
+    }
+
+    #[test]
     fn a_form_with_no_applicable_law_is_unchanged() {
         let plain = Form::Traverse {
+            direction: Direction::Forward,
             sequence: Box::new(Form::Free(0)),
             item: Box::new(Pattern::Binding(0)),
             body: Box::new(Form::Method {

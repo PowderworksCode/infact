@@ -160,6 +160,24 @@ pub enum Form {
         sequence: Box<Form>,
         item: Box<Pattern>,
         body: Box<Form>,
+        /// Which way the walk runs.
+        ///
+        /// This lives inside the traversal rather than on the sequence because
+        /// a pattern has to be able to see it. Expressed as a wrapper around
+        /// the sequence — a reversal applied before walking — it would sit
+        /// exactly where a derived behavior has a hole, and a hole absorbs
+        /// anything: the forward search would match backwards code and report
+        /// the opposite API. Held here, `find` and `findLast` cannot be
+        /// mistaken for one another.
+        ///
+        /// A forward walk is not written out. Every behavior derived before
+        /// this field existed is a forward walk, and pack contents are
+        /// digested — emitting a default would change the digest of every
+        /// published behavior that traverses anything while saying nothing new
+        /// about it. Only a backwards walk is recorded, because only a
+        /// backwards walk is news.
+        #[serde(default, skip_serializing_if = "Direction::is_forward")]
+        direction: Direction,
     },
     /// Producing a new sequence by transforming each element.
     Transform {
@@ -240,6 +258,31 @@ pub enum Form {
         kind: String,
         parts: Vec<Form>,
     },
+}
+
+/// Which way a walk runs.
+///
+/// Only a walk that can stop early is changed by this: searching from the front
+/// and searching from the back are different questions with different answers.
+/// A walk that visits everything reaches the same elements either way.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum Direction {
+    /// From the first element toward the last.
+    #[default]
+    Forward,
+    /// From the last element toward the first.
+    Backward,
+}
+
+impl Direction {
+    /// Whether this is the direction a walk runs unless it says otherwise.
+    #[must_use]
+    pub const fn is_forward(&self) -> bool {
+        matches!(self, Self::Forward)
+    }
 }
 
 /// One alternative of a `Select`, and what it evaluates to.
@@ -409,10 +452,12 @@ impl Form {
                 sequence,
                 item,
                 body,
+                direction,
             } => Self::Traverse {
                 sequence: apply(sequence),
                 item: item.clone(),
                 body: apply(body),
+                direction: *direction,
             },
             Self::Sift {
                 sequence,
@@ -834,7 +879,14 @@ impl Display for Form {
                 sequence,
                 item,
                 body,
-            } => write!(formatter, "(traverse {sequence} {item} {body})"),
+                direction,
+            } => {
+                let name = match direction {
+                    Direction::Forward => "traverse",
+                    Direction::Backward => "traverse-back",
+                };
+                write!(formatter, "({name} {sequence} {item} {body})")
+            }
             Self::Sift {
                 sequence,
                 item,
@@ -1016,6 +1068,7 @@ mod tests {
                 receiver: Box::new(Form::Local(0)),
                 arguments: vec![Form::Local(1)],
             }),
+            direction: Direction::Forward,
         }
     }
 
@@ -1048,6 +1101,44 @@ mod tests {
         let pair = Form::Sequence(vec![traverse(), traverse()]);
         let pattern = Form::Sequence(vec![traverse(), traverse()]);
         assert_eq!(pair.locate_all(&pattern), vec![0..2]);
+    }
+
+    /// A forward walk must serialize exactly as it did before it had a
+    /// direction, or every published behavior that traverses anything changes
+    /// digest without changing meaning.
+    #[test]
+    fn adding_a_direction_did_not_change_what_a_forward_walk_serializes_to() {
+        let written_before_the_field_existed =
+            r#"{"traverse":{"sequence":{"free":0},"item":{"binding":1},"body":{"local":1}}}"#;
+        let forward = Form::Traverse {
+            sequence: Box::new(Form::Free(0)),
+            item: Box::new(Pattern::Binding(1)),
+            body: Box::new(Form::Local(1)),
+            direction: Direction::Forward,
+        };
+        assert_eq!(
+            serde_json::to_string(&forward).unwrap(),
+            written_before_the_field_existed,
+            "a forward walk is written exactly as it always was"
+        );
+        let decoded: Form = serde_json::from_str(written_before_the_field_existed).unwrap();
+        assert_eq!(
+            decoded, forward,
+            "a pack written before the field still reads"
+        );
+
+        let backward = Form::Traverse {
+            sequence: Box::new(Form::Free(0)),
+            item: Box::new(Pattern::Binding(1)),
+            body: Box::new(Form::Local(1)),
+            direction: Direction::Backward,
+        };
+        assert!(
+            serde_json::to_string(&backward)
+                .unwrap()
+                .contains("backward"),
+            "a backwards walk is recorded, because it is news"
+        );
     }
 
     #[test]

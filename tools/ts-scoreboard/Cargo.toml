@@ -1,0 +1,20 @@
+[package]
+name = "ts-scoreboard"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+description = "Scores TypeScript behavior matches against the lint plugins' own rule tests."
+
+# Deliberately outside the Infact workspace, like the other harnesses here: this
+# is how the work is measured, not part of what ships.
+[workspace]
+
+[dependencies]
+entl-semantics = { path = "../../../entl/crates/entl-semantics" }
+entl-tree-sitter = { path = "../../../entl/crates/entl-tree-sitter" }
+entl-ts-observe = { path = "../../../entl/crates/entl-ts-observe" }
+infact-normalize = { path = "../../crates/infact-normalize" }
+infact-rust-behaviors = { path = "../../crates/infact-rust-behaviors" }
+infact-ts-normalize = { path = "../../crates/infact-ts-normalize" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
