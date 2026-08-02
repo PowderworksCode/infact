@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use entl_codebase::observe_rust_compiler;
 use entl_tree_sitter::ParserCatalog;
 use infact_catalog::{CatalogRequest, build_catalog};
-use infact_core::{LibraryTarget, DerivedLibraryBehavior, DerivedMacroBehavior, ExternalCatalog};
+use infact_core::{DerivedLibraryBehavior, DerivedMacroBehavior, ExternalCatalog, LibraryTarget};
 use infact_duplication::{
     ExactConfig, NearConfig, analyze_repository_near_with_catalog, analyze_repository_with_catalog,
 };
@@ -15,7 +15,8 @@ use infact_fact_pack::{
 use infact_fact_registry::{FactPackRegistry, FactPackRegistryAuth};
 use infact_rust_behaviors::{
     LibraryPackRequest, MacroDerivationRequest, analyze_repository as analyze_rust_behaviors,
-    build_library_pack, derive_behavior, derive_library, derive_macro_behavior, behavior_file_name, registry_sources,
+    behavior_file_name, build_library_pack, derive_behavior, derive_library, derive_macro_behavior,
+    registry_sources,
 };
 use infact_rust_effects::{RustStdFactPackRequest, build_std_fact_pack, derive_std_effects};
 use serde::Deserialize;

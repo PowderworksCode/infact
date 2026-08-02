@@ -400,7 +400,12 @@ pub fn derive_behavior(
 ) -> Result<DerivedLibraryBehavior> {
     let parsed = parse_repository(source_root, parsers)?;
     let functions = library_functions(&parsed.files);
-    derive_from(&functions, &type_declarations(&parsed.files), catalog, callable_path)
+    derive_from(
+        &functions,
+        &type_declarations(&parsed.files),
+        catalog,
+        callable_path,
+    )
 }
 
 /// Derive one behavior from an already parsed library.
@@ -509,7 +514,8 @@ fn derive_from(
     if !describes_work(&form)
         && let Some(constructed) = constructed_type(&form)
         && let Some(constructed) = resolve_self(constructed, current.container.as_deref())
-        && let Some(implementing) = principal_method(functions, constructed, &current.file.path, declarations)
+        && let Some(implementing) =
+            principal_method(functions, constructed, &current.file.path, declarations)
     {
         form = normalize(implementing)?;
         inside_one_step = true;
@@ -518,9 +524,7 @@ fn derive_from(
 
     // One step of a lazy adaptor stands for the whole operation, and only a
     // derivation that went through a construction has earned that reading.
-    if inside_one_step
-        && let Some(lifted) = form.lifted_from_one_step()
-    {
+    if inside_one_step && let Some(lifted) = form.lifted_from_one_step() {
         form = lifted;
     }
 
@@ -562,10 +566,7 @@ fn normalize(function: &LibraryFunction<'_>) -> Result<Form> {
     // implementation *does* is only visible in normal form: `find` describes no
     // sequence operation until its fold has become a traversal, and the search
     // for delegation would give up on it before ever seeing the work.
-    Ok(
-        infact_rust_normalize::normalize_function(function.node, &function.file.source)
-            .simplify(),
-    )
+    Ok(infact_rust_normalize::normalize_function(function.node, &function.file.source).simplify())
 }
 
 /// The deepest form still worth keeping.

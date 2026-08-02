@@ -182,10 +182,10 @@ pub fn behavior_file_name(package: &str, callable_path: &str, version: &str) -> 
         .strip_prefix(package)
         .unwrap_or(callable_path)
         .trim_start_matches(':');
-    let slug = qualified
-        .replace("::", "-")
-        .replace('_', "-")
-        .replace(|character: char| !character.is_ascii_alphanumeric() && character != '-', "-");
+    let slug = qualified.replace("::", "-").replace('_', "-").replace(
+        |character: char| !character.is_ascii_alphanumeric() && character != '-',
+        "-",
+    );
     format!("{package}-{slug}-{version}.json")
 }
 

@@ -58,7 +58,8 @@ fn one_extends_the_other(left: &str, right: &str) -> bool {
 
 /// The type a callable belongs to, which is what type information can tell apart.
 fn container(path: &str) -> &str {
-    path.rsplit_once("::").map_or("", |(container, _)| container)
+    path.rsplit_once("::")
+        .map_or("", |(container, _)| container)
 }
 
 /// No two callables *on the same type* may share a form.

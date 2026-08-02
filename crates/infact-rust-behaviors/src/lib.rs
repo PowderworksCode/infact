@@ -23,8 +23,7 @@ pub use derivation::{
 };
 pub use macro_derivation::{MacroDerivationRequest, derive_macro_behavior};
 pub use pack::{
-    BuiltLibraryPack, LibraryPackRequest, behavior_file_name, build_library_pack,
-    registry_sources,
+    BuiltLibraryPack, LibraryPackRequest, behavior_file_name, build_library_pack, registry_sources,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -343,7 +342,10 @@ fn catalog_for<'a>(
     })
 }
 
-#[expect(dead_code, reason = "kept until type information decides between candidates")]
+#[expect(
+    dead_code,
+    reason = "kept until type information decides between candidates"
+)]
 fn is_plainer(candidate: &str, current: &str) -> bool {
     (candidate.len(), candidate) < (current.len(), current)
 }
