@@ -869,11 +869,19 @@ became Datalog and the other became no engine at all.
 
 ### Open, from this work
 
-[ ] Four of the five infact-core as_str methods have NO caller anywhere.
-    Proved by deleting all five: infact built clean, straitjacket failed on
-    exactly one (Effect::as_str, straitjacket/src/config.rs:504). DiscardForm,
-    Containment, Certainty, Reach are unused public API, ~40 more lines.
-    Left in place because deleting public API is not a refactor.
+[x] TWO of the five infact-core as_str methods had no caller: Certainty and
+    Reach. Removed. The other three are read by straitjacket -- Effect from
+    eleven sites, DiscardForm from rules/error_discard.rs:168,227, Containment
+    from :251 -- and stay.
+
+    An earlier draft of this note said FOUR, and how it got that wrong is the
+    part worth keeping. The check was "delete all five, compile straitjacket,
+    see what breaks", and the output was read through `head`. One error naming
+    Effect was visible; three more were below the cut. A truncated compiler
+    error reads exactly like a short one.
+
+    The direct check disagrees in one command and does not truncate:
+      grep -rn "\.as_str()" src/ tests/ | grep -iE "form|containment|reach|effect"
 
     NOT a concern, though it looked like one at first: converting these to
     strum derives does NOT cost the parser-pack query work its corpus.
