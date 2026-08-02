@@ -11,7 +11,7 @@ members = [
     "crates/infact-normalize",
     "crates/infact-rust-normalize",
     "crates/infact-rust-effects",
-    "crates/infact-rust-errors",
+    "crates/infact-errors",
     "crates/infact-rust-behaviors",
     "crates/infact-cli",
 ]

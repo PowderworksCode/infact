@@ -1328,10 +1328,10 @@ dependencies = [
  "entl-tree-sitter",
  "infact-core",
  "infact-duplication",
+ "infact-errors",
  "infact-fact-pack",
  "infact-rust-behaviors",
  "infact-rust-effects",
- "infact-rust-errors",
  "serde",
  "serde_json",
  "tempfile",
@@ -1390,6 +1390,18 @@ dependencies = [
  "serde",
  "sha2 0.10.9",
  "tempfile",
+ "thiserror",
+ "tree-sitter",
+]
+
+[[package]]
+name = "infact-errors"
+version = "0.0.0"
+dependencies = [
+ "entl-tree-sitter",
+ "infact-core",
+ "pathfinding",
+ "sha2 0.10.9",
  "thiserror",
  "tree-sitter",
 ]
@@ -1466,18 +1478,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
- "thiserror",
- "tree-sitter",
-]
-
-[[package]]
-name = "infact-rust-errors"
-version = "0.0.0"
-dependencies = [
- "entl-tree-sitter",
- "infact-core",
- "pathfinding",
- "sha2 0.10.9",
  "thiserror",
  "tree-sitter",
 ]

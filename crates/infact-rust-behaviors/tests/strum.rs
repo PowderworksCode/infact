@@ -126,3 +126,55 @@ fn derives_strum_behaviors_and_finds_equivalent_manual_enums() {
         analyze_repository(repository, &parser_discovery.catalog, &[], &[], &[]).unwrap();
     assert!(without_artifact.matches.is_empty());
 }
+
+/// Doc comments on variants must not hide an enum from macro matching.
+///
+/// `line_comment` is a NAMED child of `enum_variant_list`. A recognizer that
+/// walks every named child and demands an `enum_variant` finds one that is not,
+/// declines the whole enum, and reports nothing — for the shape most real Rust
+/// takes. The query matches `enum_variant` nodes directly, so comments are
+/// simply not variants, and coverage counts only the variants.
+#[test]
+fn a_documented_enum_is_still_matched() {
+    let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let parser_discovery = ParserCatalog::discover([crate_root.join("../../../entl/parser-packs")]);
+    assert!(
+        parser_discovery.errors.is_empty(),
+        "{:?}",
+        parser_discovery.errors
+    );
+    let artifacts = [
+        "strum-display-kebab-0.28.0.json",
+        "strum-as-ref-str-kebab-0.28.0.json",
+    ]
+    .map(|filename| {
+        serde_json::from_slice::<DerivedMacroBehavior>(
+            &std::fs::read(
+                crate_root
+                    .join("../../infact-packs/rust-strum/macro-behaviors")
+                    .join(filename),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    });
+    let report = analyze_repository(
+        crate_root.join("tests/fixtures/strum-documented"),
+        &parser_discovery.catalog,
+        &[],
+        &[],
+        &artifacts,
+    )
+    .unwrap();
+
+    assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+    assert_eq!(
+        report
+            .matches
+            .iter()
+            .map(|fact| fact.value.target.path())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["strum::AsRefStr", "strum::Display"]),
+        "a doc-commented enum reports nothing when comments are counted as variants"
+    );
+}

@@ -13,13 +13,15 @@ fn parser_packs() -> PathBuf {
 
 fn discards(source: &str) -> Vec<ErrorDiscard> {
     let pack = Arc::new(ParserPack::load(parser_packs()).expect("rust parser pack"));
-    let parsed = ParserRuntime::new()
+    // The parser owns the compiled queries, so it has to outlive the analysis.
+    let parser = ParserRuntime::new()
         .expect("parser runtime")
         .load(pack)
-        .expect("loading rust parser")
+        .expect("loading rust parser");
+    let parsed = parser
         .parse("source.rs", Arc::<[u8]>::from(source.as_bytes()))
         .expect("parsing source");
-    infact_rust_errors::analyze_file(&parsed).expect("analyzing source")
+    infact_errors::analyze_file(&parser, &parsed).expect("analyzing source")
 }
 
 fn forms(source: &str) -> Vec<DiscardForm> {
@@ -136,21 +138,6 @@ fn attributes_a_discard_to_its_enclosing_callable() {
     assert_eq!(found[0].span.start_line, 1);
 }
 
-/// The self type spelling decides callable identity in this crate and in
-/// `infact-rust-effects`, which must agree. A reference receiver is named `Bar`,
-/// not `&mut Bar` — the latter is not usable as a path segment.
-#[test]
-fn names_an_impl_self_type_without_its_decoration() {
-    let borrowed = discards("impl Read for &mut Bar { fn read(&self) { let _ = write(); } }");
-    assert_eq!(borrowed[0].callable, "source::Bar::read");
-
-    let qualified = discards("impl Read for foo::Bar { fn read(&self) { let _ = write(); } }");
-    assert_eq!(qualified[0].callable, "source::Bar::read");
-
-    let generic = discards("impl<T> Read for Bar<T> { fn read(&self) { let _ = write(); } }");
-    assert_eq!(generic[0].callable, "source::Bar::read");
-}
-
 /// A policy usually exempts tests, so the fact has to say which sites are tests.
 #[test]
 fn marks_test_sites() {
@@ -244,4 +231,19 @@ fn a_sealed_chain_is_measured_from_the_shortest_route() {
         .map(|edge| format!("{}->{}", edge.caller, edge.callee))
         .collect::<Vec<_>>();
     assert_eq!(steps, ["source::b->source::a", "source::a->source::leaf"]);
+}
+
+/// The self type spelling decides callable identity in this crate and in
+/// `infact-rust-effects`, which must agree. A reference receiver is named `Bar`,
+/// not `&mut Bar` — the latter is not usable as a path segment.
+#[test]
+fn names_an_impl_self_type_without_its_decoration() {
+    let borrowed = discards("impl Read for &mut Bar { fn read(&self) { let _ = write(); } }");
+    assert_eq!(borrowed[0].callable, "source::Bar::read");
+
+    let qualified = discards("impl Read for foo::Bar { fn read(&self) { let _ = write(); } }");
+    assert_eq!(qualified[0].callable, "source::Bar::read");
+
+    let generic = discards("impl<T> Read for Bar<T> { fn read(&self) { let _ = write(); } }");
+    assert_eq!(generic[0].callable, "source::Bar::read");
 }
