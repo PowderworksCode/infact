@@ -207,3 +207,26 @@ fn declines_to_resolve_an_ambiguous_callee() {
     );
     assert_eq!(found[0].reach, Reach::Unknown);
 }
+
+/// A sealed chain names the furthest caller, not the longest walk to one.
+///
+/// `c` calls `leaf` directly and also reaches it the long way round through
+/// `b` and `a`. A search that reports whichever chain it happened to build
+/// last answers three; the furthest caller from `leaf` is `b`, two calls up,
+/// because `c` is only ever one call away.
+#[test]
+fn a_sealed_chain_is_measured_from_the_shortest_route() {
+    let found = discards(
+        "fn c() { b(); leaf(); }\n\
+         fn b() { a(); }\n\
+         fn a() { leaf(); }\n\
+         fn leaf() { let _ = write(); }\n",
+    );
+    assert_eq!(found[0].reach, Reach::Sealed);
+    let steps = found[0]
+        .path
+        .iter()
+        .map(|edge| format!("{}->{}", edge.caller, edge.callee))
+        .collect::<Vec<_>>();
+    assert_eq!(steps, ["source::b->source::a", "source::a->source::leaf"]);
+}

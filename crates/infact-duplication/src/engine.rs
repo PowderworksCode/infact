@@ -1,16 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::hash::Hash;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
-use dbsp::typed_batch::IndexedZSetReader;
-use dbsp::{DBSPHandle, OrdZSet, OutputHandle, Runtime, ZSetHandle};
-use feldera_macros::IsNone;
 use infact_core::{
     Derivation, ExactTokenClone, Fact, InputEvidence, NearTokenClone, SourceSpan,
     TokenNormalization,
 };
-use rkyv::{Archive, Deserialize, Serialize};
-use size_of::SizeOf;
 
 use crate::token::{
     Normalization, SyntaxToken, TokenizedFile, changed_token_count, normalized_token_digest,
@@ -39,23 +33,7 @@ struct CloneMatch {
     inputs: Vec<InputEvidence>,
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    SizeOf,
-    Archive,
-    Serialize,
-    Deserialize,
-    IsNone,
-)]
-#[archive_attr(derive(Ord, Eq, PartialEq, PartialOrd))]
-#[archive(compare(PartialEq, PartialOrd))]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct WindowRecord {
     domain: String,
     digest: String,
@@ -68,23 +46,7 @@ struct WindowRecord {
     end_line: u32,
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    SizeOf,
-    Archive,
-    Serialize,
-    Deserialize,
-    IsNone,
-)]
-#[archive_attr(derive(Ord, Eq, PartialEq, PartialOrd))]
-#[archive(compare(PartialEq, PartialOrd))]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct WindowLocation {
     file: u64,
     start_token: u32,
@@ -109,23 +71,7 @@ impl From<&WindowRecord> for WindowLocation {
     }
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    SizeOf,
-    Archive,
-    Serialize,
-    Deserialize,
-    IsNone,
-)]
-#[archive_attr(derive(Ord, Eq, PartialEq, PartialOrd))]
-#[archive(compare(PartialEq, PartialOrd))]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct MatchSeed {
     left: WindowLocation,
     right: WindowLocation,
@@ -181,14 +127,10 @@ pub(crate) struct ExactEngine {
     min_tokens: u32,
     min_lines: u32,
     mode: MatchMode,
-    circuit: DBSPHandle,
-    input: ZSetHandle<WindowRecord>,
-    output: OutputHandle<OrdZSet<MatchSeed>>,
     next_file: u64,
     file_ids: BTreeMap<PathBuf, u64>,
     windows: BTreeMap<u64, Vec<WindowRecord>>,
     files: BTreeMap<u64, TokenizedFile>,
-    seeds: BTreeMap<MatchSeed, i64>,
 }
 
 impl ExactEngine {
@@ -207,35 +149,14 @@ impl ExactEngine {
                 "min-lines must be greater than zero".to_owned(),
             ));
         }
-        let (circuit, (input, output)) = Runtime::init_circuit(1, |circuit| {
-            let (windows, input) = circuit.add_input_zset::<WindowRecord>();
-            let indexed = windows.map_index(|window| {
-                (
-                    (window.domain.clone(), window.digest.clone()),
-                    WindowLocation::from(window),
-                )
-            });
-            let matches = indexed
-                .join(&indexed, |_key, first, second| {
-                    MatchSeed::new(first, second)
-                })
-                .filter(MatchSeed::is_distinct_nonoverlapping);
-            Ok((input, matches.output()))
-        })
-        .map_err(|error| Error::Dbsp(error.to_string()))?;
-
         Ok(Self {
             min_tokens,
             min_lines,
             mode,
-            circuit,
-            input,
-            output,
             next_file: 0,
             file_ids: BTreeMap::new(),
             windows: BTreeMap::new(),
             files: BTreeMap::new(),
-            seeds: BTreeMap::new(),
         })
     }
 
@@ -249,33 +170,39 @@ impl ExactEngine {
             file_id
         };
 
-        if let Some(previous) = self.windows.remove(&file_id) {
-            for window in previous {
-                self.input.push(window, -1);
-            }
-        }
         let windows = build_windows(file_id, &file, self.min_tokens, self.mode);
-        for window in &windows {
-            self.input.push(window.clone(), 1);
-        }
         self.windows.insert(file_id, windows);
         self.files.insert(file_id, file);
-        self.advance()
+        Ok(())
     }
 
-    fn advance(&mut self) -> Result<()> {
-        self.circuit
-            .transaction()
-            .map_err(|error| Error::Dbsp(error.to_string()))?;
-        for (seed, (), weight) in self.output.consolidate().iter() {
-            let count = self.seeds.get(&seed).copied().unwrap_or_default() + weight;
-            if count == 0 {
-                self.seeds.remove(&seed);
-            } else {
-                self.seeds.insert(seed, count);
+    /// Every pair of windows that share a comparison domain and digest.
+    ///
+    /// Windows are grouped by what makes them comparable, and each group emits
+    /// its distinct pairs once. Replacing a file replaces its windows, so a
+    /// stale match cannot survive into the next answer.
+    fn match_seeds(&self) -> BTreeSet<MatchSeed> {
+        // the domain and digest are what make two windows comparable at all
+        let mut by_key: HashMap<(&str, &str), Vec<WindowLocation>> = HashMap::new();
+        for window in self.windows.values().flatten() {
+            by_key
+                .entry((window.domain.as_str(), window.digest.as_str()))
+                .or_default()
+                .push(WindowLocation::from(window));
+        }
+        let mut seeds = BTreeSet::new();
+        for group in by_key.values() {
+            for (index, first) in group.iter().enumerate() {
+                // each unordered pair once, so no seed is emitted twice
+                for second in &group[index.saturating_add(1)..] {
+                    let seed = MatchSeed::new(first, second);
+                    if seed.is_distinct_nonoverlapping() {
+                        seeds.insert(seed);
+                    }
+                }
             }
         }
-        Ok(())
+        seeds
     }
 
     pub fn facts(&self) -> Vec<Fact<ExactTokenClone>> {
@@ -299,12 +226,7 @@ impl ExactEngine {
 
     fn matches(&self) -> Vec<CloneMatch> {
         let mut runs = Vec::<Run>::new();
-        let mut seeds = self
-            .seeds
-            .iter()
-            .filter(|(_, weight)| **weight > 0)
-            .map(|(seed, _)| seed.clone())
-            .collect::<Vec<_>>();
+        let mut seeds = self.match_seeds().into_iter().collect::<Vec<_>>();
         seeds.sort_by_key(|seed| {
             (
                 seed.left.file,

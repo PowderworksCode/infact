@@ -175,7 +175,7 @@ pub fn analyze_observed_effects(
     seeds.sort();
     seeds.dedup();
 
-    let propagated = propagate_effects(&calls, &seeds)?;
+    let propagated = propagate_effects(&calls, &seeds);
     let calls_by_caller = calls.iter().fold(
         BTreeMap::<u64, Vec<&ResolvedCall>>::new(),
         |mut by_caller, call| {

@@ -10,6 +10,7 @@ description = "Derives discarded-error facts from Rust source."
 [dependencies]
 entl-tree-sitter.workspace = true
 infact-core = { path = "../infact-core" }
+pathfinding.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tree-sitter.workspace = true
