@@ -1,0 +1,215 @@
+infact — todo
+
+## Resolved-destination allocation (clone/to_owned by receiver type)
+
+State on 08-02: WORKING AND TESTED, NOTHING COMMITTED. Read the transfer
+section at the bottom FIRST — most of this exists only in a working tree.
+
+The question was whether the MIR provider could supply the receiver types that
+`clone` and `to_owned` need. It can, but not as it was written, and the change
+that makes it work also breaks something silently. All three parts below are
+one change; landing part 1 without part 2 is a regression that reports success.
+
+### What was measured, so nobody re-derives it
+
+Probed the driver against a fixture of clone/to_owned/collect/format calls.
+
+  BEFORE. Every clone collapses to one destination:
+    clone_an_arc     -> std::clone::Clone::clone
+    clone_a_string   -> std::clone::Clone::clone
+    clone_a_vec      -> std::clone::Clone::clone
+    own_a_str        -> std::borrow::ToOwned::to_owned
+    own_an_integer   -> std::borrow::ToOwned::to_owned
+  The receiver is discarded at the `RigidTy::FnDef(def, _)` match — the `_` is
+  the generic args, which is where `Self` lives — and `def.0.name()` names the
+  trait method rather than the impl. `coverage.types` is false and `types` is
+  empty; that part is honest and unchanged.
+
+  AFTER `Instance::resolve(def, &args)`:
+    <std::sync::Arc<std::string::String> as std::clone::Clone>::clone
+    <std::string::String as std::clone::Clone>::clone
+    std::str::<impl std::borrow::ToOwned for str>::to_owned
+    <i32 as std::borrow::ToOwned>::to_owned
+    <Copied<Iter<'_, u8>> as Iterator>::collect::<std::vec::Vec<u8>>
+    std::vec::Vec::<u8>::with_capacity
+    std::fmt::format
+  More than asked for: `collect`'s TARGET container is in the name, and
+  `format!` arrives as an ordinary resolved call to `std::fmt::format`.
+
+  `i32::clone` emits NO call terminator at all — inlined away. Do not rely on
+  that to filter Copy types: `i32::to_owned` DOES emit one.
+
+### The trap, and it is the important part
+
+Resolution rewrites `std::fs::read` to `std::fs::read::<&str>`. Every catalog
+lookup is an exact map `get`, so all of them stop matching. Measured: with the
+regenerated fixture and no other change, 5 of 6 `observed` tests failed with
+empty effect sets while the run still reported `EffectResolution::Observed`.
+The one test that PASSED was `a_pure_function_reports_no_effect`. A confident,
+empty answer is the worst failure this codebase can produce, and it is what
+part 1 alone produces.
+
+### Two parsing traps found the hard way, both now regression-tested
+
+  `::<impl Trait for Type>` opens exactly like a turbofish. Stripping it as one
+  discards the receiver — the single thing the resolved destination was wanted
+  for. `path::without_turbofish` special-cases it.
+
+  A resolved `collect` arrives QUALIFIED (`<Iter as Iterator>::collect::<..>`),
+  so a `collect` branch written in the unqualified arm never fires. Order
+  matters in `allocating_destination`: check `collect` before the qualified-self
+  branch.
+
+### Decided, with the reason, so it is not relitigated
+
+  The seed's `origin` records the DECLARED catalog path, not the resolved
+  instance. Otherwise one catalogued API gets a different origin at every call
+  site that instantiates it differently, which fragments any grouping a
+  consumer does. `external_effect` returns the matched key for this.
+
+  `clone`/`to_owned` are decided ONLY on the observed path. The syntax path
+  still declines them outright and must keep doing so — it has no receiver
+  type and a guess would put false origins in the one relation whose value is
+  that it can be trusted.
+
+  User types are declined for `clone`. A custom `Clone` may do anything.
+
+  The name-based tables were kept as the fallback rather than replaced.
+  `allocating_destination` defers to `allocating_call` for anything it cannot
+  place, and the syntax path still needs them.
+
+### Result, same seven functions through both paths
+
+  syntax                          observed (MIR)
+    collects_a_vec   collect        clones_a_string  String::clone      NEW
+    collects_nothing collect  <-!   collects_a_vec   collect::<Vec>
+    formats          format!        formats          std::fmt::format
+                                    owns_a_str       str::to_owned      NEW
+                                    (collects_nothing absent — correct)
+
+  Two allocations that were invisible; one false positive gone
+  (`Result<(), ()>` collects nothing); `Arc::clone` still correctly declined,
+  which is the discrimination and not merely more hits.
+
+[x] entl: resolve the instance   -- DONE, in the entl tree
+[x] infact: normalize before catalog lookup   -- DONE
+[x] infact: decide clone/to_owned on the resolved Self type   -- DONE
+
+## What to do next
+
+[ ] THE REAL GAP: nothing generates observations in a normal workflow
+    All of the above only applies when a repository HAS observations. Producing
+    them means a build with `entl-rust-mir` standing in for rustc, and there is
+    no one-command path to it. On a repo without observations the syntax path
+    runs and NOTHING above changes. This is the highest-value next task by a
+    wide margin — the capability is built and largely unreachable.
+    Straitjacket already has an `observations` config key and a fixture using
+    it; the missing piece is generating them, not consuming them.
+
+[ ] Generic functions are skipped entirely
+    `Instance::try_from(item)` fails for a non-monomorphic item, so the driver
+    records a gap and moves on. Calls inside generic functions are NOT in the
+    graph at all. In generic-heavy Rust this bounds observed coverage far more
+    than anything in this note, and it is unrelated to the resolution change.
+    Worth measuring before trusting observed coverage as complete.
+
+[ ] Loop nesting depth
+    Still nothing. `Form` already distinguishes Traverse/Transform/Retain/
+    Accumulate, so the nesting depth of a call site is free and honest. Without
+    it "allocates inside a loop" is not sayable and barriers stay
+    callable-granular. This was the original recommendation and is still open.
+
+[ ] One finding per (callable, effect)
+    `evidence_path` returns a single path, so a callable allocating in twelve
+    places surfaces them one re-run at a time.
+
+[ ] A barrier configured but never marked is silent
+    Mirror of `unknown-barrier`, which catches the marker-with-no-barrier case.
+    Needs cross-file state a straitjacket FileRule does not have.
+
+[ ] No `[[effects.barriers]]` is configured in any repo
+    `effect-barrier` and `unknown-barrier` both ship working and inert. Nothing
+    exercises them outside tests.
+
+[ ] infact-normalize/src/lib.rs is OVER the file-size limit
+    1756 lines against straitjacket's 1500. It is the one finding standing
+    between infact and a clean policy run; entl and straitjacket are both
+    clean. This is the supercompilation work, and `simplify.rs` looks like the
+    extraction that resolves it — finishing that split closes the finding
+    without anyone having to think about the rule.
+
+## Elsewhere — findings about THESE crates recorded in entl's note
+
+Two sections of entl/notes/todo.txt are entirely about infact and will be
+missed by anyone reading only this file:
+
+  "Shared Rust call graph — MEASURED, and the premise was wrong"
+      The plan to extract `infact-rust-callgraph` out of `infact-rust-effects`
+      and `infact-rust-errors` was investigated on 08-02 and SHELVED. Of the
+      five helpers believed duplicated, only `repository_module` is identical.
+      `node_text` and `simple_type_name` differ in BEHAVIOR, and
+      `collect_callables` is not shared at all. Two real items came out of it:
+      give effects errors' panic-free `node_text`, and settle whether
+      `simple_type_name` should yield `Bar` or `&mut Bar` for
+      `impl Trait for &mut Bar` — it feeds callable-path construction in both
+      crates, so it decides callable identity.
+
+  "Parser-pack queries for the discarded-error check"
+      Moving `infact-rust-errors`' form recognition out of Rust and into
+      `queries/discards.scm` in the entl parser packs. The loader and the
+      provenance digest are both DONE and verified; writing the queries is the
+      remaining step. ~210 of the crate's 744 lines are recognition; the call
+      graph and reach resolution stay Rust regardless.
+
+## Transfer notes — READ BEFORE MOVING MACHINES
+
+STATE AS OF 08-02 04:34 — all three repos are COMMITTED AND PUSHED.
+(This block previously said nothing was committed. That was true when it was
+written and is not true now; corrected rather than deleted so a stale copy on
+another machine can be recognized.)
+
+  infact          HEAD 2f1c3bc, level with origin/main
+  entl            HEAD 18cbf1a, level with origin/main
+  straitjacket    HEAD 6db8f0c, level with origin/main
+
+  A fresh clone of all three at those commits reproduces the work. Nothing
+  below is at risk of being lost by a careless checkout.
+
+STILL DIRTY, and NOT on origin — carry these across by hand or commit first:
+
+  infact   crates/infact-normalize/src/lib.rs        (supercompilation, in flight)
+           crates/infact-rust-behaviors/src/derivation.rs
+           crates/infact-rust-normalize/src/lib.rs
+           notes/            <-- UNTRACKED. THIS FILE IS NOT IN GIT.
+                                 A fresh clone has no transfer notes at all.
+                                 Commit it before moving, or it does not travel.
+
+  entl     notes/todo.txt    (unstaged edits — the corrected call-graph findings)
+
+  straitjacket  clean. It carries the `effect-barrier`, `unknown-barrier`, and
+  `error-discard` rules that consume these facts.
+
+THE NEW MACHINE NEEDS:
+  - nightly-2026-07-18 with rustc-dev, rust-src, llvm-tools. Pinned in
+    crates/entl-rust-mir/rust-toolchain.toml. The driver links the compiler's
+    private crates; without it part 1 cannot be built or verified.
+  - rustc 1.96.1 for the rest. 1.97.1 ICEs on dbsp.
+  - All three repos as SIBLINGS under one parent. They are path dependencies:
+    straitjacket -> infact -> entl. A lone clone of any one will not build.
+
+WATCH FOR:
+  - crates/infact-rust-effects/src/lib.rs is at EXACTLY 1500 lines. The next
+    line trips straitjacket's file-size rule. It was split twice already
+    (allocation.rs, then path.rs) to stay under.
+  - crates/infact-normalize/src/lib.rs is 1756 lines and OVER the limit. That
+    is the supercompilation work, not this one.
+  - tests/fixtures/receivers/observations.json embeds closure spans with
+    line:col. Editing that fixture's source means regenerating the JSON, or the
+    test compares against stale positions.
+  - Regenerating any observations fixture: run the driver from the INFACT ROOT
+    so span paths stay repository-relative, with --crate-name matching the
+    fixture directory name. Both existing fixtures were made that way.
+
+VERIFIED GREEN on 08-02: entl 6 MIR tests + full workspace; infact workspace,
+clippy clean, straitjacket policy clean over 8 effects files; straitjacket 68
+tests, clippy clean, own policy clean over 39 files.
