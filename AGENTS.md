@@ -2,13 +2,15 @@
 
 ## What Infact is
 
-Infact derives typed facts from observations acquired by Entl. Its execution
-engine is DBSP. Straitjacket and other consumers decide which facts constitute
-findings or policy failures.
+Infact derives typed facts from observations acquired by Entl. Recursive
+relations are Datalog rules compiled by `ascent`; everything else is ordinary
+Rust. Straitjacket and other consumers decide which facts constitute findings
+or policy failures.
 
 ## Boundaries
 
-- Public facts must not expose DBSP streams, batches, weights, or circuit types.
+- Public facts must not expose relations, engine programs, or any other
+  evaluation machinery.
 - Facts retain source spans and derivation provenance.
 - Keep output deterministic and paths codebase-relative.
 - Infact does not assign severity, enforce thresholds, suppress results, or

@@ -11,10 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use dbsp::typed_batch::IndexedZSetReader;
-use dbsp::{OrdZSet, Runtime, Stream};
 use entl_tree_sitter::{ParsedFile, ParserCatalog, ParserRuntime, parse_repository};
-use feldera_macros::IsNone;
 use infact_core::{
     CALL_EFFECT_CATALOG_SCHEMA, CallEdgeEvidence, CallEffectCatalog, CallEffectEvidence,
     CallEffects, Derivation as FactDerivation, Effect, EffectTrace, Fact, InputEvidence,
@@ -24,9 +21,7 @@ use infact_fact_pack::{
     BuiltLayout, Compatibility, Compiler, Content, Derivation, FACT_PACK_SCHEMA, FactPackManifest,
     ManifestError, SourceInput, SourceKind, Subject, SubjectKind, build_oci_layout, sha256,
 };
-use rkyv::{Archive, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use size_of::SizeOf;
 use tree_sitter::Node;
 
 const MODULES: &[ModuleSpec] = &[
@@ -133,8 +128,6 @@ pub enum Error {
     Syntax { path: PathBuf },
     #[error("source file {path} is too large for source coordinates")]
     SourceTooLarge { path: PathBuf },
-    #[error("DBSP effect propagation failed: {0}")]
-    Dbsp(String),
     #[error("serializing Rust standard-library effect catalog: {0}")]
     Serialize(#[from] serde_json::Error),
     #[error("writing generated fact-pack file {}: {source}", path.display())]
@@ -154,7 +147,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Derive effect traces through the Rust callables in a repository.
 ///
 /// External effect seeds come from verified call-effect catalogs. Local call
-/// edges are syntax-resolved, and DBSP computes their transitive closure.
+/// edges are syntax-resolved, and their transitive closure is a Datalog rule.
 pub fn analyze_repository_effects(
     root: impl AsRef<Path>,
     parsers: &ParserCatalog,
@@ -217,7 +210,7 @@ pub fn analyze_repository_effects(
     seeds.sort();
     seeds.dedup();
 
-    let propagated = propagate_effects(&calls, &seeds)?;
+    let propagated = propagate_effects(&calls, &seeds);
     let calls_by_caller = calls.iter().fold(
         BTreeMap::<u64, Vec<&ResolvedCall>>::new(),
         |mut by_caller, call| {
@@ -402,7 +395,7 @@ pub fn derive_std_effects(
     seeds.sort();
     seeds.dedup();
 
-    let propagated = propagate_effects(&calls, &seeds)?;
+    let propagated = propagate_effects(&calls, &seeds);
     let calls_by_caller = calls.iter().fold(
         BTreeMap::<u64, Vec<&ResolvedCall>>::new(),
         |mut by_caller, call| {
@@ -1061,99 +1054,48 @@ fn evidence_path(
     None
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    SizeOf,
-    Archive,
-    Serialize,
-    Deserialize,
-    IsNone,
-)]
-#[archive_attr(derive(Ord, Eq, PartialEq, PartialOrd))]
-#[archive(compare(PartialEq, PartialOrd))]
-struct CallRelation {
-    caller: u64,
-    callee: u64,
-}
-
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    SizeOf,
-    Archive,
-    Serialize,
-    Deserialize,
-    IsNone,
-)]
-#[archive_attr(derive(Ord, Eq, PartialEq, PartialOrd))]
-#[archive(compare(PartialEq, PartialOrd))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct EffectRelation {
     callable: u64,
     effect: u8,
 }
 
-fn propagate_effects(
-    calls: &[ResolvedCall],
-    seeds: &[EffectSeed],
-) -> Result<BTreeSet<EffectRelation>> {
-    let (mut circuit, (calls_input, effects_input, output)) = Runtime::init_circuit(1, |circuit| {
-        let (call_stream, calls_input) = circuit.add_input_zset::<CallRelation>();
-        let (effect_stream, effects_input) = circuit.add_input_zset::<EffectRelation>();
-        let closure = circuit.recursive(|child, effects: Stream<_, OrdZSet<EffectRelation>>| {
-            let calls = call_stream.delta0(child);
-            let direct = effect_stream.delta0(child);
-            let propagated = calls.map_index(|call| (call.callee, call.caller)).join(
-                &effects.map_index(|effect| (effect.callable, effect.effect)),
-                |_callee, caller, effect| EffectRelation {
-                    callable: *caller,
-                    effect: *effect,
-                },
-            );
-            Ok(direct.plus(&propagated).distinct())
-        })?;
-        Ok((calls_input, effects_input, closure.output()))
-    })
-    .map_err(|error| Error::Dbsp(error.to_string()))?;
+ascent::ascent! {
+    struct EffectClosure;
 
-    for call in calls {
-        calls_input.push(
-            CallRelation {
-                caller: call.caller,
-                callee: call.callee,
-            },
-            1,
-        );
-    }
-    for seed in seeds {
-        effects_input.push(
-            EffectRelation {
-                callable: seed.callable,
-                effect: encode_effect(seed.effect),
-            },
-            1,
-        );
-    }
-    circuit
-        .transaction()
-        .map_err(|error| Error::Dbsp(error.to_string()))?;
-    Ok(output
-        .consolidate()
-        .iter()
-        .filter_map(|(relation, (), weight)| (weight > 0).then_some(relation))
-        .collect())
+    /// `caller` contains a call to `callee`.
+    relation calls(u64, u64);
+    /// `callable` has `effect`, whether seeded or inherited from a callee.
+    relation has_effect(u64, u8);
+
+    // an effect reaches a caller through any call that reaches it
+    has_effect(caller, *effect) <-- calls(caller, callee), has_effect(callee, effect);
+}
+
+/// Every effect each callable has, following calls transitively.
+///
+/// Seeds are the effects a callable has directly; the rule above closes them
+/// over the call graph. The closure is computed from scratch, which is all any
+/// caller has ever asked for -- each one builds the whole relation once from a
+/// complete call graph and drops it.
+fn propagate_effects(calls: &[ResolvedCall], seeds: &[EffectSeed]) -> BTreeSet<EffectRelation> {
+    let mut closure = EffectClosure {
+        calls: calls
+            .iter()
+            .map(|call| (call.caller, call.callee))
+            .collect(),
+        has_effect: seeds
+            .iter()
+            .map(|seed| (seed.callable, encode_effect(seed.effect)))
+            .collect(),
+        ..EffectClosure::default()
+    };
+    closure.run();
+    closure
+        .has_effect
+        .into_iter()
+        .map(|(callable, effect)| EffectRelation { callable, effect })
+        .collect()
 }
 
 fn encode_effect(effect: Effect) -> u8 {
@@ -1377,7 +1319,7 @@ mod tests {
             origin: "fs_imp::read".to_owned(),
             span,
         }];
-        let effects = propagate_effects(&calls, &seeds).unwrap();
+        let effects = propagate_effects(&calls, &seeds);
         assert!(effects.contains(&EffectRelation {
             callable: 0,
             effect: encode_effect(Effect::FileRead),

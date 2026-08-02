@@ -11,9 +11,6 @@ pub enum Error {
     #[error("could not discover parser packs: {0}")]
     ParserCatalog(String),
 
-    #[error("DBSP error: {0}")]
-    Dbsp(String),
-
     #[error("invalid exact-duplication configuration: {0}")]
     InvalidConfig(String),
 

@@ -11,7 +11,7 @@
 //! same on `Option`, and no type is resolved here, so those are reported as
 //! possible and left for a consumer to weigh.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use entl_tree_sitter::{ParsedFile, ParserCatalog, parse_repository};
@@ -19,6 +19,7 @@ use infact_core::{
     CallEdgeEvidence, Certainty, Containment, Derivation, DiscardForm, ErrorDiscard, Fact,
     InputEvidence, Reach, SourceSpan,
 };
+use pathfinding::directed::dijkstra::{build_path, dijkstra_all};
 use tree_sitter::Node;
 
 #[derive(Debug, thiserror::Error)]
@@ -381,7 +382,10 @@ fn resolve_reach(discards: &mut [ErrorDiscard], callables: &[CallableNode]) {
     }
 }
 
-/// Walk callers outward until one of them could report a failure.
+/// How far a failure could have travelled, and the calls it would take.
+///
+/// Three separable questions: which callables are above this one, which of
+/// them decides the verdict, and what the calls between them are.
 fn search_upward(
     start: usize,
     callers: &BTreeMap<usize, Vec<(usize, &Callsite)>>,
@@ -390,36 +394,71 @@ fn search_upward(
     if !callers.contains_key(&start) {
         return (Reach::Unknown, Vec::new());
     }
-    let mut seen = BTreeSet::from([start]);
-    // each entry is a callable and the chain of edges back down to the discard
-    let mut queue = VecDeque::from([(start, Vec::new())]);
-    let mut deepest = Vec::new();
-    while let Some((current, chain)) = queue.pop_front() {
-        let Some(above) = callers.get(&current) else {
-            // a root: nothing above it can be told
-            if chain.len() > deepest.len() {
-                deepest = chain;
-            }
-            continue;
-        };
-        for (caller, call) in above {
-            let mut next = vec![CallEdgeEvidence {
-                caller: callables[*caller].path.clone(),
-                callee: callables[current].path.clone(),
-                call: call.span.clone(),
-            }];
-            next.extend(chain.iter().cloned());
-            if callables[*caller].containment == Containment::Fallible {
-                return (Reach::Ancestor, next);
-            }
-            if seen.insert(*caller) {
-                queue.push_back((*caller, next));
-            } else if next.len() > deepest.len() {
-                deepest = next;
-            }
-        }
+    // Every callable that reaches the discard, each recorded once with the
+    // call below it and how many calls up it sits. Recording the step down
+    // rather than a whole chain per entry is what makes any one path
+    // rebuildable afterwards, and recording each callable once at its
+    // shortest is what terminates on a recursive call graph.
+    let above = dijkstra_all(&start, |current| {
+        callers
+            .get(current)
+            .into_iter()
+            .flatten()
+            .map(|(caller, _)| (*caller, 1usize))
+    });
+
+    // The nearest caller that could report it is the one worth naming: it is
+    // the smallest change that would let the failure out.
+    let reportable = above
+        .iter()
+        .filter(|(caller, _)| callables[**caller].containment == Containment::Fallible)
+        .min_by_key(|(caller, (_, distance))| (*distance, **caller))
+        .map(|(caller, _)| *caller);
+    if let Some(ancestor) = reportable {
+        return (
+            Reach::Ancestor,
+            chain_to(ancestor, &above, callers, callables),
+        );
     }
-    (Reach::Sealed, deepest)
+
+    // Nothing above can be told, so report how far the failure travels before
+    // the calls run out. Ties go to the lowest index, never to search order.
+    let furthest = above
+        .iter()
+        .max_by_key(|(caller, (_, distance))| (*distance, std::cmp::Reverse(**caller)))
+        .map(|(caller, _)| *caller);
+    let chain = furthest
+        .map(|caller| chain_to(caller, &above, callers, callables))
+        .unwrap_or_default();
+    (Reach::Sealed, chain)
+}
+
+/// The calls from `ancestor` down to the discard, outermost call first.
+fn chain_to(
+    ancestor: usize,
+    above: &HashMap<usize, (usize, usize)>,
+    callers: &BTreeMap<usize, Vec<(usize, &Callsite)>>,
+    callables: &[CallableNode],
+) -> Vec<CallEdgeEvidence> {
+    build_path(&ancestor, above)
+        .windows(2)
+        .rev()
+        .filter_map(|step| {
+            let [callee, caller] = step else {
+                return None;
+            };
+            let (_, call) = callers
+                .get(callee)
+                .into_iter()
+                .flatten()
+                .find(|(above, _)| above == caller)?;
+            Some(CallEdgeEvidence {
+                caller: callables[*caller].path.clone(),
+                callee: callables[*callee].path.clone(),
+                call: call.span.clone(),
+            })
+        })
+        .collect()
 }
 
 type Recognized = (DiscardForm, Certainty, String);

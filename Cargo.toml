@@ -24,18 +24,17 @@ license = "MIT"
 repository = "https://github.com/zmaril/infact"
 
 [workspace.dependencies]
+ascent = { version = "0.8", default-features = false }
 clap = { version = "4", features = ["derive"] }
-dbsp = "0.325"
 entl-codebase = { path = "../entl/crates/entl-codebase" }
 entl-tree-sitter = { path = "../entl/crates/entl-tree-sitter" }
-feldera-macros = "0.325"
 heck = "0.5"
+pathfinding = "4"
 oci-client = { version = "0.17", default-features = false, features = ["rustls-tls"] }
-rkyv = { version = "0.7.45", default-features = false, features = ["std", "size_64", "validation"] }
 serde = { version = "1", features = ["derive"] }
+strum = { version = "0.27", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-size-of = { package = "feldera-size-of", version = "0.1.7" }
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread"] }

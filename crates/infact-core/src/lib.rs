@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 pub use infact_normalize::{Form, Pattern};
 use serde::{Deserialize, Serialize};
+use strum::IntoStaticStr;
 
 pub const EXTERNAL_CATALOG_SCHEMA: u32 = 1;
 pub const DERIVED_LIBRARY_BEHAVIOR_SCHEMA: u32 = 1;
@@ -139,8 +140,11 @@ pub struct EffectTrace {
 }
 
 /// How a fallible expression's error was dropped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, IntoStaticStr,
+)]
 #[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
 pub enum DiscardForm {
     /// `let _ = fallible();`
     LetUnderscore,
@@ -161,17 +165,8 @@ pub enum DiscardForm {
 }
 
 impl DiscardForm {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::LetUnderscore => "let-underscore",
-            Self::OkDiscard => "ok-discard",
-            Self::UnwrapOr => "unwrap-or",
-            Self::ErrArm => "err-arm",
-            Self::OkBinding => "ok-binding",
-            Self::IteratorDrop => "iterator-drop",
-            Self::CauseErased => "cause-erased",
-            Self::Panic => "panic",
-        }
+    pub fn as_str(self) -> &'static str {
+        self.into()
     }
 }
 
@@ -179,8 +174,11 @@ impl DiscardForm {
 ///
 /// A discard inside an infallible callable is the strongest signal: the error
 /// has no route out no matter what the caller does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, IntoStaticStr,
+)]
 #[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
 pub enum Containment {
     /// Returns `Result`, so propagation was available and was declined.
     Fallible,
@@ -191,12 +189,8 @@ pub enum Containment {
 }
 
 impl Containment {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Fallible => "fallible",
-            Self::Optional => "optional",
-            Self::Infallible => "infallible",
-        }
+    pub fn as_str(self) -> &'static str {
+        self.into()
     }
 }
 
@@ -207,8 +201,11 @@ impl Containment {
 /// must-use, so the discard is explicit either way. `.unwrap_or_default()`
 /// reads the same on `Option`, and syntax cannot tell the two apart, so the
 /// analyzer reports what it saw and leaves the policy call to the consumer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, IntoStaticStr,
+)]
 #[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
 pub enum Certainty {
     /// The form names `Result`, or exists only to discard a must-use value.
     Certain,
@@ -217,11 +214,8 @@ pub enum Certainty {
 }
 
 impl Certainty {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Certain => "certain",
-            Self::Possible => "possible",
-        }
+    pub fn as_str(self) -> &'static str {
+        self.into()
     }
 }
 
@@ -231,8 +225,11 @@ impl Certainty {
 /// asked of the callers, because a discard inside an infallible callable that
 /// is itself only ever called by infallible callables cannot be reported
 /// anywhere, no matter what the caller does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, IntoStaticStr,
+)]
 #[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
 pub enum Reach {
     /// The discarding callable returns `Result`; it could have returned this.
     Local,
@@ -245,13 +242,8 @@ pub enum Reach {
 }
 
 impl Reach {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Local => "local",
-            Self::Ancestor => "ancestor",
-            Self::Sealed => "sealed",
-            Self::Unknown => "unknown",
-        }
+    pub fn as_str(self) -> &'static str {
+        self.into()
     }
 }
 
@@ -280,8 +272,11 @@ const fn unknown_reach() -> Reach {
     Reach::Unknown
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, IntoStaticStr,
+)]
 #[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
 pub enum Effect {
     Allocate,
     Block,
@@ -297,20 +292,8 @@ pub enum Effect {
 }
 
 impl Effect {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Allocate => "allocate",
-            Self::Block => "block",
-            Self::EnvironmentRead => "environment-read",
-            Self::EnvironmentWrite => "environment-write",
-            Self::FileRead => "file-read",
-            Self::FileWrite => "file-write",
-            Self::Network => "network",
-            Self::Process => "process",
-            Self::Random => "random",
-            Self::Time => "time",
-            Self::Unsafe => "unsafe",
-        }
+    pub fn as_str(self) -> &'static str {
+        self.into()
     }
 }
 
