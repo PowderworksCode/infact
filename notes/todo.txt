@@ -262,6 +262,9 @@ THE NEW MACHINE NEEDS:
     crates/entl-rust-mir/rust-toolchain.toml. The driver links the compiler's
     private crates; without it part 1 cannot be built or verified.
   - rustc 1.96.1 for the rest. 1.97.1 ICEs on dbsp.
+    (STALE as of 2f97ada: dbsp is gone. The pin may no longer be needed, but
+    nobody has tried 1.97.1 since. Corrected rather than deleted so a stale
+    copy elsewhere can be recognised.)
   - All three repos as SIBLINGS under one parent. They are path dependencies:
     straitjacket -> infact -> entl. A lone clone of any one will not build.
 
@@ -269,8 +272,13 @@ WATCH FOR:
   - crates/infact-rust-effects/src/lib.rs is at EXACTLY 1500 lines. The next
     line trips straitjacket's file-size rule. It was split twice already
     (allocation.rs, then path.rs) to stay under.
+    (As of 2f97ada it is 1455 -- removing the DBSP circuit and its derive
+    stacks bought 45 lines of headroom. Still worth watching.)
   - crates/infact-normalize/src/lib.rs is 1756 lines and OVER the limit. That
     is the supercompilation work, not this one.
+    (RESOLVED. It reached 1901, was the last finding in the repo, and was
+    split in 5626c47 along matching/renaming/the form itself. A full policy
+    run over infact is now clean: no findings in 115 files.)
   - tests/fixtures/receivers/observations.json embeds closure spans with
     line:col. Editing that fixture's source means regenerating the JSON, or the
     test compares against stale positions.
@@ -760,3 +768,132 @@ WATCH FOR:
 
 VERIFIED GREEN on 08-02: infact 39 test groups (excluding infact-rust-errors),
 entl workspace, straitjacket workspace.
+
+
+## Execution engine — DBSP REMOVED, and what that did and did not buy
+
+State on 08-02: MERGED to main as 2f97ada (PR #1). This section exists so the
+next person does not re-derive the analysis or repeat the two dead ends.
+
+DBSP was the declared engine, imported by 2 of 13 crates, 163 of 491 packages.
+Neither use needed it, and they failed for OPPOSITE reasons. That is the whole
+finding; everything else follows from it.
+
+  infact-rust-effects::propagate_effects   RECURSIVE, ZERO DELTAS
+    Built a circuit, pushed every call and seed, called transaction() once,
+    dropped the circuit. transaction() appeared exactly once in the crate and
+    no push ever carried a negative weight. The recursion was load-bearing,
+    the incrementality was not. Now one ascent rule.
+
+  infact-duplication::ExactEngine          INCREMENTAL, NOT RECURSIVE
+    indexed.join(&indexed) is a group-by; no recursion anywhere in the crate.
+    Retraction fires only when a path is replaced, which only two self-tests
+    do. And ExactEngine is pub(crate) inside a private `mod engine`, so no
+    consumer CAN reach the incremental API. Now a plain hash group-by.
+
+Nothing used recursion and incrementality together, which is why one site
+became Datalog and the other became no engine at all.
+
+  The self-join emitted each unordered pair TWICE (both orders canonicalise to
+  the same MatchSeed), which is the only reason the i64 weight ledger existed.
+  A group-by emitting left<right once deletes the ledger and advance() rather
+  than translating them. replace() semantics fall out of recomputing from the
+  stored windows, so both retraction tests still pass UNCHANGED.
+
+  rkyv, size-of and feldera-macros left with dbsp. They were in those two
+  manifests only to satisfy five rkyv/SizeOf/IsNone derive stacks -- a symbol
+  grep for `dbsp` does not show them.
+
+### A bug this found, which is the part that mattered most
+
+  infact-rust-errors::search_upward tangled four jobs in one loop, and its
+  Sealed fallback reported whichever chain the traversal happened to build
+  last rather than any property of the graph. Given a caller that reaches the
+  discard BOTH directly and the long way round, it reported that callable as
+  three calls away when it was one. It reported a walk and called it a
+  distance.
+
+  Now: classification and evidence reconstruction are separate steps over
+  pathfinding::dijkstra_all, and the fallback is defined as the furthest
+  caller BY SHORTEST ROUTE, ties broken on lowest index rather than on search
+  order. Pinned by a_sealed_chain_is_measured_from_the_shortest_route, which
+  FAILS against the old code.
+
+### Do not re-attempt these. Both were built and measured, then reverted.
+
+  REACH RESOLUTION AS DATALOG.  102 lines against 39. ascent has no
+  provenance -- no proof trees, no derivation tracking -- so a Datalog version
+  reconstructs by hand what a BFS yields for free on its way to the answer.
+  Also: ascent's `lattice` codegen emits unwrap(), and this workspace denies
+  clippy::unwrap_used. #[allow] on the macro invocation does NOT suppress it
+  (rustc reports the attribute itself as unused); the only clean scope is a
+  separate crate. The Dual<u32> distance-lattice technique DOES work and
+  terminates on cycles -- proved in ascent-probe/src/reach.rs -- it just costs
+  more than it saves here.
+
+  evidence_path VIA pathfinding::bfs.  52 lines -> 64. Semantically fine, and
+  the original has no bug, so it bought nothing.
+
+  The general rule that predicts both: ascent belongs where the OUTPUT IS A
+  RELATION. Every other candidate produces a WITNESS -- a specific path with
+  evidence spans, for a human-readable report -- and infact is an
+  evidence-producing system by design (AGENTS.md: "Facts retain source spans
+  and derivation provenance"). Datalog gives you what is true and discards why.
+
+### PLANS.md claims that do not survive reading the code
+
+  "12 distinct VecDeque/visited/frontier sites"     -- it is 2. The rest are
+    import lines, three STRING LITERALS naming the VecDeque *type* in
+    allocation.rs's allocating-container tables, and one pointer-identity
+    cycle guard in behaviors/derivation.rs.
+  derived_from / delegates_to / is_plainer          -- not graph code at all.
+    is_plainer is #[expect(dead_code)].
+  Plan 5's "456 lines of per-variant traversal"     -- depth() is ALREADY
+    generic via children(). size() and anchors() are not folds (per-variant
+    contributions unreachable through children). references_local is
+    binding/shadowing logic. What is left is map_children and Display, both
+    of which need per-variant reconstruction and cannot move.
+
+### Measured
+
+  packages     491 -> 328
+  source       -122 lines
+  clean check  86.83s -> 68.23s workspace; 80.34s -> 26.70s for
+               infact-rust-effects alone
+  policy       infact-rust-effects/src/lib.rs fell 1500 -> 1455, off the
+               file-size boundary it had been sitting exactly on
+
+  The workspace figure is diluted by oci-client, which still holds a
+  94-package TLS/HTTP/QUIC substrate that was SHARED with dbsp's. Cutting it
+  takes 328 -> ~192. Plan 1/4's dependency case was always half of a pair.
+
+### Open, from this work
+
+[ ] Four of the five infact-core as_str methods have NO caller anywhere.
+    Proved by deleting all five: infact built clean, straitjacket failed on
+    exactly one (Effect::as_str, straitjacket/src/config.rs:504). DiscardForm,
+    Containment, Certainty, Reach are unused public API, ~40 more lines.
+    Left in place because deleting public API is not a refactor.
+
+    NOT a concern, though it looked like one at first: converting these to
+    strum derives does NOT cost the parser-pack query work its corpus.
+    crates/infact-rust-behaviors/tests/fixtures/strum/src/lib.rs is a
+    purpose-built fixture with three hand-written as_str impls, dating to
+    a36964f init, already exercised by tests/strum.rs:83 -- and it carries
+    deliberate negatives (NotExhaustive) that infact-core never had. Point a
+    .scm query at that, not at infact-core.
+
+[x] rustc 1.97.1 WORKS NOW -- verified 08-02, all three repos, after dbsp left.
+    dbsp was the only reason for the 1.96.1 pin and the ICE is gone with it.
+
+      infact         cargo check clean, 139 tests, clippy -D warnings clean
+      entl           91 tests
+      straitjacket   68 tests
+
+    Install with a full profile, not --profile minimal: clippy and rustfmt are
+    separate components and their absence looks exactly like a clippy failure
+    ("'cargo-clippy' is not installed for the toolchain"), which reads as the
+    bump having broken the lint gate when it has not.
+
+    entl/crates/entl-rust-mir still needs nightly-2026-07-18 and is unaffected;
+    it carries its own rust-toolchain.toml.
