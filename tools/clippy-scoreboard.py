@@ -14,16 +14,19 @@ positive landing in the right neighbourhood. Off-target findings are counted and
 shown separately rather than silently credited.
 """
 
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 
-SCRATCH = Path(
-    "/private/tmp/claude-501/-Users-zackmaril-powderworks/2ac1822a-8a0e-4829-b2c8-63c680aa8e89/scratchpad"
+# Derived from this file's location so the harness travels with the repo rather
+# than with one machine. Override any of them when the layout differs.
+INFACT = Path(os.environ.get("INFACT_ROOT") or Path(__file__).resolve().parents[1])
+PARSERS = Path(
+    os.environ.get("INFACT_PARSER_PATH") or INFACT.parent / "entl" / "parser-packs"
 )
-INFACT = Path("/Users/zackmaril/powderworks/infact")
-PARSERS = Path("/Users/zackmaril/powderworks/entl/parser-packs")
+MEASURE = Path(os.environ.get("INFACT_MEASURE") or INFACT.parent / "measure")
 
 ANNOTATION = re.compile(r"//~(?P<up>\^*)(?P<down>v*)\s*(?P<lint>[A-Za-z_:]+)")
 
@@ -66,7 +69,7 @@ def expected(path):
 
 def findings(source, packs):
     """Run the checker over one file, returning the ranges it reports."""
-    scan = SCRATCH / "bench-scan"
+    scan = MEASURE / "bench-scan"
     subprocess.run(["rm", "-rf", str(scan)], check=False)
     (scan / "src").mkdir(parents=True)
     (scan / "src" / "lib.rs").write_text(source.read_text(errors="replace"))
@@ -91,12 +94,19 @@ def findings(source, packs):
 
 
 def main():
-    packs = [SCRATCH / "stdvA", SCRATCH / "packs/itertools-0.15.0"]
-    packs = [p for p in packs if (p / "behaviors").is_dir()]
-    if not packs:
-        sys.exit("no behavior packs found")
+    binary = INFACT / "target/release/infact"
+    if not binary.exists():
+        sys.exit(f"no infact binary at {binary} — cargo build --release -p infact-cli")
 
-    tests = sorted((SCRATCH / "clippy").glob("*.rs"))
+    # Every pack that has behaviors derived, rather than a hardcoded list, so
+    # adding a library to the score is a matter of building its pack.
+    packs = sorted(p for p in (MEASURE / "packs").glob("*") if (p / "behaviors").is_dir())
+    if not packs:
+        sys.exit(f"no behavior packs under {MEASURE / 'packs'}")
+
+    tests = sorted((MEASURE / "clippy").glob("*.rs"))
+    if not tests:
+        sys.exit(f"no clippy corpus under {MEASURE / 'clippy'} — see tools/README.md")
     total_expected = total_hit = total_reported = total_stray = 0
     rows = []
     for test in tests:

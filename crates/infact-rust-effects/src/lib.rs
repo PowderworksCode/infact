@@ -1,21 +1,22 @@
 //! Source-backed effect summaries for selected Rust standard-library modules.
 
 mod allocation;
+mod evidence;
 mod observed;
 mod path;
 
 use allocation::collect_allocating_macros;
+use evidence::{evidence_path, evidence_paths};
 pub use observed::{analyze_observed_effects, unexplained_destinations};
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use entl_tree_sitter::{ParsedFile, ParserCatalog, ParserRuntime, parse_repository};
 use infact_core::{
-    CALL_EFFECT_CATALOG_SCHEMA, CallEdgeEvidence, CallEffectCatalog, CallEffectEvidence,
-    CallEffects, Derivation as FactDerivation, Effect, EffectTrace, Fact, InputEvidence,
-    SourceSpan,
+    CALL_EFFECT_CATALOG_SCHEMA, CallEffectCatalog, CallEffects, Derivation as FactDerivation,
+    Effect, EffectTrace, Fact, InputEvidence, SourceSpan,
 };
 use infact_fact_pack::{
     BuiltLayout, Compatibility, Compiler, Content, Derivation, FACT_PACK_SCHEMA, FactPackManifest,
@@ -242,27 +243,32 @@ pub fn analyze_repository_effects(
         let Some(callable) = callable_by_id.get(&relation.callable) else {
             continue;
         };
-        let Some(evidence) = evidence_path(
+        // A callable that does the thing twelve times has twelve traces. One
+        // per site, so fixing what you were shown does not leave eleven behind.
+        let reached = evidence_paths(
             callable.id,
             effect,
             &calls_by_caller,
             &seeds_by_callable,
             &paths_by_id,
-        ) else {
+        );
+        if reached.is_empty() {
             continue;
-        };
+        }
         effectful.insert(callable.id);
-        let value = EffectTrace {
-            callable: callable.path.clone(),
-            callable_span: callable.span.clone(),
-            effect,
-            origin: evidence.origin,
-            path: evidence.path,
-        };
-        effects.push(Fact {
-            derivation: trace_derivation(&value, &inputs),
-            value,
-        });
+        for evidence in reached {
+            let value = EffectTrace {
+                callable: callable.path.clone(),
+                callable_span: callable.span.clone(),
+                effect,
+                origin: evidence.origin,
+                path: evidence.path,
+            };
+            effects.push(Fact {
+                derivation: trace_derivation(&value, &inputs),
+                value,
+            });
+        }
     }
     effects.sort();
     effects.dedup();
@@ -656,8 +662,8 @@ fn collect_callables(
         };
         let body = node.child_by_field_name("body");
         let header_end = body.map_or(node.end_byte(), |body| body.start_byte());
-        let header =
-            std::str::from_utf8(&source[node.start_byte()..header_end]).unwrap_or_default();
+        let header_bytes = source.get(node.start_byte()..header_end).unwrap_or_default();
+        let header = std::str::from_utf8(header_bytes).unwrap_or_default();
         let span = source_span(path, node)?;
         let mut syntax_calls = Vec::new();
         let mut allocating_macros = Vec::new();
@@ -1001,58 +1007,6 @@ fn origin_effects(callable: &Callable, callee: &str) -> Vec<Effect> {
     effects.into_iter().collect()
 }
 
-fn evidence_path(
-    start: u64,
-    effect: Effect,
-    calls: &BTreeMap<u64, Vec<&ResolvedCall>>,
-    seeds: &BTreeMap<u64, Vec<&EffectSeed>>,
-    // only each callable's path is needed, so the syntax-resolved and the
-    // observation-resolved graphs can share this search
-    callables: &BTreeMap<u64, String>,
-) -> Option<CallEffectEvidence> {
-    let mut queue = VecDeque::from([(start, Vec::<CallEdgeEvidence>::new())]);
-    let mut seen = BTreeSet::new();
-    while let Some((current, path)) = queue.pop_front() {
-        if !seen.insert(current) {
-            continue;
-        }
-        if let Some(seed) = seeds
-            .get(&current)
-            .and_then(|seeds| seeds.iter().find(|seed| seed.effect == effect))
-        {
-            let mut complete = path;
-            let caller = callables.get(&current)?.clone();
-            complete.push(CallEdgeEvidence {
-                caller,
-                callee: seed.origin.clone(),
-                call: seed.span.clone(),
-            });
-            return Some(CallEffectEvidence {
-                effect,
-                origin: seed.origin.clone(),
-                path: complete,
-            });
-        }
-        if let Some(outgoing) = calls.get(&current) {
-            for call in outgoing {
-                let Some(caller) = callables.get(&call.caller) else {
-                    continue;
-                };
-                let Some(callee) = callables.get(&call.callee) else {
-                    continue;
-                };
-                let mut next_path = path.clone();
-                next_path.push(CallEdgeEvidence {
-                    caller: caller.clone(),
-                    callee: callee.clone(),
-                    call: call.span.clone(),
-                });
-                queue.push_back((call.callee, next_path));
-            }
-        }
-    }
-    None
-}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct EffectRelation {
@@ -1198,7 +1152,7 @@ fn trace_derivation(
 }
 
 fn node_text<'a>(node: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
-    std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).ok() // straitjacket-allow:error-discard — a node whose bytes are not UTF-8 has no text
+    std::str::from_utf8(source.get(node.byte_range())?).ok() // straitjacket-allow:error-discard — a node whose bytes are not UTF-8 has no text
 }
 
 fn normalize_callee(callee: &str) -> String {

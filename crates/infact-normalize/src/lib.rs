@@ -658,6 +658,31 @@ impl Form {
         })
     }
 
+    /// Every place a pattern matches, not just the first.
+    ///
+    /// A function that writes the same `match` out four times has done the
+    /// thing four times, and reporting one of them surfaces the rest a re-run
+    /// at a time. Matches are non-overlapping: a run of steps that has been
+    /// claimed cannot also be the start of the next match, or one behavior
+    /// spread over several statements would be reported once per statement it
+    /// touches.
+    pub fn locate_all(&self, pattern: &Self) -> Vec<std::ops::Range<usize>> {
+        let Self::Sequence(haystack) = self else {
+            return Vec::new();
+        };
+        let mut found = Vec::new();
+        let mut from = 0;
+        while from < haystack.len() {
+            let rest = Self::Sequence(haystack[from..].to_vec());
+            let Some(range) = rest.locate(pattern) else {
+                break;
+            };
+            found.push(from + range.start..from + range.end);
+            from += range.end.max(range.start + 1);
+        }
+        found
+    }
+
     /// The same behavior without its closing reference to what it built.
     ///
     /// A library function ends by naming its result, because it has to return
@@ -1794,6 +1819,33 @@ mod tests {
                 arguments: vec![Form::Local(1)],
             }),
         }
+    }
+
+    /// Code that does a thing four times has four findings.
+    ///
+    /// Reporting only the first meant a reader who fixed what they were shown
+    /// had no way to learn the rest existed — they surfaced one re-run at a
+    /// time. On clippy's `manual_unwrap_or` corpus this alone was the
+    /// difference between 7 of 20 and 19 of 20, because those tests write the
+    /// same `match` out repeatedly inside one function.
+    #[test]
+    fn every_occurrence_is_located_not_only_the_first() {
+        let body = Form::Sequence(vec![traverse(), Form::Literal, traverse()]);
+        assert_eq!(
+            body.locate_all(&traverse()),
+            vec![0..1, 2..3],
+            "both traversals are the behavior, and the statement between them is not"
+        );
+        assert_eq!(body.locate(&traverse()), Some(0..1), "locate stays first-only");
+    }
+
+    /// Matches do not overlap, or a behavior spread over several statements
+    /// would be reported once per statement it touches.
+    #[test]
+    fn located_occurrences_do_not_overlap() {
+        let pair = Form::Sequence(vec![traverse(), traverse()]);
+        let pattern = Form::Sequence(vec![traverse(), traverse()]);
+        assert_eq!(pair.locate_all(&pattern), vec![0..2]);
     }
 
     #[test]

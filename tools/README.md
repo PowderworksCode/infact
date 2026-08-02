@@ -16,7 +16,7 @@ scored `manual_flatten` at 10/10 on the strength of `Option::is_none_or`
 firing on the same loops. Do not loosen this.
 
 The corpus is not vendored here. Fetch these from `rust-clippy/tests/ui/` into
-a `clippy/` directory beside the script, annotations intact:
+`<measure>/clippy/`, annotations intact:
 
     filter_map_next.rs
     manual_filter_map.rs
@@ -32,8 +32,34 @@ a `clippy/` directory beside the script, annotations intact:
     needless_range_loop.rs
     search_is_some.rs
 
-Paths to the infact binary, parser packs and behavior packs are constants at the
-top of the file.
+Fetch them with:
+
+    M=<measure>/clippy && mkdir -p $M
+    for f in <the names above, without .rs>; do
+      curl -sS -o $M/$f.rs \
+        https://raw.githubusercontent.com/rust-lang/rust-clippy/master/tests/ui/$f.rs
+    done
+
+Clippy's master still yields the 201 annotated positives the recorded numbers
+were measured against, so a fresh fetch stays comparable. Re-count before
+trusting a score against a re-fetched corpus; upstream may add cases.
+
+### Layout
+
+Paths derive from the script's own location, so nothing is machine-specific:
+
+    INFACT_ROOT          defaults to the repo this file sits in
+    INFACT_PARSER_PATH   defaults to <repo>/../entl/parser-packs
+    INFACT_MEASURE       defaults to <repo>/../measure
+
+`<measure>` holds what is too large or too fetched to vendor:
+
+    measure/clippy/            the 13 ui tests above
+    measure/packs/<name>/      one directory per behavior pack; every pack with a
+                               behaviors/ subdirectory is scored
+    measure/bench-scan/        scratch, rewritten per file
+
+The harness needs `cargo build --release -p infact-cli` first.
 
 ## pack-collisions.py
 

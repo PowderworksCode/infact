@@ -701,15 +701,24 @@ fn trailing_segment(value: &str) -> String {
     value.rsplit("::").next().unwrap_or(value).to_owned()
 }
 
+/// The bare type name of an `impl` block's self type, as it appears in a
+/// `{module}::{implementation}::{name}` callable path.
+///
+/// Yields `Bar` for `impl Trait for &mut Bar`, not `&mut Bar`. This crate and
+/// `infact-rust-effects` construct the same callable identity from this, so the
+/// two must agree; the unqualified spelling wins because a reference type is not
+/// usable as a path segment.
 fn simple_type_name(value: &str) -> String {
-    value
-        .split('<')
-        .next()
+    let base = value.split('<').next().unwrap_or(value);
+    base.split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .rfind(|part| {
+            !part.is_empty()
+                && part
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+        })
         .unwrap_or(value)
-        .rsplit("::")
-        .next()
-        .unwrap_or(value)
-        .trim()
         .to_owned()
 }
 

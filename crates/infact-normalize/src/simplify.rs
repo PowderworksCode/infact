@@ -397,6 +397,352 @@ fn is_continue(name: &str) -> bool {
     name.rsplit("::").next() == Some("Continue")
 }
 
+impl Form {
+    /// The lazy operation a terminal search stands for, if it is one.
+    ///
+    /// THIS IS NOT A LAW, and it is deliberately not part of `simplify`. The
+    /// two forms are not equal: a search stops at the first hit and a lazy
+    /// adaptor does not. It holds only where the caller already knows it is
+    /// looking at one step of a lazy adaptor — a callable that merely
+    /// constructs a type, followed into that type's `next`. `FilterMap::next`
+    /// delegates to `find_map`, so what a naive derivation stores under
+    /// `filter_map` IS `find_map`, and the two are indistinguishable until this
+    /// lift separates them.
+    ///
+    /// One step of the adaptor is the whole operation with the stop removed, so
+    /// the rewrite is to drop the stop:
+    ///
+    /// ```text
+    /// (do (traverse s x (select SCRUT (None) => (lit) (Some p) => (return (Some p)))) (None))
+    ///   -> (sift s x SCRUT)
+    /// (do (traverse s x (branch COND (return (Some x)))) (None))
+    ///   -> (retain s x COND)
+    /// ```
+    ///
+    /// Returns `None` when the form is not that shape, and when it is that
+    /// shape but the adaptor carries state — see [`Form::is_stateful_step`].
+    pub fn lifted_from_one_step(&self) -> Option<Self> {
+        let Self::Sequence(parts) = self else {
+            return None;
+        };
+        let [Self::Traverse {
+            sequence,
+            item,
+            body,
+        }, exhausted] = parts.as_slice()
+        else {
+            return None;
+        };
+        if !is_none_variant(exhausted) {
+            return None;
+        }
+        // A stateful adaptor's `next` is not one step of anything expressible
+        // here, and admitting it would be undetectable downstream.
+        if self.is_stateful_step() {
+            return None;
+        }
+        let carried = one_step_yield(body)?;
+        Some(match carried {
+            OneStep::Sifted(scrutinee) => Self::Sift {
+                sequence: sequence.clone(),
+                item: item.clone(),
+                body: Box::new(scrutinee),
+            },
+            OneStep::Retained(condition) => Self::Retain {
+                sequence: sequence.clone(),
+                item: item.clone(),
+                body: Box::new(condition),
+            },
+        })
+    }
+
+    /// Whether a `next` carries state across calls, rather than reading one
+    /// element and answering.
+    ///
+    /// Fails closed: `Flatten`, `Peekable` and `Chunks` must refuse. They do not
+    /// derive today, so refusing costs nothing, and admitting them would put a
+    /// one-step reading on something that has no one-step reading.
+    fn is_stateful_step(&self) -> bool {
+        self.assigns_to_a_field() || self.sequences_traversed() > 1
+    }
+
+    /// Whether anything here writes through a field, which is how an adaptor
+    /// remembers where it was.
+    fn assigns_to_a_field(&self) -> bool {
+        if let Self::Assign { target, .. } = self
+            && matches!(target.as_ref(), Self::Field { .. })
+        {
+            return true;
+        }
+        self.children().iter().any(|child| child.assigns_to_a_field())
+    }
+
+    /// How many sequences this walks. More than one is a `Flatten` or a `Zip`,
+    /// whose step depends on where the other sequence had got to.
+    fn sequences_traversed(&self) -> usize {
+        let here = usize::from(matches!(
+            self,
+            Self::Traverse { .. } | Self::Transform { .. } | Self::Sift { .. } | Self::Retain { .. }
+        ));
+        here + self
+            .children()
+            .iter()
+            .map(|child| child.sequences_traversed())
+            .sum::<usize>()
+    }
+}
+
+/// What one step of a traversal hands back, when it hands back anything.
+enum OneStep {
+    /// The step produced a value from a computation, as `filter_map` does.
+    Sifted(Form),
+    /// The step kept the element it was given, as `filter` does.
+    Retained(Form),
+}
+
+fn is_none_variant(form: &Form) -> bool {
+    matches!(form, Form::Variant { name, payload } if name.rsplit("::").next() == Some("None") && payload.is_empty())
+}
+
+/// `Some(value)`, however the return is spelled, yielding what it carries.
+fn yielded_value(form: &Form) -> Option<&Form> {
+    let form = match form {
+        Form::Return(inner) => inner.as_ref(),
+        other => other,
+    };
+    match form {
+        Form::Variant { name, payload } if name.rsplit("::").next() == Some("Some") => {
+            match payload.as_slice() {
+                [only] => Some(only),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn one_step_yield(body: &Form) -> Option<OneStep> {
+    match body {
+        // `match f(x) { None => (), Some(v) => return Some(v) }` — the step
+        // produces a value and drops the element when it produces none.
+        Form::Select { scrutinee, arms } => {
+            let [empty, carried] = arms.as_slice() else {
+                return None;
+            };
+            let (empty, carried) = match (&empty.pattern, &carried.pattern) {
+                (Pattern::Variant { name, .. }, _) if name.rsplit("::").next() == Some("None") => {
+                    (empty, carried)
+                }
+                (_, Pattern::Variant { name, .. }) if name.rsplit("::").next() == Some("None") => {
+                    (carried, empty)
+                }
+                _ => return None,
+            };
+            if !is_unit(&empty.body) {
+                return None;
+            }
+            let Pattern::Variant { name, parts } = &carried.pattern else {
+                return None;
+            };
+            if name.rsplit("::").next() != Some("Some") {
+                return None;
+            }
+            let [Pattern::Binding(bound)] = parts.as_slice() else {
+                return None;
+            };
+            // the arm must hand back exactly what it just unwrapped, or the
+            // step is doing something this rewrite does not describe
+            match yielded_value(&carried.body)? {
+                Form::Local(local) if local == bound => {
+                    Some(OneStep::Sifted(scrutinee.as_ref().clone()))
+                }
+                _ => None,
+            }
+        }
+        // `if p(x) { return Some(x) }` — the step keeps the element unchanged.
+        Form::Branch {
+            condition,
+            consequence,
+            alternative,
+        } => {
+            if alternative.as_ref().is_some_and(|other| !is_unit(other)) {
+                return None;
+            }
+            yielded_value(consequence)?;
+            Some(OneStep::Retained(condition.as_ref().clone()))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod lifting {
+    use super::*;
+    use crate::Arm;
+
+    fn none() -> Form {
+        Form::Variant {
+            name: "None".to_owned(),
+            payload: vec![],
+        }
+    }
+
+    fn some(payload: Form) -> Form {
+        Form::Variant {
+            name: "Some".to_owned(),
+            payload: vec![payload],
+        }
+    }
+
+    /// `(do (traverse f0 v1 BODY) (None))`, the shape a terminal search takes.
+    fn search(body: Form) -> Form {
+        Form::Sequence(vec![
+            Form::Traverse {
+                sequence: Box::new(Form::Free(0)),
+                item: Box::new(Pattern::Binding(1)),
+                body: Box::new(body),
+            },
+            none(),
+        ])
+    }
+
+    /// `match f(x) { None => (), Some(v) => return Some(v) }`
+    fn produced() -> Form {
+        Form::select(
+            Form::Call {
+                callee: Box::new(Form::Free(1)),
+                arguments: vec![Form::Local(1)],
+            },
+            vec![
+                Arm {
+                    pattern: Pattern::Variant {
+                        name: "None".to_owned(),
+                        parts: vec![],
+                    },
+                    body: Form::Literal,
+                },
+                Arm {
+                    pattern: Pattern::Variant {
+                        name: "Some".to_owned(),
+                        parts: vec![Pattern::Binding(2)],
+                    },
+                    body: Form::Return(Box::new(some(Form::Local(2)))),
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn a_search_that_produces_values_lifts_to_a_sift() {
+        let lifted = search(produced()).lifted_from_one_step();
+        assert_eq!(
+            lifted,
+            Some(Form::Sift {
+                sequence: Box::new(Form::Free(0)),
+                item: Box::new(Pattern::Binding(1)),
+                body: Box::new(Form::Call {
+                    callee: Box::new(Form::Free(1)),
+                    arguments: vec![Form::Local(1)],
+                }),
+            }),
+            "FilterMap::next delegates to find_map, so one step of it is the sift"
+        );
+    }
+
+    #[test]
+    fn a_search_that_keeps_elements_lifts_to_a_retain() {
+        let kept = Form::Branch {
+            condition: Box::new(Form::Call {
+                callee: Box::new(Form::Free(1)),
+                arguments: vec![Form::Local(1)],
+            }),
+            consequence: Box::new(Form::Return(Box::new(some(Form::Local(1))))),
+            alternative: None,
+        };
+        let lifted = search(kept).lifted_from_one_step();
+        assert!(
+            matches!(lifted, Some(Form::Retain { .. })),
+            "a step that hands back the element it was given is a filter: {lifted:?}"
+        );
+    }
+
+    /// The lift is licensed by the caller, not by the shape alone. A search that
+    /// is genuinely a search — `find_map` — has this same form, and derivation
+    /// must be the thing that decides, so the rewrite stays available to it.
+    #[test]
+    fn anything_that_is_not_one_step_is_declined() {
+        assert_eq!(Form::Free(0).lifted_from_one_step(), None);
+        // a traversal that does not end by reporting exhaustion
+        assert_eq!(
+            Form::Sequence(vec![
+                Form::Traverse {
+                    sequence: Box::new(Form::Free(0)),
+                    item: Box::new(Pattern::Binding(1)),
+                    body: Box::new(produced()),
+                },
+                Form::Literal,
+            ])
+            .lifted_from_one_step(),
+            None
+        );
+    }
+
+    /// The lifted form names NOTHING, and that is why it cannot be reported.
+    ///
+    /// `is_reportable` requires `anchors >= 2` and `anchors >= holes`, because a
+    /// form built only from shape matches any code of that shape — the
+    /// `Option::map_or` failure that fired nine hundred times across five
+    /// hundred crates. `(sift f0 v1 (call f1 v1))` is pure shape: no type, no
+    /// method, no operator, no constant. Lifting `filter_map` is correct and
+    /// makes it unreportable in the same stroke, which is why item 3's clippy
+    /// points never arrived. Asserted here so the tension is not rediscovered.
+    #[test]
+    fn the_lifted_form_names_nothing() {
+        let lifted = search(produced())
+            .lifted_from_one_step()
+            .expect("the sift shape lifts");
+        assert_eq!(lifted.anchors(), 0, "a bare sift over holes names nothing");
+        assert!(
+            lifted.anchors() < lifted.holes(),
+            "more open than named: {} anchors, {} holes",
+            lifted.anchors(),
+            lifted.holes()
+        );
+    }
+
+    /// Fails closed. `Flatten`, `Peekable` and `Chunks` carry state between
+    /// calls, so no one step of them stands for the whole operation.
+    #[test]
+    fn a_stateful_step_is_refused() {
+        let remembers = Form::Sequence(vec![
+            Form::Assign {
+                operator: "=".to_owned(),
+                target: Box::new(Form::Field {
+                    value: Box::new(Form::Free(0)),
+                    name: "index".to_owned(),
+                }),
+                value: Box::new(Form::Number("0".to_owned())),
+            },
+            produced(),
+        ]);
+        assert_eq!(search(remembers).lifted_from_one_step(), None);
+
+        let two_sequences = Form::Sequence(vec![
+            Form::Traverse {
+                sequence: Box::new(Form::Free(0)),
+                item: Box::new(Pattern::Binding(1)),
+                body: Box::new(Form::Traverse {
+                    sequence: Box::new(Form::Free(2)),
+                    item: Box::new(Pattern::Binding(3)),
+                    body: Box::new(produced()),
+                }),
+            },
+            none(),
+        ]);
+        assert_eq!(two_sequences.lifted_from_one_step(), None);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

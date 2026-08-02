@@ -65,3 +65,49 @@ fn allocation_propagates_to_every_caller() {
     assert_eq!(direct.value.origin, "rust:allocation:Vec::with_capacity");
     assert_eq!(direct.value.path.len(), 1);
 }
+
+/// A callable that allocates three times has three traces.
+///
+/// `evidence_path` returned the first seed it reached, so the other sites
+/// surfaced one re-run at a time. Bounded by the number of seeds on the
+/// callable, deliberately not by the number of routes through the call graph:
+/// paths between two nodes are exponential and a distant caller does not need
+/// three spellings of the same news.
+#[test]
+fn every_allocation_site_in_a_callable_is_reported() {
+    let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let discovery = ParserCatalog::discover([crate_root.join("../../../entl/parser-packs/rust")]);
+    assert!(discovery.errors.is_empty(), "{:?}", discovery.errors);
+    let report = analyze_repository_effects(
+        crate_root.join("tests/fixtures/allocation"),
+        &discovery.catalog,
+        &[],
+    )
+    .unwrap();
+
+    let sites = report
+        .effects
+        .iter()
+        .filter(|fact| {
+            fact.value.effect == Effect::Allocate
+                && fact.value.callable.ends_with("allocates_three_times")
+        })
+        .map(|fact| fact.value.origin.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        sites.len(),
+        3,
+        "one trace per allocation site, got {sites:?}"
+    );
+
+    // a distant caller still gets one, not one per site below it
+    let distant = report
+        .effects
+        .iter()
+        .filter(|fact| {
+            fact.value.effect == Effect::Allocate && fact.value.callable.ends_with("distant_caller")
+        })
+        .count();
+    assert_eq!(distant, 1, "reach is reported once, not once per origin");
+}

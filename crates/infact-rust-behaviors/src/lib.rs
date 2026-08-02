@@ -242,7 +242,7 @@ pub fn analyze_repository(
                 let Some(catalog) = catalog_for(catalogs, behavior) else {
                     continue;
                 };
-                let alternatives = rest
+                let alternatives: Vec<LibraryTarget> = rest
                     .iter()
                     .filter_map(|other| {
                         let catalog = catalog_for(catalogs, other)?;
@@ -254,19 +254,32 @@ pub fn analyze_repository(
                         })
                     })
                     .collect();
-                let located = function
-                    .form
-                    .locate(&behavior.program)
-                    .or_else(|| candidate.locate(&behavior.program));
-                matches.insert(behavior_match(
-                    file,
-                    &function,
-                    located,
-                    fused,
-                    catalog,
-                    behavior,
-                    alternatives,
-                )?);
+                // Code that does the same thing four times has four findings.
+                // Reporting only the first surfaced the rest one re-run at a
+                // time, and a reader fixing the one they were shown had no way
+                // to know the others existed.
+                let mut located = function.form.locate_all(&behavior.program);
+                if located.is_empty() {
+                    located = candidate.locate_all(&behavior.program);
+                }
+                // A behavior that matched but cannot be placed is still a
+                // finding; it just has no span to point at.
+                let placements = if located.is_empty() {
+                    vec![None]
+                } else {
+                    located.into_iter().map(Some).collect()
+                };
+                for steps in placements {
+                    matches.insert(behavior_match(
+                        file,
+                        &function,
+                        steps,
+                        fused,
+                        catalog,
+                        behavior,
+                        alternatives.clone(),
+                    )?);
+                }
             }
         }
         collect_enum_macro_matches(file, macro_behaviors, &mut matches)?;
