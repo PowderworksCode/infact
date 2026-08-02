@@ -201,22 +201,13 @@ impl Containment {
 /// must-use, so the discard is explicit either way. `.unwrap_or_default()`
 /// reads the same on `Option`, and syntax cannot tell the two apart, so the
 /// analyzer reports what it saw and leaves the policy call to the consumer.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, IntoStaticStr,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-#[strum(serialize_all = "kebab-case")]
 pub enum Certainty {
     /// The form names `Result`, or exists only to discard a must-use value.
     Certain,
     /// The same form exists on `Option`; the receiver's type was not resolved.
     Possible,
-}
-
-impl Certainty {
-    pub fn as_str(self) -> &'static str {
-        self.into()
-    }
 }
 
 /// How far a discarded failure could have travelled up the call graph.
@@ -225,11 +216,8 @@ impl Certainty {
 /// asked of the callers, because a discard inside an infallible callable that
 /// is itself only ever called by infallible callables cannot be reported
 /// anywhere, no matter what the caller does.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, IntoStaticStr,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-#[strum(serialize_all = "kebab-case")]
 pub enum Reach {
     /// The discarding callable returns `Result`; it could have returned this.
     Local,
@@ -239,12 +227,6 @@ pub enum Reach {
     Sealed,
     /// No caller could be resolved from syntax, so the answer is not known.
     Unknown,
-}
-
-impl Reach {
-    pub fn as_str(self) -> &'static str {
-        self.into()
-    }
 }
 
 /// A site where a fallible expression's error was dropped rather than returned.
