@@ -119,9 +119,50 @@ part 1 alone produces.
     it "allocates inside a loop" is not sayable and barriers stay
     callable-granular. This was the original recommendation and is still open.
 
-[ ] One finding per (callable, effect)
-    `evidence_path` returns a single path, so a callable allocating in twelve
-    places surfaces them one re-run at a time.
+[x] One finding per (callable, behavior)   -- DONE 08-02 for BEHAVIORS, and it
+    was the cheapest recall win in the project by a wide margin.
+    `analyze_repository` called `locate`, which returns the FIRST match, and
+    emitted one finding per (function, behavior). A function doing the same
+    thing four times reported once, so a reader who fixed what they were shown
+    had no way to learn the rest existed. `Form::locate_all` returns every
+    non-overlapping occurrence and each becomes a finding.
+
+      manual_unwrap_or   7/20  -> 19/20
+      TOTAL              14/201 -> 26/201   (7.0% -> 12.9%)
+      off-target         0 -> 0             (36 of 36 reported are on-target)
+
+    Precision was untouched: every new finding is a real repeat. The negative
+    corpus test still passes, which is what says this did not just get louder.
+
+    The one remaining manual_unwrap_or miss is `Err(s) => "Bob"`, an Err
+    binding that is never used where the library form has `Err(_)`. Treating an
+    unreferenced binding as `Ignored` would close it, but that is a normalizer
+    change and those are the ones that erase distinctions — worth 1 point and
+    not obviously worth the risk. The case directly above it in the corpus
+    (`Err(s) => s`, which USES the binding) is a clippy "don't lint" and we
+    correctly decline it, so the two are being told apart properly today.
+
+[x] Same fix for EFFECTS   -- DONE 08-02
+    `evidence_path` did `seeds.find(..)`, taking the FIRST seed at the first
+    callable it reached, so a callable allocating three times reported once.
+    `evidence_paths` returns one evidence per seed AT THAT CALLABLE.
+
+    BOUNDED ON PURPOSE, and this is the part worth keeping. It does NOT
+    enumerate routes through the call graph — the number of paths between two
+    nodes is exponential, and a caller three hops up does not need three
+    spellings of the same news. So a callable's own sites all report, and reach
+    is still reported once. Both halves are asserted by
+    `every_allocation_site_in_a_callable_is_reported`.
+
+    The effects side is NOT measured by the clippy corpus, so there is no
+    scoreboard number for this one. The test is the evidence.
+
+    WATCH: this pushed infact-rust-effects/src/lib.rs to 1539, over the limit
+    the transfer note warned was one line away. The evidence search moved to
+    its own `evidence.rs` (third split, after allocation.rs and path.rs) and
+    lib.rs is back to 1454. `evidence_path` is kept as a thin wrapper over
+    `evidence_paths` so the catalog and observed call sites needed no edits —
+    the re-export trick the call-graph note recommends.
 
 [ ] A barrier configured but never marked is silent
     Mirror of `unknown-barrier`, which catches the marker-with-no-barrier case.
@@ -148,11 +189,16 @@ missed by anyone reading only this file:
       and `infact-rust-errors` was investigated on 08-02 and SHELVED. Of the
       five helpers believed duplicated, only `repository_module` is identical.
       `node_text` and `simple_type_name` differ in BEHAVIOR, and
-      `collect_callables` is not shared at all. Two real items came out of it:
-      give effects errors' panic-free `node_text`, and settle whether
-      `simple_type_name` should yield `Bar` or `&mut Bar` for
-      `impl Trait for &mut Bar` — it feeds callable-path construction in both
-      crates, so it decides callable identity.
+      `collect_callables` is not shared at all. Two real items came out of it,
+      and BOTH ARE DONE as of 08-02:
+        - effects took errors' panic-free `node_text`, plus the same fix to
+          the function-header slice next to it, which had the identical panic.
+        - `simple_type_name` is settled on `Bar`, not `&mut Bar`. errors was
+          the one that changed; effects already spelled it that way. Locked by
+          `names_an_impl_self_type_without_its_decoration` in errors' grammar
+          tests, since the note correctly observed that no existing test
+          covered the divergent shapes.
+      The shared crate itself stays shelved — neither fix needed one.
 
   "Parser-pack queries for the discarded-error check"
       Moving `infact-rust-errors`' form recognition out of Rust and into
@@ -283,9 +329,86 @@ It is the cheapest bug detector in the project.
 
 ### Next, in order
 
-1. THE REMAINING 11 SAME-TYPE COLLISIONS. Run the partition script (below) over
-   a fresh std pack. These are pairs no type information can ever separate,
-   because the candidates share a receiver:
+1. THE REMAINING 11 SAME-TYPE COLLISIONS. MEASURED 08-02 on the rebuilt std
+   pack: still exactly 11, out of 49 shared forms (13 cross-container, which
+   types will settle). Two things the list below got wrong, both found by
+   running it rather than reading it:
+
+   FIRST, pack-collisions.py did NOT do the same-container split that this item
+   depends on and that its own README describes. It only filtered on differing
+   leaf names. It now mirrors collisions.rs exactly (same container, differing
+   leaves, neither name extending the other). The 11 were not previously
+   enumerable by the tool that was supposed to enumerate them.
+
+   SECOND, the keys/values entry below is much bigger than "keys / into_keys".
+   ONE form — a transform over `self.inner.next()` taking the first of a pair —
+   is shared by ALL of:
+     BTreeMap::{into_keys, keys}      HashMap::{into_keys, keys}
+     BTreeSet::{lower_bound, upper_bound, and both _mut variants}
+     LinkedList::{cursor_back, cursor_front, and both _mut variants}
+   lower/upper and back/front are OPPOSITES, and nobody had recorded them.
+
+   THIRD, AND IT WAS NOT A COLLISION BUG AT ALL — FIXED 08-02, branch
+   `stateful-adaptor-guard` in the infact-guard worktree.
+
+   `principal_method` matched the constructed type by BARE NAME. std has FOUR
+   distinct types called `Cursor` — linked_list, btree::set, btree::map, io —
+   and they all pooled into one candidate set, so whichever `next` ranked
+   highest won for every one of them. The proof is in the data, not the code:
+   the form attributed to `LinkedList::cursor_back` reads `self.inner.next()`,
+   and `linked_list::Cursor` has no `inner` field. It had been handed another
+   type's behavior outright. `Iter` is the worst offender — nine `::iter`
+   callables were resolving through it.
+
+   TWENTY-ONE std callables were attributed a foreign type's behavior:
+     BTreeMap::{iter, iter_mut, range}   BTreeSet::iter   HashSet::iter
+     BinaryHeap::{clear, drain, iter}    HashMap::iter    VecDeque::extract_if
+     LinkedList::cursor_{front,back}{,_mut}   Args::new    Drain::iter
+     IntoIter::{iter, new}   IterMut::iter (x2)   IntoIter::iter (std)
+
+   THE FIX: resolve in the file the construction is written in; fall back to
+   library-wide ONLY when the library declares that name exactly once. The
+   fallback must count TYPE DECLARATIONS, not implementations — an earlier
+   version counted files holding methods, which still let the bug through for a
+   type declared with no `impl` beside it, which is precisely
+   `linked_list::Cursor`. A strict same-file rule with no fallback was also
+   tried and is WRONG: it costs `Itertools::take_while_inclusive`, because a
+   trait in lib.rs returning an adaptor declared in its own module is the
+   normal shape.
+
+   MEASURED, all three numbers:
+     std behaviors     483 -> 464   (21 removed, 2 gained)
+     itertools         130 -> 130   (nothing legitimate lost)
+     clippy recall     14/201, 22/22 on-target — UNCHANGED
+   Pure precision. It removed only wrong answers.
+
+   Locked by tests/resolution.rs, which asserts BOTH directions — refusing to
+   follow anything would also make the negative test pass while destroying the
+   feature, so the same-file case is asserted beside it.
+
+   REMAINING ROOT CAUSE for lower_bound/upper_bound, still open: the
+   CONSTRUCTOR'S OWN IDENTITY IS DISCARDED. Both build the SAME `set::Cursor`
+   in the SAME file and both correctly resolve to `Cursor::next`, so the bound
+   — the entire difference — never reaches the form. Same for
+   cursor_back/cursor_front had they survived. This is a different bug from the
+   one above and is what is left of that group.
+
+   THE STATEFUL-ADAPTOR GUARD DOES NOT ADDRESS ANY OF THIS. It was the plan and
+   the measurement killed it: a `Cursor` was never refused for being stateful,
+   it was mis-resolved long before statefulness could be consulted. The guard
+   is still worth doing for item 3's actual purpose. Ten minutes of measuring
+   saved building it in the wrong place — see the prediction warning below.
+
+   `keys` vs `into_keys` is a DIFFERENT cause in the same group: `Keys` and
+   `IntoKeys` are distinct types whose `next` bodies are textually identical,
+   so following is correct and only ownership separates them. A statefulness
+   guard will not touch it.
+
+   Measure the guard on ONE case before building it. The note below about
+   mispredicting the blocker four times applies directly here.
+
+   The full list, all pairs no type information can ever separate because the
+   candidates share a receiver:
 
      BTreeSet::is_subset / is_superset      <- OPPOSITES
      Tcp::peer_addr / socket_addr           <- OPPOSITES
@@ -317,7 +440,92 @@ It is the cheapest bug detector in the project.
    LibraryBehaviorMatch already carries `alternatives`, so this narrows an
    honest set rather than replacing a guess. Keep it that way.
 
-3. LAZY-ADAPTOR DERIVATION. Phase 0 is DONE and the premise holds. A lazy
+3. LAZY-ADAPTOR DERIVATION. THE LIFT IS BUILT AND CORRECT. IT MOVED CLIPPY BY
+   ZERO. That is the FIFTH misprediction in a row, and this time the laws were
+   right and the reach was wrong again — read the warning below before doing
+   anything with the rest of this item.
+
+   BUILT 08-02, `Form::lifted_from_one_step` in infact-normalize/src/simplify.rs:
+     core::Iterator::filter_map  ->  (sift f0 v1 (call f1 v1))
+   exactly the form this item predicted. `find_map` correctly did NOT lift and
+   keeps its search form, which resolved the filter_map/find_map collision
+   (same-container collisions 10 -> 9). The lift is deliberately NOT a law and
+   is not part of `simplify`: a search stops at the first hit and a lazy adaptor
+   does not, so only derivation may apply it.
+
+   The licence is STICKY, and this is the part that is easy to get wrong. The
+   construction is followed at `filter_map -> next`, but the liftable form only
+   appears one step LATER, at `next -> find_map` via ordinary delegation. A
+   per-step flag reads false exactly where the lift is needed. Derivation tracks
+   `inside_one_step` across the whole walk and lifts once at the end.
+
+   The stateful guard is in and fails closed (`is_stateful_step`): refuses a
+   step that assigns through a field or walks more than one sequence.
+
+   WHY IT SCORED NOTHING, measured on one case rather than guessed. The two
+   sides do not meet:
+
+     library, after the lift   (sift f0 v1 (call f1 v1))
+     user, .filter(p).map(f)   (collect (sift f0 v0 (branch COND (Some ..) (None))))
+     user, the manual loop     does not reduce to a sift AT ALL — it stays
+                               (do (let v0 (construct Vec))
+                                   (traverse f0 v1 (select .. => (method push v0 v2)))
+                                   v0)
+
+   So fusion does produce a `Sift` from a chain, but its body is an explicit
+   Option construction where the library's is a bare applied hole, and the whole
+   thing sits under a `collect` the library form has no counterpart for. The
+   claim in this note that `(sift f0 v1 (call f1 v1))` "matches BOTH
+   .filter_map(f) and the fused .filter(p).map(f)" was hand-verified and is
+   WRONG as measured: zero findings on the probe.
+
+   THE BLOCKER IS `is_reportable`, AND IT IS NOT A BUG. Chased 08-02 and the
+   first two guesses were both wrong; recorded so nobody re-walks them:
+
+     WRONG GUESS 1: the `collect` wrapper. Disproved by probing the same chain
+     WITHOUT a collect — `(sift f0 v0 (branch ..))` bare still does not match.
+     `search` already recurses into children, so the wrapper was never in the
+     way.
+     WRONG GUESS 2: `(call HOLE item)` failing to match `(branch ..)`.
+     `abstraction` implements exactly that (Miller unification) and none of its
+     refusal conditions fire here.
+
+   THE ACTUAL REASON. `is_reportable` demands `anchors >= 2` AND
+   `anchors >= holes`. The lifted form is
+
+       (sift f0 v1 (call f1 v1))     anchors 0, holes 2
+
+   `Sift`, `Free`, `Call` and `Local` all contribute NO anchors. It names no
+   type, no method, no operator, no constant — it is pure shape, and pure shape
+   matches any code of that shape. That is the `Option::map_or` failure this
+   codebase already paid for once: technically right, reported nine hundred
+   times across five hundred crates, useless. Asserted now by
+   `the_lifted_form_names_nothing` in simplify.rs so it is not rediscovered.
+
+   NOTE THE TRADE. Before the lift, `filter_map` carried the big
+   Sequence/Traverse/Select form, whose `Select` arms name `Some` and `None` and
+   so DOES clear the anchor bar. The lift exchanged a reportable-but-ambiguous
+   form (identical to `find_map`, so any match named the wrong API half the
+   time) for an unambiguous-but-unreportable one. Neither scored: recall was
+   14/201 before and after. Precision went up, reportability went to zero.
+
+   SO THE ~63 POINTS ARE NOT REACHABLE THIS WAY AT ALL, and the reason is the
+   one already written in "What NOT to spend time on" below. manual_filter_map,
+   manual_find_map and filter_map_next are SHAPE lints, exactly like
+   needless_range_loop and manual_while_let_some: `filter_map` names nothing, so
+   "you could use filter_map" is a statement about shape and not about
+   reimplementing a particular library function. Getting them requires weakening
+   `anchors`, which exists for a measured reason. That is the same trade this
+   note already declined once, and the ~63 belongs in the NOT-worth-it list
+   rather than in this item's headline.
+
+   WHAT THE LIFT IS STILL WORTH. It is correct, it is tested, and it resolved
+   the filter_map/find_map collision. Keep it. Its value is precision, not
+   recall, and this item should no longer be sold on a clippy number.
+
+   ORIGINAL NOTE FOLLOWS, kept because the analysis of the lift itself held up.
+
+   Phase 0 is DONE and the premise holds. A lazy
    adaptor's behavior derived from `next` is ONE-STEP semantics: FilterMap::next
    delegates to find_map, so what is stored under `filter_map` IS find_map. The
    lift is one rewrite — a terminal search is the lazy operation with a stop in
@@ -384,7 +592,59 @@ noise was overlapping manual_flatten's annotations, and the metric credited any
 finding whose span covered an annotated line. It now requires the reported API
 to be what the lint asks for. Do not loosen that.
 
-### Reproducing the measurements on the new machine
+### RE-VERIFIED after the DBSP -> ascent rebase (2f97ada), 08-02
+
+Every measurement in this file was taken before that merge landed, which touched
+infact-core and infact-rust-errors. Re-derived and re-scored on top of it:
+
+    std pack             464 behaviors        unchanged
+    itertools pack       130 behaviors        unchanged
+    clippy recall        26/201, 36/36 on-target   unchanged
+    same-container       9                    unchanged
+    cross-container      12                   unchanged
+
+Identical, so nothing in this note is stale. Recorded because a passing test
+suite says nothing broke and does NOT say the numbers still hold — those are
+different claims and only one of them was checked for free.
+
+### REPRODUCED on the Linux VM, 08-02 — every number below checks out
+
+The setup is done and the recorded numbers are confirmed, not merely re-run:
+
+    std pack             483 behaviors   (core 188 + alloc 134 + std 161)
+    core callables       1,668           (the ~1,670 that means the RIGHT source)
+    clippy corpus        201 annotated positives from a fresh master fetch
+    clippy recall        14/201, 22 reported, 22/22 on-target
+    same-type collisions 11
+
+Everything lives in `powderworks/measure/`, a sibling of the three repos, NOT in
+any of them and NOT in a session scratch directory:
+
+    measure/clippy/            the 13 ui tests
+    measure/packs/std/         core+alloc+std derived into one pack
+    measure/packs/itertools-0.15.0/
+    measure/src/               fetched crate sources
+    measure/bench-scan/        scratch, rewritten per file
+
+Both scripts now derive their paths from the repo (`INFACT_ROOT`,
+`INFACT_PARSER_PATH`, `INFACT_MEASURE` override them). The hardcoded
+`/Users/zackmaril` constants are gone, which is why this had to be
+reconstructed from memory before.
+
+TOOLCHAINS INSTALLED HERE:
+  1.95.0            + rust-src, for the std SOURCE. Confirmed: yields 1,668
+                    core callables. Do not use nightly source — 950, silently.
+  nightly-2026-07-18 + rustc-dev, rust-src, llvm-tools, for entl-rust-mir.
+  1.96.1            default, builds everything else.
+
+Two corrections to what was written before:
+  - crates.io returns 403 without a User-Agent. itertools 0.15.0 is not in the
+    local registry (0.14.0 is) and must be fetched with one set.
+  - `infact-rust-errors` is NOT a non-compiling foreign crate any more. The
+    whole workspace builds, tests, and passes clippy with it included. Drop the
+    `--exclude infact-rust-errors`.
+
+### The original instructions, for a machine that still needs them
 
 Everything below lived in a scratch directory and is NOT in the repo. Recreate
 it or the numbers above cannot be checked.
@@ -403,6 +663,34 @@ it or the numbers above cannot be checked.
   DEPENDENCY CORPUS: 494 crates, the transitive deps of the three repos, read
   straight from ~/.cargo/registry/src/*/. A run takes about 8 minutes on the
   old machine. The package list was `<pkg> <version>` pairs, one per line.
+
+  RE-RUN 08-02 on the Linux VM over everything in the local registry — 743
+  crates, ~30 minutes, raw results kept in `measure/depcorpus.tsv`:
+
+    findings                    1,771
+    crates with >= 1 finding      284   (38% of 743)
+    distinct (crate,file,api)   1,306
+    REPEAT MULTIPLIER            1.36x
+    distinct APIs named             67
+    median per reporting crate       3
+
+  THE NUMBER THAT MATTERED IS 1.36x. Reporting every occurrence instead of the
+  first was the big recall win on clippy (manual_unwrap_or 7/20 -> 19/20), and
+  the obvious risk was that real code would multiply the same way and drown the
+  output. It does not: clippy's corpus repeats a shape deliberately, real crates
+  do it occasionally. A median of 3 findings per reporting crate is readable.
+
+  NOT COMPARABLE HEAD-TO-HEAD with the recorded 1,035 — that was 494 crates and
+  this is 743. Per crate it is 2.38 now against 2.09 then. On a DISTINCT basis
+  it is 1.76 per crate, LOWER than the old rate, which is what the
+  container-identity fix should do: the 21 misattributions it removed included
+  the whole `::iter` family, which is everywhere.
+
+  NO DEGENERATE DOMINATION, the check worth repeating every time. Top API is
+  `Option::unwrap_or` at 297 of 1,771 (17%). For scale, the two known
+  catastrophes were `is_none_or` at 1,390 and `map_or` at 900. `is_none_or` now
+  sits at 48, so the `true`/`()` fix is still holding. Noisiest crates are
+  hashbrown (54) and rustix (53), both plausible for what they are.
 
   CLIPPY SCOREBOARD: 13 ui tests from rust-clippy with their `//~^` annotations
   intact, 201 annotated positives. THE HARNESS IS NOW IN tools/, with the list
