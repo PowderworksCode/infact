@@ -33,3 +33,12 @@ pub fn allocates_nothing() -> Vec<u8> {
 pub fn clones_a_handle(handle: &Arc<HashMap<String, u8>>) -> Arc<HashMap<String, u8>> {
     handle.clone()
 }
+
+/// Three allocations in one body. Reporting one of them leaves two behind, and
+/// a reader who fixed what they were shown has no way to learn of the rest.
+pub fn allocates_three_times(name: &str) -> Vec<String> {
+    let mut out = Vec::with_capacity(4);
+    out.push(format!("first {name}"));
+    out.push(format!("second {name}"));
+    out
+}

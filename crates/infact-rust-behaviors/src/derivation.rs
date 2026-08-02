@@ -5,8 +5,8 @@
 //! delegation so that a public wrapper describes the work its helper actually
 //! does. One implementation covers every callable in every library.
 
-use std::collections::BTreeSet;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use entl_tree_sitter::{ParsedFile, ParserCatalog, parse_repository};
 use infact_core::{
@@ -180,6 +180,43 @@ fn library_functions(files: &[ParsedFile]) -> Vec<LibraryFunction<'_>> {
     functions
 }
 
+/// Which files declare each named type.
+///
+/// A bare type name only identifies a type when the library gives it to one.
+/// Counting the files that *implement* a name is not the same question and gets
+/// it wrong for a type declared with no `impl` beside it.
+type TypeDeclarations = BTreeMap<String, BTreeSet<PathBuf>>;
+
+fn type_declarations(files: &[ParsedFile]) -> TypeDeclarations {
+    let mut declarations = TypeDeclarations::new();
+    for file in files {
+        if file.pack.language().id != "rust" || !is_library_source(&file.path) {
+            continue;
+        }
+        collect_type_declarations(file.tree.root_node(), file, &mut declarations);
+    }
+    declarations
+}
+
+fn collect_type_declarations(node: Node<'_>, file: &ParsedFile, output: &mut TypeDeclarations) {
+    if matches!(
+        node.kind(),
+        "struct_item" | "enum_item" | "union_item" | "type_item"
+    ) && let Some(name) = node
+        .child_by_field_name("name")
+        .and_then(|name| node_text(name, &file.source))
+    {
+        output
+            .entry(name.to_owned())
+            .or_default()
+            .insert(file.path.clone());
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_type_declarations(child, file, output);
+    }
+}
+
 /// The name a callable path ends in.
 fn leaf_name(callable_path: &str) -> &str {
     callable_path.rsplit("::").next().unwrap_or(callable_path)
@@ -276,13 +313,46 @@ const PRINCIPAL_METHODS: &[&str] = &["next", "next_back", "poll", "poll_next"];
 /// are bookkeeping. Prefer the one the language requires; failing that, take
 /// whichever describes the most work. This is a good enough answer, because a
 /// finding here is a prompt to look rather than a proof.
+///
+/// `within` is the file the construction was written in, and it is what keeps
+/// this honest. `container` is a BARE type name, so matching on the name alone
+/// pools every type in the library that answers to it. The standard library has
+/// four distinct types named `Cursor` — in `linked_list`, `btree::set`,
+/// `btree::map` and `io` — and before this was scoped, `BTreeSet::lower_bound`,
+/// `LinkedList::cursor_back` and `BTreeMap::keys` all resolved to ONE of them.
+/// The form they derived reads `self.inner.next()`, and `linked_list::Cursor`
+/// has no `inner` field at all: it was handed a behavior belonging to another
+/// type outright.
 fn principal_method<'a>(
     functions: &'a [LibraryFunction<'a>],
     type_name: &str,
+    within: &Path,
+    declarations: &TypeDeclarations,
 ) -> Option<&'a LibraryFunction<'a>> {
-    functions
-        .iter()
-        .filter(|function| function.container.as_deref() == Some(type_name))
+    let named = || {
+        functions
+            .iter()
+            .filter(|function| function.container.as_deref() == Some(type_name))
+    };
+    // A type is usually implemented beside its construction, and that file
+    // answers the question without any name resolution at all.
+    let mut candidates = named()
+        .filter(|function| function.file.path == within)
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        // Otherwise the name has to identify the type on its own, which it does
+        // only when the library declares it once. A trait in `lib.rs` returning
+        // an adaptor declared in its own module is the common shape and stays
+        // followable; two declarations of one name — std's four `Cursor`s — are
+        // refused, because picking either attributes one type's behavior to
+        // another and nothing downstream would show it.
+        if declarations.get(type_name).map_or(0, BTreeSet::len) != 1 {
+            return None;
+        }
+        candidates = named().collect();
+    }
+    candidates
+        .into_iter()
         .filter_map(|function| {
             let form = normalize(function).ok()?; // straitjacket-allow:error-discard — a function that will not normalize is not a candidate
             // The method the language requires wins even when its body is a
@@ -330,7 +400,7 @@ pub fn derive_behavior(
 ) -> Result<DerivedLibraryBehavior> {
     let parsed = parse_repository(source_root, parsers)?;
     let functions = library_functions(&parsed.files);
-    derive_from(&functions, catalog, callable_path)
+    derive_from(&functions, &type_declarations(&parsed.files), catalog, callable_path)
 }
 
 /// Derive one behavior from an already parsed library.
@@ -340,6 +410,7 @@ pub fn derive_behavior(
 /// once per callable.
 fn derive_from(
     functions: &[LibraryFunction<'_>],
+    declarations: &TypeDeclarations,
     catalog: &ExternalCatalog,
     callable_path: &str,
 ) -> Result<DerivedLibraryBehavior> {
@@ -388,6 +459,12 @@ fn derive_from(
     let mut implementation = vec![evidence(current)?];
     let mut form = normalize(current)?;
     let mut visited = vec![std::ptr::from_ref(current)];
+    // Whether derivation ever stepped into a constructed type's principal
+    // method. It is sticky: once inside a lazy adaptor's `next`, whatever
+    // further delegation reaches is still one step of that adaptor.
+    // `Iterator::filter_map` goes filter_map -> next -> find_map, and the
+    // liftable form only appears at find_map, a step after the construction.
+    let mut inside_one_step = false;
 
     // Follow the implementation until it describes actual work, by whichever
     // route leads there: a wrapper delegating to a helper, or a callable that
@@ -396,14 +473,22 @@ fn derive_from(
         if describes_work(&form) {
             break;
         }
-        let next = delegation_target(&form)
-            .and_then(|target| resolve(target, current.container.as_deref(), Some(current)))
-            .or_else(|| {
-                let built = constructed_type(&form)?;
-                let built = resolve_self(built, current.container.as_deref())?;
-                principal_method(functions, built)
-            });
-        let Some(next) = next else {
+        let delegated = delegation_target(&form)
+            .and_then(|target| resolve(target, current.container.as_deref(), Some(current)));
+        // Following a construction into the constructed type's `next` is the
+        // one route that lands on a lazy adaptor, and the only one that
+        // licenses the one-step lift below.
+        let built_into = if delegated.is_some() {
+            None
+        } else {
+            constructed_type(&form)
+                .and_then(|built| resolve_self(built, current.container.as_deref()))
+                .and_then(|built| {
+                    principal_method(functions, built, &current.file.path, declarations)
+                })
+        };
+        inside_one_step |= built_into.is_some();
+        let Some(next) = delegated.or(built_into) else {
             break;
         };
         // a trait wrapper and the free function it forwards to commonly share
@@ -424,10 +509,19 @@ fn derive_from(
     if !describes_work(&form)
         && let Some(constructed) = constructed_type(&form)
         && let Some(constructed) = resolve_self(constructed, current.container.as_deref())
-        && let Some(implementing) = principal_method(functions, constructed)
+        && let Some(implementing) = principal_method(functions, constructed, &current.file.path, declarations)
     {
         form = normalize(implementing)?;
+        inside_one_step = true;
         implementation.push(evidence(implementing)?);
+    }
+
+    // One step of a lazy adaptor stands for the whole operation, and only a
+    // derivation that went through a construction has earned that reading.
+    if inside_one_step
+        && let Some(lifted) = form.lifted_from_one_step()
+    {
+        form = lifted;
     }
 
     if !is_comparable(&form) {
@@ -650,6 +744,7 @@ pub fn derive_library(
 ) -> Result<DerivedLibrary> {
     let parsed = parse_repository(source_root, parsers)?;
     let functions = library_functions(&parsed.files);
+    let declarations = type_declarations(&parsed.files);
     let catalog = catalog_from(&parsed, &functions, package, version)?;
     // Most callables describe no comparable behavior, which is expected and
     // skipped. A parse or source failure on the same path is not, and would
@@ -657,7 +752,7 @@ pub fn derive_library(
     let mut behaviors = Vec::new();
     let mut skipped = std::collections::BTreeMap::new();
     for callable in &catalog.callables {
-        match derive_from(&functions, &catalog, &callable.path) {
+        match derive_from(&functions, &declarations, &catalog, &callable.path) {
             Ok(behavior) => behaviors.push(behavior),
             Err(error) if error.is_underivable() => {
                 *skipped.entry(skip_reason(&error)).or_insert(0) += 1;
