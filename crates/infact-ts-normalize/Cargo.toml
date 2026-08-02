@@ -1,0 +1,19 @@
+[package]
+name = "infact-ts-normalize"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Normalizes TypeScript and JavaScript syntax into Infact's behavior form."
+
+[dependencies]
+entl-tree-sitter.workspace = true
+infact-normalize = { path = "../infact-normalize" }
+tree-sitter.workspace = true
+
+[dev-dependencies]
+entl-tree-sitter.workspace = true
+
+[lints]
+workspace = true

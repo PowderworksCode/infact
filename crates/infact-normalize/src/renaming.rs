@@ -84,6 +84,7 @@ impl Renaming {
                 sequence,
                 item,
                 body,
+                direction,
             } => {
                 let sequence = self.boxed(sequence);
                 let item = Box::new(self.pattern(item));
@@ -91,6 +92,7 @@ impl Renaming {
                     sequence,
                     item,
                     body: self.boxed(body),
+                    direction: *direction,
                 }
             }
             Form::Sift {

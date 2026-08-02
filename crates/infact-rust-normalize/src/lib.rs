@@ -16,7 +16,7 @@
 //!    `?`, and blocks that wrap a single expression.
 
 use entl_tree_sitter::ParsedFile;
-use infact_normalize::{Arm, Form, Pattern, Roles};
+use infact_normalize::{Arm, Direction, Form, Pattern, Roles};
 use tree_sitter::Node;
 
 /// Methods that hand back the sequence they were given.
@@ -344,6 +344,7 @@ impl<'a> Normalizer<'a> {
             let item = self.bind_pattern(pattern);
             let body = self.expression(body);
             return Some(Form::Traverse {
+                direction: Direction::Forward,
                 sequence: Box::new(sequence),
                 item: Box::new(item),
                 body: Box::new(body),
@@ -444,6 +445,7 @@ impl<'a> Normalizer<'a> {
         let (sequence, item, body) = (Box::new(sequence), Box::new(item), Box::new(body));
         Some(match kind {
             0 => Form::Traverse {
+                direction: Direction::Forward,
                 sequence,
                 item,
                 body,

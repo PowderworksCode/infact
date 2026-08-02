@@ -1,8 +1,8 @@
 # Measurement harnesses
 
-Neither of these is part of the build. They are how the behavior work is
-measured, and both were reconstructed from memory more than once before being
-put here.
+None of these is part of the build. They are how the behavior work is
+measured, and the first two were reconstructed from memory more than once
+before being put here.
 
 ## clippy-scoreboard.py
 
@@ -76,3 +76,60 @@ type-aware resolver would absorb them while looking authoritative.
 `crates/infact-rust-behaviors/tests/collisions.rs` enforces the same rule over
 itertools on every build. This script is for running it over a std pack, which
 is too large to derive in a test.
+
+## ts-scoreboard
+
+Scores TypeScript behavior matches the way `clippy-scoreboard.py` scores Rust
+ones, against a labelled corpus nobody wrote for us: the lint plugins' own rule
+tests. `invalid` cases are annotated positives and `valid` cases are annotated
+NEGATIVES — which clippy's ui tests do not provide at all, and which are what
+keeps precision honest.
+
+A case is credited only when a match NAMES THE API THE RULE ASKS FOR. Requiring
+merely that something matched is not a metric; the Rust scoreboard read 24/201
+that way once and it was fake. Do not loosen this.
+
+Recorded on 08-02: **25/155 positives, 4/252 false positives**, over
+`prefer-find`, `prefer-includes` and `prefer-array-find`. Two of the remaining
+four false positives need type information the checker supplies but this harness
+joins only per-file; see the note in `notes/todo.txt`.
+
+    node tools/ts-scoreboard/export.mjs        # rule tests -> cases.json
+    cargo run --manifest-path tools/ts-scoreboard/Cargo.toml
+
+Neither the library source nor the rule tests are vendored. Both are fetched
+into `<measure>/`:
+
+    measure/spidermonkey/      Array.js String.js Object.js Map.js, from
+                               mozilla/gecko-dev js/src/builtin/. These are the
+                               only engine builtins written in plain JavaScript,
+                               which is why they and not V8's Torque. MPL-2.0:
+                               derive from them locally, exactly as the Rust std
+                               pack is derived from the local rustup toolchain.
+                               What ships is the derived form and its digests,
+                               never the source.
+    measure/ts-lints/          prefer-find.test.ts and prefer-includes.test.ts
+                               from typescript-eslint, prefer-array-find.js from
+                               eslint-plugin-unicorn, plus the generated
+                               cases.json.
+
+Fetch them with:
+
+    M=${INFACT_MEASURE:-../measure}
+    mkdir -p $M/spidermonkey $M/ts-lints
+    B=https://raw.githubusercontent.com/mozilla/gecko-dev/master/js/src/builtin
+    for f in Array String Object Map; do curl -sS -o $M/spidermonkey/$f.js $B/$f.js; done
+    T=https://raw.githubusercontent.com/typescript-eslint/typescript-eslint/main/packages/eslint-plugin/tests/rules
+    for f in prefer-find prefer-includes; do curl -sS -o $M/ts-lints/$f.test.ts $T/$f.test.ts; done
+    curl -sS -o $M/ts-lints/prefer-array-find.js \
+      https://raw.githubusercontent.com/sindresorhus/eslint-plugin-unicorn/main/test/prefer-array-find.js
+
+`export.mjs` parses those rule tests with the TypeScript compiler rather than by
+pattern, because they are TypeScript. It needs a `typescript` install; pass
+`--typescript <path to typescript.js>` to the scorer to pick a specific one,
+which is also what selects the checker used to observe receiver types.
+
+Same layout as above:
+
+    INFACT_MEASURE       defaults to <repo>/../measure
+    INFACT_PARSER_PATH   defaults to <repo>/../entl/parser-packs

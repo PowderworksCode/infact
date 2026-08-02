@@ -384,14 +384,25 @@ impl Bindings {
                     sequence: subject_sequence,
                     item: subject_item,
                     body: subject_body,
+                    direction: subject_direction,
                 },
                 Form::Traverse {
                     sequence: pattern_sequence,
                     item: pattern_item,
                     body: pattern_body,
+                    direction: pattern_direction,
                 },
-            )
-            | (
+            ) => {
+                // A search from the front does not answer a search from the
+                // back. Everything else is what the other walks do, including
+                // recognizing a body that does this work alongside other work.
+                subject_direction == pattern_direction
+                    && self.form(subject_sequence, pattern_sequence)
+                    && self.pattern(subject_item, pattern_item)
+                    && (self.form(subject_body, pattern_body)
+                        || self.fused_body(subject_body, pattern_body))
+            }
+            (
                 Form::Transform {
                     sequence: subject_sequence,
                     item: subject_item,

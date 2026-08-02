@@ -1492,6 +1492,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "infact-ts-normalize"
+version = "0.0.0"
+dependencies = [
+ "entl-tree-sitter",
+ "infact-normalize",
+ "tree-sitter",
+]
+
+[[package]]
 name = "instant"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
