@@ -897,3 +897,160 @@ became Datalog and the other became no engine at all.
 
     entl/crates/entl-rust-mir still needs nightly-2026-07-18 and is unaffected;
     it carries its own rust-toolchain.toml.
+
+
+## TypeScript — the frontend, what was measured, and what was predicted wrong
+
+Landed 08-02 in `infact-ts-normalize` plus three laws in the algebra. State:
+25 of 155 annotated positives, 4 false positives against 252 annotated
+negatives, reproducible from `tools/ts-scoreboard`. Nothing is wired into
+`infact-analysis`; this is the frontend and the measurement, not the pipeline.
+
+### The finding that reshaped the task
+
+TypeScript's standard library has NO IMPLEMENTATIONS.
+
+    lib.es5.d.ts          0 statement-like lines / 4599
+    lib.es2015.core.d.ts  0 statement-like lines / 595
+
+`Array.find` is a declaration and nothing else. The whole Rust approach derives
+behaviors from std's SOURCE, and there is no equivalent to point at. npm
+packages are fine — their source is in node_modules — but the builtins, which
+are exactly what the reuse-shaped lints care about, have no body anywhere in the
+TypeScript distribution. Everything below follows from that.
+
+### Which engine, and why not the obvious ones
+
+SpiderMonkey self-hosts 89 builtins in PLAIN JAVASCRIPT: Array.js 26,
+String.js 35, Object.js 18, Map.js 6. It parses with the JavaScript grammar we
+already ship, so it costs no new frontend.
+
+  core-js       DISQUALIFIED STRUCTURALLY, not on taste. `internals/array-
+                iteration.js` is one `createMethod(TYPE)` factory serving
+                forEach/map/filter/some/every/find/findIndex behind an integer
+                discriminator and a `switch (TYPE)`. Seven callables, one source
+                function, one derived form, same container — the collision class
+                `collisions.rs` exists to catch.
+  V8            Torque, so a new grammar nobody maintains. And 4 of the 5
+                functions in `array-find.tq` are TurboFan deopt plumbing; one
+                has a body of `unreachable;`, which would derive to something
+                that matches everything. Only `ArrayFindLoopContinuation` is the
+                behavior. Not worth acquiring a grammar for.
+  es-shims      MIT, one package per method, but `flatMap` delegates into
+                es-abstract's `FlattenIntoArray` and `startsWith` is charCode
+                arithmetic. Same optimizer-shaped dead end as `Vec::retain`.
+
+MPL-2.0 is why the source is fetched into `<measure>/`, never vendored —
+exactly as the Rust std pack derives from the local rustup toolchain. What
+ships is the derived form plus spans and digests.
+
+SpiderMonkey preprocesses its self-hosted JavaScript, so a few `#if`/`#endif`
+lines are unreadable. Do NOT add a dialect rewrite for it: the damage is local,
+tree-sitter recovers, and function counts match `grep` exactly. 89 top-level
+functions, exactly 1 damaged (`ArrayToLocaleString`, not a reuse target).
+`NormalizedFunction.damaged` declines it. A rewrite that blanked the directives
+would leave BOTH branches and silently merge them.
+
+### Direction has to live inside the traversal
+
+`filter(p).pop()` is `findLast`, not `find`. Encoding that as a reversal
+wrapped around the sequence DOES NOT WORK, and the reason is worth keeping: the
+sequence sits exactly where a derived behavior has a hole, and a hole absorbs
+anything, so the forward search matched backwards code and named the opposite
+API. Measured — the negative test caught it. This is the `next`/`next_back`
+bug reached from a new direction.
+
+`Form::Traverse` therefore carries a `Direction`. A forward walk does not
+serialize the field, so every behavior derived before it existed keeps its
+digest; there is a test asserting the exact legacy bytes. Splitting `Traverse`
+out of the arm it shared with Transform/Sift/Retain dropped a `fused_body`
+fallback and broke `itertools::counts` — `infact-rust-behaviors`' corpus test
+caught that, which is the second time that suite has paid for itself.
+
+### Rust gets a free anchor that JavaScript does not
+
+`is_reportable` requires `anchors() >= holes()`. Measured:
+
+    ArrayFind      size=10 anchors=1 holes=2  reportable=FALSE
+    ArraySome      size=10 anchors=2 holes=2  reportable=true
+    ArrayForEach   size=7  anchors=1 holes=2  reportable=false  (correctly)
+
+`find` failed by exactly one anchor, and structurally: Rust's `find` returns
+`Option<T>` so its form carries `(variant Some p)` for free, while JavaScript
+returns the bare element or `undefined`. Modelling `T | undefined` as the
+optional it is restores the anchor AND converges the two languages on one form —
+character-for-character the `find` shape this note already recorded for Rust.
+That is the `optional-search` law. `some` does not collapse into it because
+`some` yields a literal, not an absence.
+
+### The corpus disagreed with the plan, twice
+
+155 annotated positives across `prefer-find`, `prefer-includes` and
+`prefer-array-find`. ZERO are loop-shaped. They are all chains — `filter(p)[0]`
+— which is the same wall this note already records for Rust ("Fusion was going
+to unlock the chains. It moved clippy by ZERO"). The hand-written loop that
+Phase 0 proved works is a shape the corpus never asks for. Laws as they stood
+scored 0/155 while every internal check reported success.
+
+Second miss: gating matches on the observed receiver type collapsed recall
+25 -> 6, because 452 of the receivers type as `any` — the snippets never declare
+`array`. `any` means the checker established NOTHING, not "this is not an
+array". Declining on it turns "not looked at" into a confident negative. Only a
+KNOWN, non-array-like receiver declines. Typed arrays are array-like:
+`Int8Array` is a true positive.
+
+### What NOT to spend time on
+
+  `prefer-includes` (29 positives). Wants `indexOf(x) !== -1` -> `includes`,
+  which is a peephole identity about indexOf's contract, not "you reimplemented
+  a library function". Chasing it makes us a worse ESLint.
+
+  unicorn's adversarial spellings — `[fltr]` where `fltr` is a string const,
+  ``[`at`]``, `.at(NaN)`, `filter(p)['0']`. Those test THEIR rule's edge
+  handling. A behavior matcher should not resolve a computed member name to a
+  method.
+
+  `.pop()`/`.at(-1)` are 11 positives and they are `findLast`, which now derives
+  — but note that typescript-eslint and unicorn DISAGREE on `filter(p)['0']`:
+  invalid for one, valid for the other. A corpus conflict, not our bug.
+
+Realistic ceiling on the current corpus is around 100 of 155, not 155.
+
+### Can TypeScript behaviors be packs? Yes, unchanged
+
+Checked against `infact-fact-pack`: the model is already language-neutral.
+`Subject { kind, language, ecosystem: Option<String>, name, version }` takes
+`language = "typescript"`; `SubjectKind::Language` covers the standard library
+and `Library` covers an npm package; `SourceKind::Repository` is exactly right
+for pinning a gecko-dev revision by digest without vendoring it. Capabilities
+are already namespaced by language, and `validate_runtime` derives
+`typescript.syntax-tree` from the parser pack's own language id, which the
+shipped TS pack declares. So:
+
+    provides = ["typescript.callable-signatures", "typescript.library-behaviors"]
+    requires = ["typescript.syntax-tree"]
+    [subject] kind = "language", language = "typescript", name = "ecmascript"
+    [[sources]] kind = "repository"   # gecko-dev, pinned by revision + sha256
+
+No change to the pack format is needed. What is missing is the crate that builds
+one.
+
+### Next
+
+[ ] `infact-ts-behaviors`, and extract the neutral core while doing it
+    `is_comparable`, `is_reportable`, `describes_work`, `constructed_type`,
+    `principal_method` and `derive_from` in `infact-rust-behaviors/derivation.rs`
+    operate on `Form` and strings only — measured at 380 of its 620 lines — and
+    they already ran unmodified against TypeScript forms in the scoreboard. That
+    is the second consumer this note said to wait for before extracting a shared
+    crate. What genuinely does not carry over: `registry_sources`
+    (~/.cargo/registry), `is_library_source` (src/ layout), and all of
+    `macro_derivation.rs`.
+
+[ ] Span-precise type join
+    Two of the four remaining false positives are ones the checker CAN answer —
+    a `Set` receiver and a user-defined `filter` — but `tools/ts-scoreboard`
+    joins per file, not per span. Needs statement spans through normalization;
+    `infact-rust-normalize` has `StatementSpan` and the TypeScript one does not.
+
+[ ] Widen the corpus past three rule files before trusting 16.1% as the number.

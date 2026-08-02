@@ -13,6 +13,7 @@ use infact_core::{
     CallableContainer, DerivedLibraryBehavior, EXTERNAL_CATALOG_SCHEMA, ExternalCallable,
     ExternalCatalog, Form, ImplementationEvidence,
 };
+use infact_normalize::MAXIMUM_FORM_DEPTH;
 use tree_sitter::Node;
 
 use crate::{DERIVED_LIBRARY_BEHAVIOR_SCHEMA, Error, Result, source_sha256, span_of};
@@ -253,19 +254,6 @@ fn delegation_target(form: &Form) -> Option<&str> {
     }
 }
 
-/// Whether a form describes work rather than plumbing.
-fn describes_work(form: &Form) -> bool {
-    match form {
-        Form::Traverse { .. }
-        | Form::Sift { .. }
-        | Form::Transform { .. }
-        | Form::Retain { .. }
-        | Form::Accumulate { .. }
-        | Form::Collect { .. } => true,
-        _ => form.children().into_iter().any(describes_work),
-    }
-}
-
 /// The type a name refers to, with `Self` read as the type it stands for.
 ///
 /// `Self` is not a type name: it means whichever type the surrounding `impl` is
@@ -362,7 +350,7 @@ fn principal_method<'a>(
             // specialisation to win by default, which describes something the
             // caller never asked for.
             let principal = PRINCIPAL_METHODS.contains(&function.name.as_str());
-            let works = describes_work(&form);
+            let works = form.describes_work();
             // `next` is the contract; `next_back` and the rest are
             // specializations of it. Ranking by size alone let `next_back` win
             // whenever `next` was a one-line delegation, which is exactly when
@@ -475,7 +463,7 @@ fn derive_from(
     // route leads there: a wrapper delegating to a helper, or a callable that
     // only builds the type whose implementation does the work later.
     for _ in 0..MAX_DELEGATION_DEPTH {
-        if describes_work(&form) {
+        if form.describes_work() {
             break;
         }
         let delegated = delegation_target(&form)
@@ -511,7 +499,7 @@ fn derive_from(
     // builds a `MapInto`, and the behavior lives in that type's `Iterator`
     // implementation, which runs later. When a callable just constructs
     // something, the type it constructs is where to look.
-    if !describes_work(&form)
+    if !form.describes_work()
         && let Some(constructed) = constructed_type(&form)
         && let Some(constructed) = resolve_self(constructed, current.container.as_deref())
         && let Some(implementing) =
@@ -528,7 +516,7 @@ fn derive_from(
         form = lifted;
     }
 
-    if !is_comparable(&form) {
+    if !form.is_comparable() {
         return Err(Error::UnsupportedImplementation {
             callable: callable_path.to_owned(),
             reason: "the implementation describes nothing that can be compared".to_owned(),
@@ -555,6 +543,21 @@ fn derive_from(
     })
 }
 
+/// Whether a form describes something that can be compared across libraries.
+///
+/// The implementation is [`Form::is_comparable`]: it names no language, and a
+/// second frontend needed it, so it belongs with the form rather than here.
+pub fn is_comparable(form: &Form) -> bool {
+    form.is_comparable()
+}
+
+/// Whether a derived behavior is specific enough to report when matched.
+///
+/// The implementation is [`Form::is_reportable`], for the same reason.
+pub fn is_reportable(form: &Form) -> bool {
+    form.is_reportable()
+}
+
 fn normalize(function: &LibraryFunction<'_>) -> Result<Form> {
     if function.node.child_by_field_name("body").is_none() {
         return Err(Error::UnsupportedImplementation {
@@ -567,84 +570,6 @@ fn normalize(function: &LibraryFunction<'_>) -> Result<Form> {
     // sequence operation until its fold has become a traversal, and the search
     // for delegation would give up on it before ever seeing the work.
     Ok(infact_rust_normalize::normalize_function(function.node, &function.file.source).simplify())
-}
-
-/// The deepest form still worth keeping.
-///
-/// Each level of a form becomes two or three levels of JSON — a tag, a struct,
-/// sometimes a list — so a reader that refuses 128 container levels gives up
-/// well before a form is that deep. This is set low enough to stay clear of
-/// that, and a behavior anywhere near it describes a subsystem rather than an
-/// operation.
-pub const MAXIMUM_FORM_DEPTH: u32 = 32;
-
-/// The smallest form worth reporting as a match.
-///
-/// Calibrated against derived behaviors and the code they are matched into.
-/// The smallest genuine behavior measured here is seven nodes, while the forms
-/// that collide across unrelated code are two or three: a field accessor, a
-/// one-line delegation, a struct literal. Anything below this floor describes
-/// too little to identify an API.
-pub const MINIMUM_REPORTABLE_SIZE: u32 = 6;
-
-/// The least a behavior must name to identify an API rather than a shape.
-///
-/// Measured against the behaviors that matter: `sorted` names a container and a
-/// method, which is two. A traversal that names nothing is every library's
-/// `map` and matches everything.
-pub const MINIMUM_ANCHORS: u32 = 2;
-
-/// Whether a form describes something that can be compared across libraries.
-///
-/// Derivation used to demand a sequence operation, which confined it to
-/// iterator behaviors and rejected everything else a library does. What
-/// actually has to hold is that the form describes a *decision or a traversal*
-/// rather than plumbing: iterating over something, or choosing among named
-/// alternatives. A getter, a delegation, or a struct literal describes neither,
-/// and would collide with unrelated code wherever it appeared.
-pub fn is_comparable(form: &Form) -> bool {
-    describes_work(form) || describes_decision(form)
-}
-
-/// Whether a form chooses among alternatives it names.
-///
-/// One arm is not a decision — `match x { Some(v) => v }` says only that a
-/// value was unwrapped, which most code does somewhere. Two named alternatives
-/// is the point at which the shape belongs to a particular type's API.
-fn describes_decision(form: &Form) -> bool {
-    if let Form::Select { arms, .. } = form {
-        let named = arms
-            .iter()
-            .filter_map(|arm| match &arm.pattern {
-                infact_core::Pattern::Variant { name, .. } => Some(name.as_str()),
-                _ => None,
-            })
-            .collect::<BTreeSet<_>>();
-        if named.len() >= 2 {
-            return true;
-        }
-    }
-    form.children().into_iter().any(describes_decision)
-}
-
-/// Whether a derived behavior is specific enough to report when matched.
-///
-/// The last condition is what separates a behavior from a shape. `Option::map_or`
-/// is `match self { Some(t) => f(t), None => default }`: two named alternatives,
-/// and everything else a hole. It therefore describes *every* way of consuming
-/// an `Option`, subsumes the narrower behaviors, and reported nine hundred times
-/// across five hundred crates — technically right and useless. `unwrap_or` says
-/// the same thing about `None` but is concrete about `Some`, and stays.
-///
-/// So a behavior must name at least as much as it leaves open. This is a
-/// property of the form rather than a threshold chosen to make a number look
-/// good: a form with more holes than anchors matches more situations than it
-/// distinguishes.
-pub fn is_reportable(form: &Form) -> bool {
-    form.size() >= MINIMUM_REPORTABLE_SIZE
-        && form.anchors() >= MINIMUM_ANCHORS
-        && form.anchors() >= form.holes()
-        && is_comparable(form)
 }
 
 /// Whether a function is part of a library's public surface.
