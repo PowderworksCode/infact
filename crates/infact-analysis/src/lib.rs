@@ -102,7 +102,7 @@ pub enum Error {
     #[error(transparent)]
     RustEffects(#[from] infact_rust_effects::Error),
     #[error(transparent)]
-    RustErrors(#[from] infact_rust_errors::Error),
+    RustErrors(#[from] infact_errors::Error),
 }
 
 impl FactPackSet {
@@ -230,7 +230,7 @@ pub fn analyze_repository_with_observations(
             );
     }
     if selection.error_discards {
-        let report = infact_rust_errors::analyze_repository_errors(root, parsers)?;
+        let report = infact_errors::analyze_repository_errors(root, parsers)?;
         batch.error_discards = report.discards;
         batch
             .diagnostics
