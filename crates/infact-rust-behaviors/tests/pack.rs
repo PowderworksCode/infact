@@ -57,11 +57,15 @@ fn a_derived_pack_imports_into_the_cache() {
 #[test]
 fn registry_sources_are_discovered_by_package_and_version() {
     // itertools is a dependency of this workspace, so Cargo has unpacked it
-    let found = registry_sources("itertools", "0.15.0");
+    let found = registry_sources("itertools", "0.15.0").unwrap();
     if found.is_empty() {
         // a machine that has never fetched it is not a failure of the lookup
         return;
     }
     assert!(found.iter().all(|path| path.join("Cargo.toml").is_file()));
-    assert!(registry_sources("itertools", "0.0.0-nonexistent").is_empty());
+    assert!(
+        registry_sources("itertools", "0.0.0-nonexistent")
+            .unwrap()
+            .is_empty()
+    );
 }

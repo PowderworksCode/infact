@@ -39,25 +39,40 @@ pub struct BuiltLibraryPack {
 /// Where Cargo keeps the unpacked source of a registry dependency.
 ///
 /// Returns every candidate, because a machine can have several registries
-/// configured and the same package may be unpacked under more than one.
-pub fn registry_sources(package: &str, version: &str) -> Vec<PathBuf> {
+/// configured and the same package may be unpacked under more than one. An
+/// empty result means the package is not unpacked; a registry that cannot be
+/// read is a different answer and is returned as one, because otherwise a
+/// broken checkout is indistinguishable from a missing dependency.
+pub fn registry_sources(package: &str, version: &str) -> Result<Vec<PathBuf>> {
     let Some(home) = std::env::var_os("CARGO_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::home_dir().map(|home| home.join(".cargo")))
     else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    let registries = match std::fs::read_dir(home.join("registry/src")) {
-        Ok(entries) => entries,
-        Err(_) => return Vec::new(),
-    };
-    let mut found = registries
-        .filter_map(std::result::Result::ok)
-        .map(|entry| entry.path().join(format!("{package}-{version}")))
+    let root = home.join("registry/src");
+    if !root.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut found = std::fs::read_dir(&root)
+        .map_err(|source| Error::ReadRegistry {
+            path: root.clone(),
+            source,
+        })?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.path().join(format!("{package}-{version}")))
+                .map_err(|source| Error::ReadRegistry {
+                    path: root.clone(),
+                    source,
+                })
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
         .filter(|path| path.is_dir())
         .collect::<Vec<_>>();
     found.sort();
-    found
+    Ok(found)
 }
 
 /// Derive a library's behaviors and package them as an OCI image layout.
@@ -87,15 +102,9 @@ pub fn build_library_pack(request: LibraryPackRequest<'_>) -> Result<BuiltLibrar
     });
 
     for behavior in &behaviors {
-        let leaf = behavior
-            .callable_path
-            .rsplit("::")
-            .next()
-            .unwrap_or(&behavior.callable_path)
-            .replace('_', "-");
         let path = format!(
-            "behaviors/{}-{leaf}-{}.json",
-            request.package, request.version
+            "behaviors/{}",
+            behavior_file_name(request.package, &behavior.callable_path, request.version)
         );
         let json = encode(behavior)?;
         write_content(staging.path(), &path, &json)?;
@@ -160,6 +169,24 @@ pub fn build_library_pack(request: LibraryPackRequest<'_>) -> Result<BuiltLibrar
         callables: catalog.callables.len(),
         behaviors: behaviors.len(),
     })
+}
+
+/// A file name that identifies a behavior uniquely.
+///
+/// The leaf name alone does not: `Option::unwrap_or` and `Result::unwrap_or`
+/// are different behaviors with the same last segment, and naming files after
+/// the leaf made one silently overwrite the other. Qualifying by the whole path
+/// is what keeps a pack's file count equal to what was derived.
+pub fn behavior_file_name(package: &str, callable_path: &str, version: &str) -> String {
+    let qualified = callable_path
+        .strip_prefix(package)
+        .unwrap_or(callable_path)
+        .trim_start_matches(':');
+    let slug = qualified
+        .replace("::", "-")
+        .replace('_', "-")
+        .replace(|character: char| !character.is_ascii_alphanumeric() && character != '-', "-");
+    format!("{package}-{slug}-{version}.json")
 }
 
 fn encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>> {

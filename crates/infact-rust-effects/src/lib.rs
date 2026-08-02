@@ -1,7 +1,10 @@
 //! Source-backed effect summaries for selected Rust standard-library modules.
 
+mod allocation;
 mod observed;
+mod path;
 
+use allocation::collect_allocating_macros;
 pub use observed::{analyze_observed_effects, unexplained_destinations};
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -585,6 +588,11 @@ struct Callable {
     is_unsafe: bool,
     span: SourceSpan,
     syntax_calls: Vec<SyntaxCall>,
+    /// Allocating macro expansions, which are not call expressions and so are
+    /// invisible to the call walk. Collected for every callable; only the
+    /// repository analysis reads them, because the standard-library derivation
+    /// takes its origins from explicit rules rather than from allocation.
+    allocating_macros: Vec<SyntaxCall>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -659,8 +667,10 @@ fn collect_callables(
             std::str::from_utf8(&source[node.start_byte()..header_end]).unwrap_or_default();
         let span = source_span(path, node)?;
         let mut syntax_calls = Vec::new();
+        let mut allocating_macros = Vec::new();
         if let Some(body) = body {
             collect_syntax_calls(body, body, source, path, &mut syntax_calls)?;
+            collect_allocating_macros(body, body, source, path, &mut allocating_macros)?;
         }
         output.push(Callable {
             id: 0,
@@ -672,6 +682,7 @@ fn collect_callables(
             is_unsafe: header.split_whitespace().any(|token| token == "unsafe"),
             span,
             syntax_calls,
+            allocating_macros,
         });
         if let Some(body) = body {
             let mut cursor = body.walk();
@@ -797,6 +808,11 @@ fn collect_repository_calls(
             accounting.known_effect_origins += 1;
             continue;
         }
+        if let Some(seed) = allocation::call_seed(callable.id, syntax_call) {
+            seeds.push(seed);
+            accounting.known_effect_origins += 1;
+            continue;
+        }
         if let Some(callee) = resolve_call(callable, syntax_call, callables) {
             calls.push(ResolvedCall {
                 caller: callable.id,
@@ -817,6 +833,10 @@ fn collect_repository_calls(
             unresolved.push((callable.id, syntax_call.clone()));
         }
     }
+    seeds.extend(allocation::macro_seeds(
+        callable.id,
+        &callable.allocating_macros,
+    ));
 }
 
 fn external_effects(catalogs: &[CallEffectCatalog]) -> BTreeMap<String, Vec<Effect>> {
@@ -1184,8 +1204,8 @@ fn source_span(path: &Path, node: Node<'_>) -> Result<SourceSpan> {
             .map_err(|_| Error::SourceTooLarge { path: path.into() })?,
         end_line: u32::try_from(node.end_position().row + 1)
             .map_err(|_| Error::SourceTooLarge { path: path.into() })?,
-        start_column: u32::try_from(node.start_position().column + 1).ok(),
-        end_column: u32::try_from(node.end_position().column + 1).ok(),
+        start_column: u32::try_from(node.start_position().column + 1).ok(), // straitjacket-allow:error-discard — a column past u32 is reported as absent, as the field allows
+        end_column: u32::try_from(node.end_position().column + 1).ok(), // straitjacket-allow:error-discard — a column past u32 is reported as absent, as the field allows
     })
 }
 
@@ -1215,6 +1235,7 @@ fn input_evidence(file: &ParsedFile) -> InputEvidence {
         parser_id: file.provenance.parser_id.clone(),
         parser_version: file.provenance.parser_version.clone(),
         grammar_sha256: file.provenance.grammar_sha256.clone(),
+        queries_sha256: file.provenance.queries_sha256.clone(),
     }
 }
 
@@ -1235,7 +1256,7 @@ fn trace_derivation(
 }
 
 fn node_text<'a>(node: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
-    std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).ok()
+    std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).ok() // straitjacket-allow:error-discard — a node whose bytes are not UTF-8 has no text
 }
 
 fn normalize_callee(callee: &str) -> String {
@@ -1302,6 +1323,7 @@ mod tests {
                 end_column: None,
             },
             syntax_calls: Vec::new(),
+            allocating_macros: Vec::new(),
         };
         assert_eq!(
             origin_effects(&callable, "env_imp::getenv"),

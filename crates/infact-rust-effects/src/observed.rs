@@ -18,6 +18,7 @@ use infact_core::{
     SourceSpan,
 };
 
+use crate::allocation::allocating_destination;
 use crate::{
     CallAccounting, EffectSeed, RepositoryEffectDiagnostic, RepositoryEffectReport, ResolvedCall,
     Result, decode_effect, evidence_path, external_effects, propagate_effects,
@@ -107,12 +108,12 @@ pub fn analyze_observed_effects(
         let mut classified = false;
         for target in &edge.to {
             // an external destination the catalog vouches for is an effect origin
-            if let Some(effects) = external_effect(&external, target) {
+            if let Some((declared, effects)) = external_effect(&external, target) {
                 for effect in effects {
                     seeds.push(EffectSeed {
                         callable: caller,
                         effect: *effect,
-                        origin: target.as_str().to_owned(),
+                        origin: declared.to_owned(),
                         span: span.clone(),
                     });
                 }
@@ -131,6 +132,23 @@ pub fn analyze_observed_effects(
                 });
                 if !classified {
                     accounting.linked_internal += 1;
+                    classified = true;
+                }
+                continue;
+            }
+            // an external destination no catalog vouches for may still be an
+            // allocation. The destination is resolved, so this reads the type
+            // the method ran on rather than guessing from the name — which is
+            // what separates cloning an `Arc` from cloning a `String`.
+            if let Some(operation) = allocating_destination(target.as_str()) {
+                seeds.push(EffectSeed {
+                    callable: caller,
+                    effect: Effect::Allocate,
+                    origin: format!("rust:allocation:{operation}"),
+                    span: span.clone(),
+                });
+                if !classified {
+                    accounting.known_effect_origins += 1;
                     classified = true;
                 }
             }
@@ -220,13 +238,23 @@ pub fn analyze_observed_effects(
 
 /// The effects a catalog records for a resolved destination.
 ///
-/// The destination is already canonical, so this is an exact lookup rather than
-/// the prefix matching the syntax path needs.
+/// The destination is canonical but monomorphized: a compiler writes out the
+/// arguments a call was resolved with, so `std::fs::read` arrives as
+/// `std::fs::read::<&str>`. A catalog records the declared path, and comparing
+/// the two without dropping the substitution matches nothing at all — which
+/// would leave the analysis reporting resolved coverage and no effects, the
+/// one failure a consumer cannot see.
+/// The declared path is returned alongside the effects, because that is what
+/// the origin should name. Recording the instance instead would give the same
+/// catalogued API a different origin at every call site that instantiates it
+/// differently.
 fn external_effect<'a>(
     external: &'a BTreeMap<String, Vec<Effect>>,
     target: &EntityId,
-) -> Option<&'a [Effect]> {
-    external.get(target.as_str()).map(Vec::as_slice)
+) -> Option<(&'a str, &'a [Effect])> {
+    external
+        .get_key_value(&crate::path::without_turbofish(target.as_str()))
+        .map(|(declared, effects)| (declared.as_str(), effects.as_slice()))
 }
 
 /// Reuses the syntax path's evidence search over the observed graph.
@@ -254,6 +282,8 @@ fn derivation(observations: &SemanticObservations) -> FactDerivation {
             parser_id: observations.provenance.provider.clone(),
             parser_version: observations.provenance.provider_version.clone(),
             grammar_sha256: observations.provenance.toolchain.clone(),
+            // a compiler resolved this; no parser pack and no queries were used
+            queries_sha256: String::new(),
         }],
     }
 }

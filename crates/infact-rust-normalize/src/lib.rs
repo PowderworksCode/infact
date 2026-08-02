@@ -16,7 +16,7 @@
 //!    `?`, and blocks that wrap a single expression.
 
 use entl_tree_sitter::ParsedFile;
-use infact_normalize::{Form, Pattern, Roles};
+use infact_normalize::{Arm, Form, Pattern, Roles};
 use tree_sitter::Node;
 
 /// Methods that return the sequence they were given.
@@ -97,8 +97,13 @@ fn unwrap_noise(mut node: Node<'_>) -> Node<'_> {
             "parenthesized_expression"
             | "unary_expression"
             | "reference_expression"
-            | "try_expression"
-            | "await_expression" => named_children(node).into_iter().next(),
+            // `?` is not noise: it is a conditional return, and a loop whose
+            // test can leave the function does not do what a library that takes
+            // a predicate does. Keeping it in the form is what lets a match
+            // refuse it.
+            | "await_expression"
+            // an `else` is punctuation around the branch it introduces
+            | "else_clause" => named_children(node).into_iter().next(),
             "type_cast_expression" => node.child_by_field_name("value"),
             _ => None,
         };
@@ -113,6 +118,18 @@ fn unwrap_noise(mut node: Node<'_>) -> Node<'_> {
 
 /// Render a path with every `::<..>` removed, so `HashMap::<K, V>::new` and
 /// `HashMap::new` are one path.
+/// Whether a name in pattern position names an alternative rather than binding.
+fn is_variant_name(node: Node<'_>, source: &[u8]) -> bool {
+    variant_name(node, source).starts_with(|first: char| first.is_ascii_uppercase())
+}
+
+/// The alternative a pattern's head names, without its path or generics.
+fn variant_name(node: Node<'_>, source: &[u8]) -> String {
+    let text = text(node, source);
+    let bare = text.split_once('<').map_or(text, |(head, _)| head);
+    bare.rsplit("::").next().unwrap_or(bare).trim().to_owned()
+}
+
 fn path_without_generics(node: Node<'_>, source: &[u8]) -> String {
     let raw = text(node, source);
     let mut output = String::new();
@@ -241,6 +258,15 @@ impl<'a> Normalizer<'a> {
 
     fn bind_pattern(&mut self, node: Node<'_>) -> Pattern {
         match node.kind() {
+            // A capitalized name in pattern position is a unit variant rather
+            // than a binding: `None` names an alternative, `count` introduces
+            // one. The language's own convention is what distinguishes them.
+            "identifier" | "scoped_identifier" if is_variant_name(node, self.source) => {
+                Pattern::Variant {
+                    name: variant_name(node, self.source),
+                    parts: Vec::new(),
+                }
+            }
             "identifier" => match self.roles.bind(text(node, self.source)) {
                 Form::Local(index) => Pattern::Binding(index),
                 _ => Pattern::Ignored,
@@ -249,7 +275,19 @@ impl<'a> Normalizer<'a> {
                 .into_iter()
                 .next()
                 .map_or(Pattern::Ignored, |child| self.bind_pattern(child)),
-            "tuple_pattern" | "tuple_struct_pattern" | "slice_pattern" => Pattern::Tuple(
+            // `Ok(value)` names the alternative it takes apart, and dropping
+            // that name would make it indistinguishable from `Err(error)`.
+            "tuple_struct_pattern" | "struct_pattern" => {
+                let mut children = named_children(node).into_iter();
+                let Some(head) = children.next() else {
+                    return Pattern::Ignored;
+                };
+                Pattern::Variant {
+                    name: variant_name(head, self.source),
+                    parts: children.map(|child| self.bind_pattern(child)).collect(),
+                }
+            }
+            "tuple_pattern" | "slice_pattern" => Pattern::Tuple(
                 named_children(node)
                     .into_iter()
                     .map(|child| self.bind_pattern(child))
@@ -392,7 +430,21 @@ impl<'a> Normalizer<'a> {
         }
 
         match node.kind() {
-            "identifier" | "self" => self.roles.resolve(text(node, self.source)),
+            "identifier" | "self" => {
+                let name = text(node, self.source);
+                // A bare capitalised name that nothing bound is a unit variant:
+                // `None` is to `Some(x)` what `Continue` is to `Break(x)`, and
+                // treating one as a value and the other as a variant would stop
+                // them ever comparing.
+                if starts_uppercase(name) && !self.roles.is_value(name) {
+                    Form::Variant {
+                        name: name.to_owned(),
+                        payload: Vec::new(),
+                    }
+                } else {
+                    self.roles.resolve(name)
+                }
+            }
             "scoped_identifier" | "generic_function" => {
                 Form::Path(path_without_generics(node, self.source))
             }
@@ -447,8 +499,12 @@ impl<'a> Normalizer<'a> {
             "integer_literal" | "float_literal" => {
                 Form::Number(text(node, self.source).replace('_', ""))
             }
-            "string_literal" | "raw_string_literal" | "boolean_literal" | "char_literal"
-            | "unit_expression" => Form::Literal,
+            // What a library returns is behavior even when it is not a number:
+            // `None => true` is a different decision from `None => ()`.
+            "string_literal" | "raw_string_literal" | "boolean_literal" | "char_literal" => {
+                Form::Constant(text(node, self.source).to_owned())
+            }
+            "unit_expression" => Form::Literal,
             // A struct literal builds a value of a named type, exactly as an
             // associated constructor does, so both reduce to construction.
             "struct_expression" => node
@@ -475,6 +531,17 @@ impl<'a> Normalizer<'a> {
                 }
             }
             "if_expression" => {
+                // `if let P = e { a } else { b }` decides the same thing as
+                // `match e { P => a, _ => b }`, and only the second spelling was
+                // being normalized. Left as syntax, the name the pattern binds
+                // became a hole rather than a binding, so the two could never
+                // compare and the binding matched anything.
+                if let Some(condition) = node.child_by_field_name("condition")
+                    && condition.kind() == "let_condition"
+                    && let Some(selected) = self.select_from_let(node, condition)
+                {
+                    return selected;
+                }
                 let condition = node
                     .child_by_field_name("condition")
                     .map_or(Form::Literal, |child| self.expression(child));
@@ -490,6 +557,25 @@ impl<'a> Normalizer<'a> {
                     alternative,
                 }
             }
+            // A macro's name is behavior: `panic!` and `format!` are not the
+            // same thing, and leaving the name to become a role made every
+            // macro call look like every other one.
+            "macro_invocation" => {
+                let name = node
+                    .child_by_field_name("macro")
+                    .map_or_else(String::new, |macro_name| {
+                        variant_name(macro_name, self.source)
+                    });
+                Form::Opaque {
+                    kind: format!("macro:{name}"),
+                    parts: named_children(node)
+                        .into_iter()
+                        .filter(|child| child.kind() == "token_tree")
+                        .map(|child| self.expression(child))
+                        .collect(),
+                }
+            }
+            "match_expression" => self.select(node),
             "return_expression" => {
                 let value = named_children(node)
                     .into_iter()
@@ -510,6 +596,90 @@ impl<'a> Normalizer<'a> {
         }
     }
 
+    /// `if let` as the decision it is.
+    ///
+    /// Returns `None` when the pattern names no alternative — `if let (a, b) = p`
+    /// destructures rather than decides, and turning it into a one-armed
+    /// decision would claim a choice that is not being made.
+    fn select_from_let(&mut self, node: Node<'a>, condition: Node<'a>) -> Option<Form> {
+        let scrutinee = self.expression(condition.child_by_field_name("value")?);
+        let bound = self.bind_pattern(condition.child_by_field_name("pattern")?);
+        if !matches!(bound, Pattern::Variant { .. }) {
+            return None;
+        }
+        let taken = node
+            .child_by_field_name("consequence")
+            .map_or(Form::Literal, |child| self.expression(child));
+        // An `if let` with no `else` yields nothing when the pattern does not
+        // match, which is what the other arm has to say.
+        let otherwise = node
+            .child_by_field_name("alternative")
+            .map_or(Form::Literal, |child| self.expression(child));
+        Some(Form::select(
+            scrutinee,
+            vec![
+                Arm {
+                    pattern: bound,
+                    body: taken,
+                },
+                Arm {
+                    pattern: Pattern::Ignored,
+                    body: otherwise,
+                },
+            ],
+        ))
+    }
+
+    /// A `match`, as a decision among named alternatives.
+    ///
+    /// An arm with a guard is left as written: a guard makes the order of the
+    /// arms part of what the code means, and a `Select` holds its arms sorted.
+    fn select(&mut self, node: Node<'a>) -> Form {
+        let Some(body) = node.child_by_field_name("body") else {
+            return self.opaque(node);
+        };
+        let scrutinee = node
+            .child_by_field_name("value")
+            .map_or(Form::Literal, |child| self.expression(child));
+        let mut arms = Vec::new();
+        for arm in named_children(body) {
+            if arm.kind() != "match_arm" {
+                continue;
+            }
+            let Some(pattern) = arm.child_by_field_name("pattern") else {
+                return self.opaque(node);
+            };
+            if pattern.child_by_field_name("condition").is_some() {
+                return self.opaque(node);
+            }
+            let Some(bound) = named_children(pattern).into_iter().next() else {
+                return self.opaque(node);
+            };
+            let bound = self.bind_pattern(bound);
+            let value = arm
+                .child_by_field_name("value")
+                .map_or(Form::Literal, |child| self.expression(child));
+            arms.push(Arm {
+                pattern: bound,
+                body: value,
+            });
+        }
+        if arms.is_empty() {
+            return self.opaque(node);
+        }
+        Form::select(scrutinee, arms)
+    }
+
+    fn opaque(&mut self, node: Node<'a>) -> Form {
+        Form::Opaque {
+            kind: node.kind().to_owned(),
+            parts: named_children(node)
+                .into_iter()
+                .map(|child| self.expression(child))
+                .collect(),
+        }
+    }
+
     fn call(&mut self, node: Node<'a>) -> Form {
         let Some(function) = called_function(node) else {
             return Form::Opaque {
@@ -524,8 +694,18 @@ impl<'a> Normalizer<'a> {
         // would assign roles to names the canonical form goes on to discard.
         if matches!(function.kind(), "scoped_identifier" | "generic_function") {
             let path = path_without_generics(function, self.source);
+            let leaf = path.rsplit("::").next().unwrap_or_default();
+            // `ControlFlow::Break(x)` names a variant and carries a value;
+            // `HashMap::with_capacity(8)` names a constructor and does not.
+            // An uppercase final segment is the language's own signal for which.
+            if starts_uppercase(leaf) {
+                let payload = self.arguments(node);
+                return Form::Variant {
+                    name: path.clone(),
+                    payload,
+                };
+            }
             if let Some(type_name) = constructed_type(&path) {
-                let leaf = path.rsplit("::").next().unwrap_or_default();
                 let arguments = node
                     .child_by_field_name("arguments")
                     .map(named_children)
@@ -553,6 +733,13 @@ impl<'a> Normalizer<'a> {
         // argument, including an inline closure, can fill.
         if function.kind() == "identifier" {
             let name = text(function, self.source);
+            if starts_uppercase(name) && !self.roles.is_value(name) {
+                let payload = self.arguments(node);
+                return Form::Variant {
+                    name: name.to_owned(),
+                    payload,
+                };
+            }
             let arguments = self.arguments(node);
             let callee = if self.roles.is_value(name) {
                 self.roles.resolve(name)
@@ -619,6 +806,37 @@ impl<'a> Normalizer<'a> {
                     if let Some(inner) = named_children(child).into_iter().next() {
                         steps.push(self.expression(inner));
                     }
+                }
+                // A function declared inside a body is a name bound to a body,
+                // exactly like a `let` bound to a closure. Treating it as one
+                // makes it something a later pass can unfold; treating it as
+                // opaque syntax buries the body under its own type signature,
+                // which is how `find` came to be thirty nodes of `abstract_type`.
+                "function_item" => {
+                    let parameters = child
+                        .child_by_field_name("parameters")
+                        .map(named_children)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|parameter| {
+                            parameter
+                                .child_by_field_name("pattern")
+                                .map_or(Pattern::Ignored, |pattern| self.bind_pattern(pattern))
+                        })
+                        .collect();
+                    let body = child
+                        .child_by_field_name("body")
+                        .map_or(Form::Literal, |body| self.block(body));
+                    let name = child
+                        .child_by_field_name("name")
+                        .map_or(Pattern::Ignored, |name| self.bind_pattern(name));
+                    steps.push(Form::Let {
+                        pattern: Box::new(name),
+                        value: Box::new(Form::Lambda {
+                            parameters,
+                            body: Box::new(body),
+                        }),
+                    });
                 }
                 "line_comment" | "block_comment" | "attribute_item" => {}
                 _ => steps.push(self.expression(child)),

@@ -18,9 +18,14 @@ use infact_core::{
 use serde::{Deserialize, Serialize};
 use tree_sitter::Node;
 
-pub use derivation::{DerivedLibrary, derive_behavior, derive_catalog, derive_library};
+pub use derivation::{
+    DerivedLibrary, derive_behavior, derive_catalog, derive_library, is_comparable, is_reportable,
+};
 pub use macro_derivation::{MacroDerivationRequest, derive_macro_behavior};
-pub use pack::{BuiltLibraryPack, LibraryPackRequest, build_library_pack, registry_sources};
+pub use pack::{
+    BuiltLibraryPack, LibraryPackRequest, behavior_file_name, build_library_pack,
+    registry_sources,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnalysisDiagnostic {
@@ -41,6 +46,12 @@ pub enum Error {
     Parser(#[from] entl_tree_sitter::Error),
     #[error("source file {path} is too large for source coordinates")]
     SourceTooLarge { path: PathBuf },
+    #[error("reading the Cargo registry at {}: {source}", path.display())]
+    ReadRegistry {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error(
         "external catalog for {package} {version} uses schema {actual}; supported schema is {expected}"
     )]
@@ -95,6 +106,26 @@ pub enum Error {
     },
     #[error("encoding pack content: {0}")]
     Encode(#[source] serde_json::Error),
+}
+
+impl Error {
+    /// Whether this says "there is no behavior here" rather than "this broke".
+    ///
+    /// Most callables in a library describe nothing comparable, so a bulk
+    /// derivation has to skip them. It must not skip a parse failure or an
+    /// unreadable source on the same path, which is why the two are separated
+    /// here instead of at each call site.
+    pub const fn is_underivable(&self) -> bool {
+        matches!(
+            self,
+            Self::UnsupportedDerivation { .. }
+                | Self::MissingCallable { .. }
+                | Self::IncompatibleCallable { .. }
+                | Self::MissingImplementation { .. }
+                | Self::UnsupportedImplementation { .. }
+                | Self::UnsupportedMacroExpansion { .. }
+        )
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -161,6 +192,10 @@ pub fn analyze_repository(
             // they derive the same form and would otherwise be reported
             // separately against the same code. Name the one a reader would
             // reach for, which is the least qualified.
+            // Behaviors are compared in normal form, so the code being scanned
+            // is put in the same one. Locating stays on the form as written,
+            // because that is what the spans were taken from.
+            let candidate = function.form.simplify();
             let mut best: BTreeMap<&Form, (&&DerivedLibraryBehavior, bool)> = BTreeMap::new();
             for behavior in &reportable {
                 // A behavior derived from this very file is not a finding: the
@@ -171,9 +206,9 @@ pub fn analyze_repository(
                     continue;
                 }
                 // an exact match is the stronger claim, so it is tried first
-                let fused = if function.form.contains(&behavior.program) {
+                let fused = if candidate.contains(&behavior.program) {
                     false
-                } else if function.form.contains_fused(&behavior.program) {
+                } else if candidate.contains_fused(&behavior.program) {
                     true
                 } else {
                     continue;
@@ -194,7 +229,10 @@ pub fn analyze_repository(
                 }) else {
                     continue;
                 };
-                let located = function.form.locate(&behavior.program);
+                let located = function
+                    .form
+                    .locate(&behavior.program)
+                    .or_else(|| candidate.locate(&behavior.program));
                 matches.insert(behavior_match(
                     file, &function, located, fused, catalog, behavior,
                 )?);
@@ -296,6 +334,7 @@ fn behavior_match(
                 parser_id: file.provenance.parser_id.clone(),
                 parser_version: file.provenance.parser_version.clone(),
                 grammar_sha256: file.provenance.grammar_sha256.clone(),
+                queries_sha256: file.provenance.queries_sha256.clone(),
             }],
         },
     })
@@ -623,7 +662,7 @@ fn mappings_match_case(mappings: &BTreeMap<String, String>, case: StringCase) ->
 
 fn field_name<'a>(node: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
     let field = node.child_by_field_name("field")?;
-    std::str::from_utf8(&source[field.byte_range()]).ok()
+    std::str::from_utf8(&source[field.byte_range()]).ok() // straitjacket-allow:error-discard — a node whose bytes are not UTF-8 has no text
 }
 
 fn macro_behavior_match(
@@ -679,6 +718,7 @@ fn macro_behavior_match(
                 parser_id: file.provenance.parser_id.clone(),
                 parser_version: file.provenance.parser_version.clone(),
                 grammar_sha256: file.provenance.grammar_sha256.clone(),
+                queries_sha256: file.provenance.queries_sha256.clone(),
             }],
         },
     })
@@ -689,5 +729,5 @@ fn field_text<'a>(node: Node<'_>, field: &str, source: &'a [u8]) -> Option<&'a s
 }
 
 fn node_text<'a>(node: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
-    std::str::from_utf8(source.get(node.byte_range())?).ok()
+    std::str::from_utf8(source.get(node.byte_range())?).ok() // straitjacket-allow:error-discard — a node whose bytes are not UTF-8 has no text
 }

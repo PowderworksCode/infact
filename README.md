@@ -39,6 +39,28 @@ Machine-readable facts are JSON Lines:
 infact duplication . --parser-path /path/to/parser-packs --jsonl
 ```
 
+## Discarded errors
+
+`infact-rust-errors` records the sites where a fallible expression's error is
+dropped instead of returned: `let _ =`, `.ok()`, an `Err(_)` arm, an `Ok(..)`
+binding with no error arm, `.filter_map(Result::ok)`, `.unwrap_or*`,
+`.map_err(|_| ..)`, and `.unwrap()`/`.expect()`. Each fact carries the enclosing
+callable and whether that callable returns `Result`, returns `Option`, or
+cannot report a failure at all.
+
+One signature is not the whole answer, so the callers are resolved too. A
+discard inside an infallible callable that only infallible callables ever call
+cannot be reported anywhere, and changing the immediate signature would not be
+enough. Each fact carries that verdict and the chain of calls that would have
+carried the failure. Calls resolve by name, and only when exactly one callable
+answers to it, so an unresolvable caller is reported as unknown rather than as
+sealed.
+
+The analyzer resolves no types, so it reports how certain each site is rather
+than guessing. `.ok()` and `Err(_)` name `Result` and nothing else;
+`.unwrap_or_default()` reads the same on `Option` and is reported as possible.
+Whether a given form is permitted is not decided here.
+
 ## Library behavior matches
 
 `infact catalog` reduces rustdoc JSON to stable, typed API facts. The checked-in

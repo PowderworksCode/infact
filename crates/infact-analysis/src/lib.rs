@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use entl_semantics::SemanticObservations;
 use entl_tree_sitter::ParserCatalog;
 use infact_core::{
-    CallEffectCatalog, DerivedLibraryBehavior, DerivedMacroBehavior, EffectTrace, ExactTokenClone,
-    ExternalCatalog, Fact, LibraryBehaviorMatch, NearTokenClone,
+    CallEffectCatalog, DerivedLibraryBehavior, DerivedMacroBehavior, EffectTrace, ErrorDiscard,
+    ExactTokenClone, ExternalCatalog, Fact, LibraryBehaviorMatch, NearTokenClone,
 };
 use infact_duplication::{ExactConfig, NearConfig};
 use infact_fact_pack::{CachedFactPack, FactPackManifest};
@@ -31,6 +31,7 @@ pub struct AnalysisSelection {
     pub near_clones: Option<NearConfig>,
     pub library_behaviors: bool,
     pub call_effects: bool,
+    pub error_discards: bool,
 }
 
 /// How the effect call graph was resolved.
@@ -57,6 +58,8 @@ pub struct FactBatch {
     pub library_behaviors: Vec<Fact<LibraryBehaviorMatch>>,
     pub call_effects: Vec<CallEffectCatalog>,
     pub effect_traces: Vec<Fact<EffectTrace>>,
+    #[serde(default)]
+    pub error_discards: Vec<Fact<ErrorDiscard>>,
     pub diagnostics: Vec<AnalysisDiagnostic>,
     #[serde(default)]
     pub effect_resolution: EffectResolution,
@@ -98,6 +101,8 @@ pub enum Error {
     RustBehaviors(#[from] infact_rust_behaviors::Error),
     #[error(transparent)]
     RustEffects(#[from] infact_rust_effects::Error),
+    #[error(transparent)]
+    RustErrors(#[from] infact_rust_errors::Error),
 }
 
 impl FactPackSet {
@@ -218,6 +223,23 @@ pub fn analyze_repository_with_observations(
                     .into_iter()
                     .map(|diagnostic| AnalysisDiagnostic {
                         analyzer: "effects".to_owned(),
+                        path: diagnostic.path,
+                        line: diagnostic.line,
+                        message: diagnostic.message,
+                    }),
+            );
+    }
+    if selection.error_discards {
+        let report = infact_rust_errors::analyze_repository_errors(root, parsers)?;
+        batch.error_discards = report.discards;
+        batch
+            .diagnostics
+            .extend(
+                report
+                    .diagnostics
+                    .into_iter()
+                    .map(|diagnostic| AnalysisDiagnostic {
+                        analyzer: "error-discards".to_owned(),
                         path: diagnostic.path,
                         line: diagnostic.line,
                         message: diagnostic.message,

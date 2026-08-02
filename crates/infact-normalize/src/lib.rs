@@ -10,6 +10,8 @@
 //! Each language supplies its own normalizer targeting this form. The form
 //! itself names no language, library, or API.
 
+mod simplify;
+
 use std::fmt::{self, Display, Formatter};
 
 use serde::{Deserialize, Serialize};
@@ -27,6 +29,12 @@ pub enum Pattern {
     Binding(u32),
     /// A destructured tuple, such as a `(key, value)` loop pattern.
     Tuple(Vec<Pattern>),
+    /// A named alternative being taken apart, such as `Ok(value)`.
+    ///
+    /// Which variant an arm names is behavior — `Ok` and `Err` are the whole
+    /// content of a decision about a `Result` — so unlike a binding, the name
+    /// survives normalization.
+    Variant { name: String, parts: Vec<Pattern> },
     /// A binding the code discards.
     Ignored,
 }
@@ -37,7 +45,29 @@ impl Pattern {
         match self {
             Self::Binding(bound) => *bound == index,
             Self::Ignored => false,
-            Self::Tuple(parts) => parts.iter().any(|part| part.binds(index)),
+            Self::Tuple(parts) | Self::Variant { parts, .. } => {
+                parts.iter().any(|part| part.binds(index))
+            }
+        }
+    }
+}
+
+impl Pattern {
+    /// How much of a decision this pattern accounts for.
+    pub fn size(&self) -> u32 {
+        match self {
+            Self::Binding(_) | Self::Ignored => 1,
+            Self::Tuple(parts) => 1 + parts.iter().map(Self::size).sum::<u32>(),
+            Self::Variant { parts, .. } => 1 + parts.iter().map(Self::size).sum::<u32>(),
+        }
+    }
+
+    /// How much concrete named content this pattern carries.
+    pub fn anchors(&self) -> u32 {
+        match self {
+            Self::Binding(_) | Self::Ignored => 0,
+            Self::Tuple(parts) => parts.iter().map(Self::anchors).sum(),
+            Self::Variant { parts, .. } => 1 + parts.iter().map(Self::anchors).sum::<u32>(),
         }
     }
 }
@@ -49,6 +79,13 @@ impl Display for Pattern {
             Self::Ignored => formatter.write_str("_"),
             Self::Tuple(parts) => {
                 formatter.write_str("(tuple")?;
+                for part in parts {
+                    write!(formatter, " {part}")?;
+                }
+                formatter.write_str(")")
+            }
+            Self::Variant { name, parts } => {
+                write!(formatter, "({name}")?;
                 for part in parts {
                     write!(formatter, " {part}")?;
                 }
@@ -67,17 +104,35 @@ pub enum Form {
     /// A name this code did not bind: a parameter, a field, a receiver. Free
     /// variables are interchangeable, so only their order of appearance counts.
     Free(u32),
-    /// A literal whose value is not behavior: a string, a character, a boolean.
-    /// That it is constant is what matters.
+    /// The unit value, and what an expression yielding nothing reduces to.
     Literal,
+    /// A literal that is not a number: `true`, `"error"`, `'x'`.
+    ///
+    /// These used to reduce to `Literal` alongside `()`, on the reasoning that
+    /// being constant was what mattered. It is not: `None => true` became
+    /// indistinguishable from the `_ => ()` that an `if let` without an `else`
+    /// produces, so every such `if let` looked like `Option::is_none_or` — 1,390
+    /// times across five hundred crates. What a library returns is behavior,
+    /// and nothing is exactly what it is not.
+    Constant(String),
     /// A numeric literal, keeping its value.
     ///
     /// Numbers in accumulation are behavior, not noise: incrementing a counter
     /// by one is counting, and incrementing it by two is something else.
     Number(String),
     /// Construction of a named type, with the constructing function and its
-    /// arguments discarded.
+    /// arguments discarded. `HashMap::new()` and `HashMap::with_capacity(8)`
+    /// both make an empty map, and which one was written is not behavior.
     Construct(String),
+    /// A named variant carrying a payload: `Some(x)`, `ControlFlow::Break(x)`.
+    ///
+    /// Unlike a constructor function, which variant was chosen *is* the
+    /// behavior — `Break` and `Continue` are opposites — and the payload is the
+    /// value being carried, not an argument to be discarded.
+    Variant {
+        name: String,
+        payload: Vec<Form>,
+    },
     /// A resolved path used as a value.
     Path(String),
     Field {
@@ -149,6 +204,17 @@ pub enum Form {
         consequence: Box<Form>,
         alternative: Option<Box<Form>>,
     },
+    /// Choosing among named alternatives.
+    ///
+    /// A `match` is how a library takes apart an `Option`, a `Result`, or any
+    /// enum, and it is the most common construct in the standard library. It is
+    /// held with its arms sorted by what they name, because `Some` before
+    /// `None` and `None` before `Some` are the same decision written two ways,
+    /// and comparing them as written would make the order into behavior.
+    Select {
+        scrutinee: Box<Form>,
+        arms: Vec<Arm>,
+    },
     Return(Box<Form>),
     /// An ordered group of steps.
     Sequence(Vec<Form>),
@@ -161,16 +227,52 @@ pub enum Form {
     },
 }
 
+/// One alternative of a `Select`, and what it evaluates to.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct Arm {
+    pub pattern: Pattern,
+    pub body: Form,
+}
+
+impl Arm {
+    /// What this arm names, for putting arms in a canonical order.
+    ///
+    /// An arm that names a variant sorts by that name; one that binds or
+    /// discards matches anything and so has to come last, where a catch-all
+    /// belongs.
+    fn order(&self) -> (u8, &str) {
+        match &self.pattern {
+            Pattern::Variant { name, .. } => (0, name.as_str()),
+            _ => (1, ""),
+        }
+    }
+}
+
 impl Form {
+    /// A `Select` with its arms in canonical order.
+    ///
+    /// Sorting is stable, so arms that name the same thing keep the order they
+    /// were written in and nothing is silently reordered past a duplicate.
+    pub fn select(scrutinee: Self, mut arms: Vec<Arm>) -> Self {
+        arms.sort_by(|left, right| left.order().cmp(&right.order()));
+        Self::Select {
+            scrutinee: Box::new(scrutinee),
+            arms,
+        }
+    }
+
     /// Child forms, in evaluation order.
     pub fn children(&self) -> Vec<&Self> {
         match self {
             Self::Local(_)
             | Self::Free(_)
             | Self::Literal
+            | Self::Constant(_)
             | Self::Number(_)
             | Self::Construct(_)
             | Self::Path(_) => Vec::new(),
+            Self::Variant { payload, .. } => payload.iter().collect(),
             Self::Field { value, .. } | Self::Return(value) => vec![value.as_ref()],
             Self::Method {
                 receiver,
@@ -204,6 +306,9 @@ impl Form {
                 .chain(std::iter::once(consequence.as_ref()))
                 .chain(alternative.as_deref())
                 .collect(),
+            Self::Select { scrutinee, arms } => std::iter::once(scrutinee.as_ref())
+                .chain(arms.iter().map(|arm| &arm.body))
+                .collect(),
             Self::Sequence(parts) | Self::Opaque { parts, .. } => parts.iter().collect(),
         }
     }
@@ -214,11 +319,18 @@ impl Form {
     /// or a one-line delegation will collide across unrelated code, and
     /// reporting those collisions is noise rather than a finding.
     pub fn size(&self) -> u32 {
-        1 + self
-            .children()
-            .iter()
-            .map(|child| child.size())
-            .sum::<u32>()
+        // What a decision's arms name is part of what it describes, and it is
+        // not reachable through the child forms.
+        let named = match self {
+            Self::Select { arms, .. } => arms.iter().map(|arm| arm.pattern.size()).sum(),
+            _ => 0,
+        };
+        1 + named
+            + self
+                .children()
+                .iter()
+                .map(|child| child.size())
+                .sum::<u32>()
     }
 
     /// Whether this form mentions a particular local.
@@ -240,6 +352,143 @@ impl Form {
         }
     }
 
+    /// Rebuild this form with every child passed through `transform`.
+    ///
+    /// Rewriting is mostly recursion, and writing that recursion once here
+    /// keeps each law to the case it actually cares about.
+    pub fn map_children(&self, transform: &dyn Fn(&Self) -> Self) -> Self {
+        let apply = |form: &Self| Box::new(transform(form));
+        let each = |forms: &[Self]| forms.iter().map(transform).collect::<Vec<_>>();
+        match self {
+            Self::Local(_)
+            | Self::Free(_)
+            | Self::Literal
+            | Self::Constant(_)
+            | Self::Number(_)
+            | Self::Construct(_)
+            | Self::Path(_) => self.clone(),
+            Self::Variant { name, payload } => Self::Variant {
+                name: name.clone(),
+                payload: each(payload),
+            },
+            Self::Field { value, name } => Self::Field {
+                value: apply(value),
+                name: name.clone(),
+            },
+            Self::Method {
+                name,
+                receiver,
+                arguments,
+            } => Self::Method {
+                name: name.clone(),
+                receiver: apply(receiver),
+                arguments: each(arguments),
+            },
+            Self::Call { callee, arguments } => Self::Call {
+                callee: apply(callee),
+                arguments: each(arguments),
+            },
+            Self::Traverse {
+                sequence,
+                item,
+                body,
+            } => Self::Traverse {
+                sequence: apply(sequence),
+                item: item.clone(),
+                body: apply(body),
+            },
+            Self::Transform {
+                sequence,
+                item,
+                body,
+            } => Self::Transform {
+                sequence: apply(sequence),
+                item: item.clone(),
+                body: apply(body),
+            },
+            Self::Retain {
+                sequence,
+                item,
+                body,
+            } => Self::Retain {
+                sequence: apply(sequence),
+                item: item.clone(),
+                body: apply(body),
+            },
+            Self::Accumulate {
+                sequence,
+                initial,
+                accumulator,
+                item,
+                body,
+            } => Self::Accumulate {
+                sequence: apply(sequence),
+                initial: apply(initial),
+                accumulator: accumulator.clone(),
+                item: item.clone(),
+                body: apply(body),
+            },
+            Self::Collect {
+                sequence,
+                container,
+            } => Self::Collect {
+                sequence: apply(sequence),
+                container: container.clone(),
+            },
+            Self::Assign {
+                operator,
+                target,
+                value,
+            } => Self::Assign {
+                operator: operator.clone(),
+                target: apply(target),
+                value: apply(value),
+            },
+            Self::Binary {
+                operator,
+                left,
+                right,
+            } => Self::Binary {
+                operator: operator.clone(),
+                left: apply(left),
+                right: apply(right),
+            },
+            Self::Lambda { parameters, body } => Self::Lambda {
+                parameters: parameters.clone(),
+                body: apply(body),
+            },
+            Self::Let { pattern, value } => Self::Let {
+                pattern: pattern.clone(),
+                value: apply(value),
+            },
+            Self::Branch {
+                condition,
+                consequence,
+                alternative,
+            } => Self::Branch {
+                condition: apply(condition),
+                consequence: apply(consequence),
+                alternative: alternative.as_ref().map(|form| apply(form)),
+            },
+            Self::Select { scrutinee, arms } => Self::Select {
+                scrutinee: apply(scrutinee),
+                arms: arms
+                    .iter()
+                    .map(|arm| Arm {
+                        pattern: arm.pattern.clone(),
+                        body: transform(&arm.body),
+                    })
+                    .collect(),
+            },
+            Self::Return(value) => Self::Return(apply(value)),
+            Self::Sequence(parts) => Self::Sequence(each(parts)),
+            Self::Opaque { kind, parts } => Self::Opaque {
+                kind: kind.clone(),
+                parts: each(parts),
+            },
+        }
+    }
+
     /// How much of this form is specific rather than structural.
     ///
     /// Structure alone does not identify an API. Every library has a `map`, and
@@ -251,12 +500,15 @@ impl Form {
     /// nothing.
     pub fn anchors(&self) -> u32 {
         let own = match self {
-            Self::Construct(_) | Self::Path(_) | Self::Number(_) => 1,
+            Self::Construct(_) | Self::Path(_) | Self::Number(_) | Self::Constant(_) => 1,
+            Self::Variant { .. } => 1,
             Self::Method { .. } | Self::Field { .. } => 1,
             Self::Assign { operator, .. } | Self::Binary { operator, .. } => {
                 u32::from(!operator.is_empty())
             }
             Self::Collect { container, .. } => u32::from(container.is_some()),
+            // what the arms name is the whole content of a decision
+            Self::Select { arms, .. } => arms.iter().map(|arm| arm.pattern.anchors()).sum(),
             _ => 0,
         };
         own + self
@@ -264,6 +516,28 @@ impl Form {
             .iter()
             .map(|child| child.anchors())
             .sum::<u32>()
+    }
+
+    /// How many distinct things this form leaves open.
+    ///
+    /// A hole matches anything, so it is the opposite of an anchor: it is what
+    /// a behavior declines to specify. Counting holes is what makes it possible
+    /// to say whether a form describes more than it leaves to chance.
+    pub fn holes(&self) -> u32 {
+        let mut found = Vec::new();
+        self.collect_holes(&mut found);
+        u32::try_from(found.len()).unwrap_or(u32::MAX)
+    }
+
+    fn collect_holes(&self, found: &mut Vec<u32>) {
+        if let Self::Free(index) = self
+            && !found.contains(index)
+        {
+            found.push(*index);
+        }
+        for child in self.children() {
+            child.collect_holes(found);
+        }
     }
 
     /// How deeply this form nests.
@@ -482,7 +756,15 @@ impl Display for Form {
             Self::Free(index) => write!(formatter, "f{index}"),
             Self::Literal => formatter.write_str("(lit)"),
             Self::Number(value) => write!(formatter, "(num {value})"),
+            Self::Constant(value) => write!(formatter, "(const {value})"),
             Self::Construct(name) => write!(formatter, "(construct {name})"),
+            Self::Variant { name, payload } => {
+                write!(formatter, "(variant {name}")?;
+                for value in payload {
+                    write!(formatter, " {value}")?;
+                }
+                formatter.write_str(")")
+            }
             Self::Path(path) => write!(formatter, "(path {path})"),
             Self::Field { value, name } => write!(formatter, "(field {value} {name})"),
             Self::Method {
@@ -567,6 +849,13 @@ impl Display for Form {
                 ),
                 None => write!(formatter, "(branch {condition} {consequence})"),
             },
+            Self::Select { scrutinee, arms } => {
+                write!(formatter, "(select {scrutinee}")?;
+                for arm in arms {
+                    write!(formatter, " {} => {}", arm.pattern, arm.body)?;
+                }
+                formatter.write_str(")")
+            }
             Self::Return(value) => write!(formatter, "(return {value})"),
             Self::Sequence(parts) => {
                 formatter.write_str("(do")?;
@@ -599,16 +888,40 @@ struct Bindings {
     fused: bool,
 }
 
+/// Whether a pattern is a hole applied to names, rather than a call to one.
+fn applied_hole(pattern: &Form) -> bool {
+    matches!(pattern, Form::Call { callee, arguments }
+        if matches!(callee.as_ref(), Form::Free(_)) && !arguments.is_empty())
+}
+
 /// Whether a form stops or diverts iteration.
 ///
 /// A traversal containing one of these does not visit every element, so it
 /// cannot stand in for a library operation that does.
+/// Macros that never return, so a branch ending in one produces no value.
+///
+/// `match x { Some(v) => v, None => panic!(..) }` is `expect`, not `unwrap_or`:
+/// the second arm yields nothing a caller could have supplied. These are the
+/// language's own diverging macros, so the list holds for every library.
+const DIVERGING_MACROS: &[&str] = &[
+    "macro:panic",
+    "macro:unreachable",
+    "macro:todo",
+    "macro:unimplemented",
+    "macro:abort",
+    "macro:assert",
+    "macro:assert_eq",
+    "macro:assert_ne",
+];
+
 fn interrupts_iteration(form: &Form) -> bool {
     match form {
-        Form::Opaque { kind, .. } => matches!(
-            kind.as_str(),
-            "break_expression" | "continue_expression" | "try_expression"
-        ),
+        Form::Opaque { kind, .. } => {
+            matches!(
+                kind.as_str(),
+                "break_expression" | "continue_expression" | "try_expression"
+            ) || DIVERGING_MACROS.contains(&kind.as_str())
+        }
         Form::Return(_) => true,
         _ => form.children().into_iter().any(interrupts_iteration),
     }
@@ -706,6 +1019,23 @@ impl Bindings {
                 self.bind_local(*pattern, *subject)
             }
             (Pattern::Ignored, Pattern::Ignored) => true,
+            (
+                Pattern::Variant {
+                    name: subject_name,
+                    parts: subject_parts,
+                },
+                Pattern::Variant {
+                    name: pattern_name,
+                    parts: pattern_parts,
+                },
+            ) => {
+                subject_name == pattern_name
+                    && subject_parts.len() == pattern_parts.len()
+                    && subject_parts
+                        .iter()
+                        .zip(pattern_parts)
+                        .all(|(subject, pattern)| self.pattern(subject, pattern))
+            }
             (Pattern::Tuple(subject), Pattern::Tuple(pattern)) => {
                 subject.len() == pattern.len()
                     && subject
@@ -715,6 +1045,60 @@ impl Bindings {
             }
             _ => false,
         }
+    }
+
+    /// Whether every arm the pattern names is decided the same way by the
+    /// subject, in the canonical order both are held in.
+    fn arms(&mut self, subject: &[Arm], pattern: &[Arm]) -> bool {
+        self.arms_from(subject, pattern, &mut Vec::new())
+    }
+
+    /// Match each of the pattern's arms to a distinct arm of the subject.
+    ///
+    /// Both sides are sorted, but they do not line up: a library that names
+    /// `None` and code that writes `_` in the same position sort differently,
+    /// so this pairs arms rather than walking them in step.
+    fn arms_from(&mut self, subject: &[Arm], pattern: &[Arm], taken: &mut Vec<usize>) -> bool {
+        let Some((next, rest)) = pattern.split_first() else {
+            return true;
+        };
+        for (index, candidate) in subject.iter().enumerate() {
+            if taken.contains(&index) {
+                continue;
+            }
+            // An arm that leaves the function is not an arm that produces a
+            // value. `Err(_) => return` decides nothing a library could have
+            // been given, so it must not stand for one that does.
+            if interrupts_iteration(&candidate.body) != interrupts_iteration(&next.body) {
+                continue;
+            }
+            let mut trial = self.clone();
+            if trial.arm_pattern(&candidate.pattern, &next.pattern)
+                && trial.form(&candidate.body, &next.body)
+            {
+                taken.push(index);
+                if trial.arms_from(subject, rest, taken) {
+                    *self = trial;
+                    return true;
+                }
+                taken.pop();
+            }
+        }
+        false
+    }
+
+    /// Whether a subject arm decides the case the pattern arm names.
+    ///
+    /// A catch-all covers every alternative not named beside it, so code that
+    /// writes `_` where a library writes `None` is deciding the same case. This
+    /// reads a subject's `_` as standing for what the library named — which is
+    /// exact for a two-alternative type like `Option` and a generalization for
+    /// anything wider.
+    fn arm_pattern(&mut self, subject: &Pattern, pattern: &Pattern) -> bool {
+        if matches!(subject, Pattern::Ignored) && matches!(pattern, Pattern::Variant { .. }) {
+            return true;
+        }
+        self.pattern(subject, pattern)
     }
 
     fn all(&mut self, subject: &[Form], pattern: &[Form]) -> bool {
@@ -745,12 +1129,76 @@ impl Bindings {
         if let Form::Free(index) = pattern {
             return self.bind_hole(*index, subject);
         }
+        if applied_hole(pattern) {
+            // the structural reading is the more precise one, so it goes first
+            let mut trial = self.clone();
+            if trial.structural(subject, pattern) {
+                *self = trial;
+                return true;
+            }
+            return self.abstraction(subject, pattern);
+        }
+        self.structural(subject, pattern)
+    }
+
+    /// Whether a hole applied to bound names describes this subject.
+    ///
+    /// A library takes its predicate as an argument and applies it; the person
+    /// who reimplements it writes the test out where the call would be. So
+    /// `f(item)` in a derived behavior does not name a call — it names
+    /// *whatever a caller does with the item*, and any expression over that item
+    /// is an instance of it. Requiring the subject to mention every argument
+    /// keeps this from accepting a test that ignores what it is iterating over.
+    fn abstraction(&mut self, subject: &Form, pattern: &Form) -> bool {
+        let Form::Call { callee, arguments } = pattern else {
+            return false;
+        };
+        let Form::Free(hole) = callee.as_ref() else {
+            return false;
+        };
+        // an argument standing for the whole expression says nothing
+        if matches!(subject, Form::Local(_) | Form::Free(_)) {
+            return false;
+        }
+        // A library applies the caller's function and uses what it returns. An
+        // expression that can leave the loop instead — through `?`, `break`, or
+        // a return of its own — is not a thing a caller could have passed in,
+        // so the loop it sits in does not do what the library does.
+        if interrupts_iteration(subject) {
+            return false;
+        }
+        for argument in arguments {
+            let Form::Local(index) = argument else {
+                return false;
+            };
+            let Some((_, bound)) = self.locals.iter().find(|(left, _)| left == index) else {
+                return false;
+            };
+            if !subject.references_local(*bound) {
+                return false;
+            }
+        }
+        self.bind_hole(*hole, subject)
+    }
+
+    fn structural(&mut self, subject: &Form, pattern: &Form) -> bool {
         match (subject, pattern) {
             (Form::Local(subject), Form::Local(pattern)) => self.bind_local(*pattern, *subject),
             (Form::Literal, Form::Literal) => true,
-            (Form::Number(subject), Form::Number(pattern)) => subject == pattern,
+            (Form::Number(subject), Form::Number(pattern))
+            | (Form::Constant(subject), Form::Constant(pattern)) => subject == pattern,
             (Form::Construct(subject), Form::Construct(pattern))
             | (Form::Path(subject), Form::Path(pattern)) => subject == pattern,
+            (
+                Form::Variant {
+                    name: subject_name,
+                    payload: subject_payload,
+                },
+                Form::Variant {
+                    name: pattern_name,
+                    payload: pattern_payload,
+                },
+            ) => subject_name == pattern_name && self.all(subject_payload, pattern_payload),
             (
                 Form::Field {
                     value: subject,
@@ -952,6 +1400,26 @@ impl Bindings {
                         _ => false,
                     }
             }
+            (
+                Form::Select {
+                    scrutinee: subject_scrutinee,
+                    arms: subject_arms,
+                },
+                Form::Select {
+                    scrutinee: pattern_scrutinee,
+                    arms: pattern_arms,
+                },
+            ) => {
+                // Both sides are held sorted by what their arms name, so
+                // comparing them in order is comparing them as sets. A subject
+                // may decide more cases than the pattern does — code that also
+                // handles a third variant still does what the library does for
+                // the two it names — so the pattern's arms must be found among
+                // the subject's rather than exhaust them.
+                subject_arms.len() >= pattern_arms.len()
+                    && self.form(subject_scrutinee, pattern_scrutinee)
+                    && self.arms(subject_arms, pattern_arms)
+            }
             (Form::Return(subject), Form::Return(pattern)) => self.form(subject, pattern),
             (Form::Sequence(subject), Form::Sequence(pattern)) => self.all(subject, pattern),
             (
@@ -994,6 +1462,10 @@ impl Renaming {
             Pattern::Tuple(parts) => {
                 Pattern::Tuple(parts.iter().map(|part| self.pattern(part)).collect())
             }
+            Pattern::Variant { name, parts } => Pattern::Variant {
+                name: name.clone(),
+                parts: parts.iter().map(|part| self.pattern(part)).collect(),
+            },
         }
     }
 
@@ -1009,7 +1481,12 @@ impl Renaming {
             Form::Free(index) => Form::Free(Self::index(&mut self.frees, *index)),
             Form::Literal => Form::Literal,
             Form::Number(value) => Form::Number(value.clone()),
+            Form::Constant(value) => Form::Constant(value.clone()),
             Form::Construct(name) => Form::Construct(name.clone()),
+            Form::Variant { name, payload } => Form::Variant {
+                name: name.clone(),
+                payload: payload.iter().map(|value| self.form(value)).collect(),
+            },
             Form::Path(path) => Form::Path(path.clone()),
             Form::Field { value, name } => Form::Field {
                 value: self.boxed(value),
@@ -1146,6 +1623,22 @@ impl Renaming {
                     .as_ref()
                     .map(|alternative| self.boxed(alternative)),
             },
+            Form::Select { scrutinee, arms } => {
+                let scrutinee = self.boxed(scrutinee);
+                Form::Select {
+                    scrutinee,
+                    arms: arms
+                        .iter()
+                        .map(|arm| {
+                            let pattern = self.pattern(&arm.pattern);
+                            Arm {
+                                pattern,
+                                body: self.form(&arm.body),
+                            }
+                        })
+                        .collect(),
+                }
+            }
             Form::Return(value) => Form::Return(self.boxed(value)),
             Form::Sequence(parts) => {
                 Form::Sequence(parts.iter().map(|part| self.form(part)).collect())

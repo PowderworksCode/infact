@@ -570,7 +570,9 @@ fn build_windows(
     size: u32,
     mode: MatchMode,
 ) -> Vec<WindowRecord> {
+    // a u32 exceeds usize only below 32-bit targets
     let Ok(size) = usize::try_from(size) else {
+        // straitjacket-allow:error-discard
         return Vec::new();
     };
     if size == 0 || file.tokens.len() < size {

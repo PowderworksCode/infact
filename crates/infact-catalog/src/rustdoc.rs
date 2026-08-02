@@ -347,7 +347,7 @@ fn string(value: Option<&Value>) -> Option<&str> {
 fn number(value: Option<&Value>, name: &'static str) -> Result<u32> {
     value
         .and_then(Value::as_u64)
-        .and_then(|value| value.try_into().ok())
+        .and_then(|value| value.try_into().ok()) // straitjacket-allow:error-discard — overflow and absence are both Invalid, which is returned
         .ok_or(Error::Invalid(name))
 }
 
@@ -383,7 +383,7 @@ mod tests {
                             "inputs": [
                                 ["self", {"generic": "Self"}],
                                 ["separator", {"borrowed_ref": {
-                                    "is_mutable": false,
+                                    "is_mutable": false, // straitjacket-allow:deep-nesting — fixture mirrors rustdoc's own shape
                                     "type": {"primitive": "str"}
                                 }}]
                             ],

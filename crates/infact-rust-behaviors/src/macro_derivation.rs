@@ -212,7 +212,7 @@ fn first_string<'a>(node: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
 }
 
 fn text<'a>(node: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
-    std::str::from_utf8(source.get(node.byte_range())?).ok()
+    std::str::from_utf8(source.get(node.byte_range())?).ok() // straitjacket-allow:error-discard — a node whose bytes are not UTF-8 has no text
 }
 
 fn digest(bytes: &[u8]) -> String {

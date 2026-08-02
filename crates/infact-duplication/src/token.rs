@@ -110,6 +110,7 @@ pub(crate) fn tokenize(parsed: ParsedFile) -> Result<TokenizedFile> {
             parser_id: parsed.provenance.parser_id,
             parser_version: parsed.provenance.parser_version,
             grammar_sha256: parsed.provenance.grammar_sha256,
+            queries_sha256: parsed.provenance.queries_sha256,
         },
         tokens,
         units,

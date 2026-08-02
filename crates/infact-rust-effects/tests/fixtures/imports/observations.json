@@ -97,7 +97,7 @@
       },
       "from": "imports::qualified",
       "to": [
-        "std::fs::read"
+        "std::fs::read::<&str>"
       ],
       "dispatch": "static"
     },
@@ -111,7 +111,7 @@
       },
       "from": "imports::via_module",
       "to": [
-        "std::fs::read"
+        "std::fs::read::<&str>"
       ],
       "dispatch": "static"
     },
@@ -125,7 +125,7 @@
       },
       "from": "imports::via_item",
       "to": [
-        "std::fs::read_to_string"
+        "std::fs::read_to_string::<&str>"
       ],
       "dispatch": "static"
     },

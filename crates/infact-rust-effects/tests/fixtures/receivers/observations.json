@@ -1,0 +1,343 @@
+{
+  "schema": 1,
+  "provenance": {
+    "provider": "rust.mir",
+    "provider_version": "0.0.0",
+    "toolchain": "rustc 1.99.0-nightly (b6839f4d0 2026-07-17)",
+    "unit": "receivers"
+  },
+  "coverage": {
+    "definitions": true,
+    "references": false,
+    "call_edges": true,
+    "types": false,
+    "implements": false
+  },
+  "definitions": [
+    {
+      "id": "receivers::clones_a_handle",
+      "kind": "function",
+      "name": "receivers::clones_a_handle",
+      "container": null,
+      "visibility": "unknown",
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/receivers/src/lib.rs",
+        "start_line": 4,
+        "start_column": 1,
+        "end_line": 4,
+        "end_column": 60
+      }
+    },
+    {
+      "id": "receivers::clones_a_string",
+      "kind": "function",
+      "name": "receivers::clones_a_string",
+      "container": null,
+      "visibility": "unknown",
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/receivers/src/lib.rs",
+        "start_line": 8,
+        "start_column": 1,
+        "end_line": 8,
+        "end_column": 49
+      }
+    },
+    {
+      "id": "receivers::collects_a_vec",
+      "kind": "function",
+      "name": "receivers::collects_a_vec",
+      "container": null,
+      "visibility": "unknown",
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/receivers/src/lib.rs",
+        "start_line": 20,
+        "start_column": 1,
+        "end_line": 20,
+        "end_column": 48
+      }
+    },
+    {
+      "id": "receivers::collects_nothing",
+      "kind": "function",
+      "name": "receivers::collects_nothing",
+      "container": null,
+      "visibility": "unknown",
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/receivers/src/lib.rs",
+        "start_line": 24,
+        "start_column": 1,
+        "end_line": 24,
+        "end_column": 57
+      }
+    },
+    {
+      "id": "receivers::collects_nothing::{closure#0}",
+      "kind": "function",
+      "name": "receivers::collects_nothing::{closure#0}",
+      "container": null,
+      "visibility": "unknown",
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/receivers/src/lib.rs",
+        "start_line": 25,
+        "start_column": 23,
+        "end_line": 25,
+        "end_column": 26
+      }
+    },
+    {
+      "id": "receivers::formats",
+      "kind": "function",
+      "name": "receivers::formats",
+      "container": null,
+      "visibility": "unknown",
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/receivers/src/lib.rs",
+        "start_line": 28,
+        "start_column": 1,
+        "end_line": 28,
+        "end_column": 37
+      }
+    },
+    {
+      "id": "receivers::owns_a_str",
+      "kind": "function",
+      "name": "receivers::owns_a_str",
+      "container": null,
+      "visibility": "unknown",
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/receivers/src/lib.rs",
+        "start_line": 12,
+        "start_column": 1,
+        "end_line": 12,
+        "end_column": 41
+      }
+    },
+    {
+      "id": "receivers::owns_an_integer",
+      "kind": "function",
+      "name": "receivers::owns_an_integer",
+      "container": null,
+      "visibility": "unknown",
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/receivers/src/lib.rs",
+        "start_line": 16,
+        "start_column": 1,
+        "end_line": 16,
+        "end_column": 43
+      }
+    }
+  ],
+  "references": [],
+  "call_edges": [
+    {
+      "span": {
+        "path": "/Users/zackmaril/.rustup/toolchains/nightly-2026-07-18-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/macros.rs",
+        "start_line": 115,
+        "start_column": 9,
+        "end_line": 117,
+        "end_column": 11
+      },
+      "from": "receivers::formats",
+      "to": [
+        "std::hint::must_use::<std::string::String>"
+      ],
+      "dispatch": "static"
+    },
+    {
+      "span": {
+        "path": "/Users/zackmaril/.rustup/toolchains/nightly-2026-07-18-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/macros.rs",
+        "start_line": 116,
+        "start_column": 13,
+        "end_line": 116,
+        "end_column": 74
+      },
+      "from": "receivers::formats",
+      "to": [
+        "std::fmt::format"
+      ],
+      "dispatch": "static"
+    },
+    {
+      "span": {
+        "path": "/Users/zackmaril/.rustup/toolchains/nightly-2026-07-18-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/macros.rs",
+        "start_line": 116,
+        "start_column": 33,
+        "end_line": 116,
+        "end_column": 73
+      },
+      "from": "receivers::formats",
+      "to": [
+        "std::fmt::Arguments::<'_>::new::<6, 1>"
+      ],
+      "dispatch": "static"
+    },
+    {
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/receivers/src/lib.rs",
+        "start_line": 5,
+        "start_column": 5,
+        "end_line": 5,
+        "end_column": 19
+      },
+      "from": "receivers::clones_a_handle",
+      "to": [
+        "<std::sync::Arc<std::string::String> as std::clone::Clone>::clone"
+      ],
+      "dispatch": "static"
+    },
+    {
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/receivers/src/lib.rs",
+        "start_line": 9,
+        "start_column": 5,
+        "end_line": 9,
+        "end_column": 18
+      },
+      "from": "receivers::clones_a_string",
+      "to": [
+        "<std::string::String as std::clone::Clone>::clone"
+      ],
+      "dispatch": "static"
+    },
+    {
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/receivers/src/lib.rs",
+        "start_line": 13,
+        "start_column": 5,
+        "end_line": 13,
+        "end_column": 21
+      },
+      "from": "receivers::owns_a_str",
+      "to": [
+        "std::str::<impl std::borrow::ToOwned for str>::to_owned"
+      ],
+      "dispatch": "static"
+    },
+    {
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/receivers/src/lib.rs",
+        "start_line": 17,
+        "start_column": 5,
+        "end_line": 17,
+        "end_column": 21
+      },
+      "from": "receivers::owns_an_integer",
+      "to": [
+        "<i32 as std::borrow::ToOwned>::to_owned"
+      ],
+      "dispatch": "static"
+    },
+    {
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/receivers/src/lib.rs",
+        "start_line": 21,
+        "start_column": 5,
+        "end_line": 21,
+        "end_column": 18
+      },
+      "from": "receivers::collects_a_vec",
+      "to": [
+        "core::slice::<impl [u8]>::iter"
+      ],
+      "dispatch": "static"
+    },
+    {
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/receivers/src/lib.rs",
+        "start_line": 21,
+        "start_column": 5,
+        "end_line": 21,
+        "end_column": 27
+      },
+      "from": "receivers::collects_a_vec",
+      "to": [
+        "<std::slice::Iter<'_, u8> as std::iter::Iterator>::copied::<'_, u8>"
+      ],
+      "dispatch": "static"
+    },
+    {
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/receivers/src/lib.rs",
+        "start_line": 21,
+        "start_column": 5,
+        "end_line": 21,
+        "end_column": 37
+      },
+      "from": "receivers::collects_a_vec",
+      "to": [
+        "<std::iter::Copied<std::slice::Iter<'_, u8>> as std::iter::Iterator>::collect::<std::vec::Vec<u8>>"
+      ],
+      "dispatch": "static"
+    },
+    {
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/receivers/src/lib.rs",
+        "start_line": 25,
+        "start_column": 5,
+        "end_line": 25,
+        "end_column": 18
+      },
+      "from": "receivers::collects_nothing",
+      "to": [
+        "core::slice::<impl [u8]>::iter"
+      ],
+      "dispatch": "static"
+    },
+    {
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/receivers/src/lib.rs",
+        "start_line": 25,
+        "start_column": 5,
+        "end_line": 25,
+        "end_column": 34
+      },
+      "from": "receivers::collects_nothing",
+      "to": [
+        "<std::slice::Iter<'_, u8> as std::iter::Iterator>::map::<std::result::Result<(), ()>, {closure@crates/infact-rust-effects/tests/fixtures/receivers/src/lib.rs:25:23: 25:26}>"
+      ],
+      "dispatch": "static"
+    },
+    {
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/receivers/src/lib.rs",
+        "start_line": 25,
+        "start_column": 5,
+        "end_line": 25,
+        "end_column": 44
+      },
+      "from": "receivers::collects_nothing",
+      "to": [
+        "<std::iter::Map<std::slice::Iter<'_, u8>, {closure@crates/infact-rust-effects/tests/fixtures/receivers/src/lib.rs:25:23: 25:26}> as std::iter::Iterator>::collect::<std::result::Result<(), ()>>"
+      ],
+      "dispatch": "static"
+    },
+    {
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/receivers/src/lib.rs",
+        "start_line": 29,
+        "start_column": 17,
+        "end_line": 29,
+        "end_column": 23
+      },
+      "from": "receivers::formats",
+      "to": [
+        "core::fmt::rt::Argument::<'_>::new_display::<&str>"
+      ],
+      "dispatch": "static"
+    }
+  ],
+  "types": [],
+  "implements": [],
+  "gaps": [
+    {
+      "span": {
+        "path": "crates/infact-rust-effects/tests/fixtures/receivers/src/lib.rs",
+        "start_line": 25,
+        "start_column": 23,
+        "end_line": 25,
+        "end_column": 26
+      },
+      "message": "receivers::collects_nothing::{closure#0} has no instance to read: Error(\"Item requires monomorphization\")"
+    }
+  ]
+}

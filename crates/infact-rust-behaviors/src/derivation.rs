@@ -32,7 +32,7 @@ struct LibraryFunction<'a> {
 }
 
 fn node_text<'a>(node: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
-    std::str::from_utf8(source.get(node.byte_range())?).ok()
+    std::str::from_utf8(source.get(node.byte_range())?).ok() // straitjacket-allow:error-discard — a node whose bytes are not UTF-8 has no text
 }
 
 fn collect_functions<'a>(
@@ -264,11 +264,16 @@ fn principal_method<'a>(
         .iter()
         .filter(|function| function.container.as_deref() == Some(type_name))
         .filter_map(|function| {
-            let form = normalize(function).ok()?;
-            describes_work(&form).then(|| {
-                let principal = PRINCIPAL_METHODS.contains(&function.name.as_str());
-                ((principal, form.size()), function)
-            })
+            let form = normalize(function).ok()?; // straitjacket-allow:error-discard — a function that will not normalize is not a candidate
+            // The method the language requires wins even when its body is a
+            // single call, because that call is followed afterwards. Demanding
+            // that it already describe work discards `fn next(&mut self) {
+            // self.iter.find_map(&mut self.f) }` and leaves a bulk
+            // specialisation to win by default, which describes something the
+            // caller never asked for.
+            let principal = PRINCIPAL_METHODS.contains(&function.name.as_str());
+            let works = describes_work(&form);
+            (principal || works).then_some(((principal, works, form.size()), function))
         })
         .max_by_key(|(rank, _)| *rank)
         .map(|(_, function)| function)
@@ -350,16 +355,20 @@ fn derive_from(
     let mut form = normalize(current)?;
     let mut visited = vec![std::ptr::from_ref(current)];
 
-    // Follow delegation until the form describes actual work.
+    // Follow the implementation until it describes actual work, by whichever
+    // route leads there: a wrapper delegating to a helper, or a callable that
+    // only builds the type whose implementation does the work later.
     for _ in 0..MAX_DELEGATION_DEPTH {
         if describes_work(&form) {
             break;
         }
-        let Some(target) = delegation_target(&form) else {
-            break;
-        };
-        // a delegate is looked up in the same container first
-        let Some(next) = resolve(target, current.container.as_deref(), Some(current)) else {
+        let next = delegation_target(&form)
+            .and_then(|target| resolve(target, current.container.as_deref(), Some(current)))
+            .or_else(|| {
+                let built = constructed_type(&form)?;
+                principal_method(functions, built)
+            });
+        let Some(next) = next else {
             break;
         };
         // a trait wrapper and the free function it forwards to commonly share
@@ -385,10 +394,10 @@ fn derive_from(
         implementation.push(evidence(implementing)?);
     }
 
-    if !describes_work(&form) {
+    if !is_comparable(&form) {
         return Err(Error::UnsupportedImplementation {
             callable: callable_path.to_owned(),
-            reason: "the implementation describes no sequence operation to compare".to_owned(),
+            reason: "the implementation describes nothing that can be compared".to_owned(),
         });
     }
     if form.depth() > MAXIMUM_FORM_DEPTH {
@@ -419,10 +428,14 @@ fn normalize(function: &LibraryFunction<'_>) -> Result<Form> {
             reason: "the implementation has no body".to_owned(),
         });
     }
-    Ok(infact_rust_normalize::normalize_function(
-        function.node,
-        &function.file.source,
-    ))
+    // The laws of iteration run here rather than at the end, because what an
+    // implementation *does* is only visible in normal form: `find` describes no
+    // sequence operation until its fold has become a traversal, and the search
+    // for delegation would give up on it before ever seeing the work.
+    Ok(
+        infact_rust_normalize::normalize_function(function.node, &function.file.source)
+            .simplify(),
+    )
 }
 
 /// The deepest form still worth keeping.
@@ -450,11 +463,57 @@ pub const MINIMUM_REPORTABLE_SIZE: u32 = 6;
 /// `map` and matches everything.
 pub const MINIMUM_ANCHORS: u32 = 2;
 
+/// Whether a form describes something that can be compared across libraries.
+///
+/// Derivation used to demand a sequence operation, which confined it to
+/// iterator behaviors and rejected everything else a library does. What
+/// actually has to hold is that the form describes a *decision or a traversal*
+/// rather than plumbing: iterating over something, or choosing among named
+/// alternatives. A getter, a delegation, or a struct literal describes neither,
+/// and would collide with unrelated code wherever it appeared.
+pub fn is_comparable(form: &Form) -> bool {
+    describes_work(form) || describes_decision(form)
+}
+
+/// Whether a form chooses among alternatives it names.
+///
+/// One arm is not a decision — `match x { Some(v) => v }` says only that a
+/// value was unwrapped, which most code does somewhere. Two named alternatives
+/// is the point at which the shape belongs to a particular type's API.
+fn describes_decision(form: &Form) -> bool {
+    if let Form::Select { arms, .. } = form {
+        let named = arms
+            .iter()
+            .filter_map(|arm| match &arm.pattern {
+                infact_core::Pattern::Variant { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        if named.len() >= 2 {
+            return true;
+        }
+    }
+    form.children().into_iter().any(describes_decision)
+}
+
 /// Whether a derived behavior is specific enough to report when matched.
+///
+/// The last condition is what separates a behavior from a shape. `Option::map_or`
+/// is `match self { Some(t) => f(t), None => default }`: two named alternatives,
+/// and everything else a hole. It therefore describes *every* way of consuming
+/// an `Option`, subsumes the narrower behaviors, and reported nine hundred times
+/// across five hundred crates — technically right and useless. `unwrap_or` says
+/// the same thing about `None` but is concrete about `Some`, and stays.
+///
+/// So a behavior must name at least as much as it leaves open. This is a
+/// property of the form rather than a threshold chosen to make a number look
+/// good: a form with more holes than anchors matches more situations than it
+/// distinguishes.
 pub fn is_reportable(form: &Form) -> bool {
     form.size() >= MINIMUM_REPORTABLE_SIZE
         && form.anchors() >= MINIMUM_ANCHORS
-        && describes_work(form)
+        && form.anchors() >= form.holes()
+        && is_comparable(form)
 }
 
 /// Whether a function is part of a library's public surface.
@@ -535,6 +594,15 @@ pub struct DerivedLibrary {
     /// Reporting these keeps "this library has no behaviors" apart from "this
     /// library could not be read", which look identical otherwise.
     pub unparsed: Vec<String>,
+    /// Why the callables that produced nothing produced nothing, counted.
+    ///
+    /// Most of a library is not a comparable behavior, so a small behavior list
+    /// is the normal outcome rather than a fault. What is worth knowing is the
+    /// shape of what was skipped: whether coverage is limited by the language
+    /// constructs derivation understands, by what it is willing to call a
+    /// behavior, or by something going wrong. Counting the reasons is the only
+    /// way to tell those apart without reading every callable.
+    pub skipped: std::collections::BTreeMap<String, usize>,
 }
 
 /// Derive a library's whole catalog and every behavior it yields, parsing once.
@@ -547,16 +615,24 @@ pub fn derive_library(
     let parsed = parse_repository(source_root, parsers)?;
     let functions = library_functions(&parsed.files);
     let catalog = catalog_from(&parsed, &functions, package, version)?;
-    let behaviors = catalog
-        .callables
-        .iter()
-        // most callables describe no comparable behavior; that is expected
-        .filter_map(|callable| derive_from(&functions, &catalog, &callable.path).ok())
-        .collect();
+    // Most callables describe no comparable behavior, which is expected and
+    // skipped. A parse or source failure on the same path is not, and would
+    // otherwise leave a short behavior list that reads like a small library.
+    let mut behaviors = Vec::new();
+    let mut skipped = std::collections::BTreeMap::new();
+    for callable in &catalog.callables {
+        match derive_from(&functions, &catalog, &callable.path) {
+            Ok(behavior) => behaviors.push(behavior),
+            Err(error) if error.is_underivable() => {
+                *skipped.entry(skip_reason(&error)).or_insert(0) += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
     let mut unparsed = parsed
         .diagnostics
         .iter()
-        .map(|diagnostic| diagnostic.path.display().to_string())
+        .map(|diagnostic| format!("{}: {}", diagnostic.path.display(), diagnostic.message))
         .collect::<Vec<_>>();
     unparsed.sort();
     unparsed.dedup();
@@ -564,7 +640,29 @@ pub fn derive_library(
         catalog,
         behaviors,
         unparsed,
+        skipped,
     })
+}
+
+/// The reason a callable yielded nothing, with the callable's own name removed.
+///
+/// The name is what makes each message unique, and counting unique messages
+/// says nothing. What is wanted is the handful of reasons behind thousands of
+/// skips.
+fn skip_reason(error: &Error) -> String {
+    match error {
+        Error::UnsupportedImplementation { reason, .. } => reason
+            .split(", which describes")
+            .next()
+            .unwrap_or(reason)
+            .to_owned(),
+        Error::UnsupportedDerivation { .. } => "the callable is not a function".to_owned(),
+        Error::MissingCallable { .. } => "the catalog names no such callable".to_owned(),
+        Error::IncompatibleCallable { .. } => "the callable cannot be compared".to_owned(),
+        Error::MissingImplementation { .. } => "no implementation was found".to_owned(),
+        Error::UnsupportedMacroExpansion { .. } => "the macro cannot be expanded".to_owned(),
+        other => other.to_string(),
+    }
 }
 
 fn catalog_from(

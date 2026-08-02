@@ -50,6 +50,14 @@ pub struct InputEvidence {
     pub parser_id: String,
     pub parser_version: String,
     pub grammar_sha256: String,
+    /// A digest over the parser pack's queries, when a parser produced this.
+    ///
+    /// A fact derived through a Tree-sitter query depends on that query's text
+    /// as much as on the grammar, so two runs with different queries would
+    /// otherwise carry indistinguishable provenance. Empty when the input came
+    /// from a compiler rather than a parser, which uses no queries at all.
+    #[serde(default)]
+    pub queries_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -128,6 +136,148 @@ pub struct EffectTrace {
     pub effect: Effect,
     pub origin: String,
     pub path: Vec<CallEdgeEvidence>,
+}
+
+/// How a fallible expression's error was dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DiscardForm {
+    /// `let _ = fallible();`
+    LetUnderscore,
+    /// `.ok()`, which turns a cause into an absence.
+    OkDiscard,
+    /// `.unwrap_or(..)`, `.unwrap_or_default()`, or `.unwrap_or_else(|_| ..)`.
+    UnwrapOr,
+    /// An `Err(_)` match arm.
+    ErrArm,
+    /// `if let Ok(..)` or `let Ok(..) = .. else`, where no arm sees the error.
+    OkBinding,
+    /// `.filter_map(Result::ok)`, which drops failed items mid-iteration.
+    IteratorDrop,
+    /// `.map_err(|_| ..)`, which keeps the failure but discards its cause.
+    CauseErased,
+    /// `.unwrap()` or `.expect(..)`, which aborts instead of returning.
+    Panic,
+}
+
+impl DiscardForm {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LetUnderscore => "let-underscore",
+            Self::OkDiscard => "ok-discard",
+            Self::UnwrapOr => "unwrap-or",
+            Self::ErrArm => "err-arm",
+            Self::OkBinding => "ok-binding",
+            Self::IteratorDrop => "iterator-drop",
+            Self::CauseErased => "cause-erased",
+            Self::Panic => "panic",
+        }
+    }
+}
+
+/// Whether the enclosing callable could have reported the failure upward.
+///
+/// A discard inside an infallible callable is the strongest signal: the error
+/// has no route out no matter what the caller does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Containment {
+    /// Returns `Result`, so propagation was available and was declined.
+    Fallible,
+    /// Returns `Option`, so a failure can only leave as an absence.
+    Optional,
+    /// Returns neither, so the error cannot leave this callable at all.
+    Infallible,
+}
+
+impl Containment {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fallible => "fallible",
+            Self::Optional => "optional",
+            Self::Infallible => "infallible",
+        }
+    }
+}
+
+/// Whether the site is certainly discarding a failure.
+///
+/// `.ok()` and an `Err(_)` arm name `Result` itself. `let _ =` does not name a
+/// type, but the binding exists only to drop a value the compiler flagged as
+/// must-use, so the discard is explicit either way. `.unwrap_or_default()`
+/// reads the same on `Option`, and syntax cannot tell the two apart, so the
+/// analyzer reports what it saw and leaves the policy call to the consumer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Certainty {
+    /// The form names `Result`, or exists only to discard a must-use value.
+    Certain,
+    /// The same form exists on `Option`; the receiver's type was not resolved.
+    Possible,
+}
+
+impl Certainty {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Certain => "certain",
+            Self::Possible => "possible",
+        }
+    }
+}
+
+/// How far a discarded failure could have travelled up the call graph.
+///
+/// `Containment` is local: it reads one signature. This is the same question
+/// asked of the callers, because a discard inside an infallible callable that
+/// is itself only ever called by infallible callables cannot be reported
+/// anywhere, no matter what the caller does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Reach {
+    /// The discarding callable returns `Result`; it could have returned this.
+    Local,
+    /// A caller above returns `Result`, so the failure could have reached it.
+    Ancestor,
+    /// Every caller reachable from here is infallible; nothing can report it.
+    Sealed,
+    /// No caller could be resolved from syntax, so the answer is not known.
+    Unknown,
+}
+
+impl Reach {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Ancestor => "ancestor",
+            Self::Sealed => "sealed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// A site where a fallible expression's error was dropped rather than returned.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ErrorDiscard {
+    /// The enclosing callable, or the module when a discard sits outside one.
+    pub callable: String,
+    pub callable_span: SourceSpan,
+    pub form: DiscardForm,
+    pub containment: Containment,
+    pub certainty: Certainty,
+    /// The expression whose error was dropped, as written.
+    pub expression: String,
+    pub span: SourceSpan,
+    /// Whether the site is a test, which a policy usually exempts.
+    pub in_test: bool,
+    #[serde(default = "unknown_reach")]
+    pub reach: Reach,
+    /// Callers from the outermost one found down to the discarding callable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path: Vec<CallEdgeEvidence>,
+}
+
+const fn unknown_reach() -> Reach {
+    Reach::Unknown
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

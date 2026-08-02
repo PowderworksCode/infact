@@ -21,6 +21,7 @@ infact-duplication = { path = "../infact-duplication" }
 infact-fact-pack = { path = "../infact-fact-pack" }
 infact-fact-registry = { path = "../infact-fact-registry" }
 infact-rust-behaviors = { path = "../infact-rust-behaviors" }
+infact-rust-normalize = { path = "../infact-rust-normalize" }
 infact-rust-effects = { path = "../infact-rust-effects" }
 serde.workspace = true
 serde_json.workspace = true

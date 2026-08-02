@@ -15,7 +15,7 @@ use infact_fact_pack::{
 use infact_fact_registry::{FactPackRegistry, FactPackRegistryAuth};
 use infact_rust_behaviors::{
     LibraryPackRequest, MacroDerivationRequest, analyze_repository as analyze_rust_behaviors,
-    build_library_pack, derive_behavior, derive_library, derive_macro_behavior, registry_sources,
+    build_library_pack, derive_behavior, derive_library, derive_macro_behavior, behavior_file_name, registry_sources,
 };
 use infact_rust_effects::{RustStdFactPackRequest, build_std_fact_pack, derive_std_effects};
 use serde::Deserialize;
@@ -261,6 +261,21 @@ enum FactsLockCommand {
 
 #[derive(Debug, Subcommand)]
 enum BehaviorCommand {
+    /// Print the normalized form of functions in a file.
+    Show {
+        source: PathBuf,
+
+        /// Only functions whose name contains this.
+        #[arg(long)]
+        function: Option<String>,
+
+        #[arg(long = "parser-path")]
+        parser_paths: Vec<PathBuf>,
+
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+
     /// Derive a whole library's behaviors from its source.
     Library {
         source_root: PathBuf,
@@ -284,6 +299,10 @@ enum BehaviorCommand {
         /// Accept a pack built from source the parser could not fully read.
         #[arg(long)]
         allow_unread: bool,
+
+        /// Report why the callables that yielded no behavior yielded none.
+        #[arg(long)]
+        explain: bool,
     },
 
     /// Derive a normalized behavior from a library implementation.
@@ -533,7 +552,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         .map(|path| resolve(&base, path)),
                 );
                 let parsers = parser_catalog(parser_paths)?;
-                let source_root = registry_sources(&package, &version)
+                let source_root = registry_sources(&package, &version)?
                     .into_iter()
                     .next()
                     .ok_or_else(|| {
@@ -743,6 +762,65 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Behavior {
             command:
+                BehaviorCommand::Show {
+                    source,
+                    function,
+                    mut parser_paths,
+                    config,
+                },
+        } => {
+            let root = source.parent().unwrap_or(Path::new(".")).to_path_buf();
+            let (file_config, base) = load_config(&root, config.as_deref())?;
+            parser_paths.extend(
+                file_config
+                    .parsers
+                    .search_paths
+                    .into_iter()
+                    .map(|path| resolve(&base, path)),
+            );
+            let parsers = parser_catalog(parser_paths)?;
+            // a single file is inspected by walking its directory and keeping it
+            let (walk, only) = if source.is_dir() {
+                (source.clone(), None)
+            } else {
+                (root.clone(), source.file_name().map(|name| name.to_owned()))
+            };
+            let parsed = entl_tree_sitter::parse_repository(&walk, &parsers)?;
+            for diagnostic in &parsed.diagnostics {
+                eprintln!(
+                    "unread {}: {}",
+                    diagnostic.path.display(),
+                    diagnostic.message
+                );
+            }
+            for file in &parsed.files {
+                if only
+                    .as_ref()
+                    .is_some_and(|name| file.path.file_name() != Some(name.as_os_str()))
+                {
+                    continue;
+                }
+                for normalized in infact_rust_normalize::normalize_file(file) {
+                    if function
+                        .as_ref()
+                        .is_some_and(|wanted| !normalized.name.contains(wanted.as_str()))
+                    {
+                        continue;
+                    }
+                    let simplified = normalized.form.simplify();
+                    println!(
+                        "{}:{}  {}\n  as written: {}\n  simplified: {}",
+                        file.path.display(),
+                        normalized.start_line,
+                        normalized.name,
+                        normalized.form,
+                        simplified
+                    );
+                }
+            }
+        }
+        Command::Behavior {
+            command:
                 BehaviorCommand::Library {
                     source_root,
                     package,
@@ -751,6 +829,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     mut parser_paths,
                     output,
                     allow_unread,
+                    explain,
                 },
         } => {
             let (file_config, base) = load_config(&source_root, config.as_deref())?;
@@ -773,16 +852,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             )?;
 
             for behavior in behaviors {
-                let leaf = behavior
-                    .callable_path
-                    .rsplit("::")
-                    .next()
-                    .unwrap_or(&behavior.callable_path)
-                    .replace('_', "-");
                 std::fs::write(
-                    output
-                        .join("behaviors")
-                        .join(format!("{package}-{leaf}-{version}.json")),
+                    output.join("behaviors").join(behavior_file_name(
+                        &package,
+                        &behavior.callable_path,
+                        &version,
+                    )),
                     serde_json::to_vec_pretty(behavior)?,
                 )?;
             }
@@ -791,6 +866,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 catalog.callables.len(),
                 behaviors.len()
             );
+            if explain {
+                let mut reasons = derived.skipped.iter().collect::<Vec<_>>();
+                reasons.sort_by(|left, right| right.1.cmp(left.1).then(left.0.cmp(right.0)));
+                for (reason, count) in reasons {
+                    println!("  {count:>6}  {reason}");
+                }
+            }
             // Source the parser cannot read is a hole in the result, not a
             // property of the library. Reporting it quietly invites the hole to
             // be mistaken for an answer, so this fails.
@@ -1152,8 +1234,11 @@ fn load_json_files<T: serde::de::DeserializeOwned>(
             files.push(path);
             continue;
         }
+        // A dropped entry here silently shortens the input set, so a partial
+        // read would look like a smaller repository.
         let mut children = std::fs::read_dir(path)?
-            .filter_map(std::result::Result::ok)
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
             .map(|entry| entry.path())
             .filter(|path| {
                 path.extension()
