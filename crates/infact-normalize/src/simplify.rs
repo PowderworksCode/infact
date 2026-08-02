@@ -16,6 +16,7 @@
 //! - **escape** — breaking out of a fold is returning from a loop
 //! - **recovery** — asking a fold for the value it broke with is that return
 //! - **generalization** — a name nothing in the form binds is a hole
+//! - **fusion** — mapping what was filtered is one pass, not two
 //!
 //! Applied to a fixpoint, they carry both sides toward the same shape.
 
@@ -115,6 +116,7 @@ impl Form {
             Self::Lambda { parameters, .. } => parameters.iter().collect(),
             Self::Let { pattern, .. } => vec![pattern],
             Self::Select { arms, .. } => arms.iter().map(|arm| &arm.pattern).collect(),
+            Self::Sift { item, .. } => vec![item],
             _ => Vec::new(),
         }
     }
@@ -135,11 +137,60 @@ impl Form {
     fn sweep(&self) -> Self {
         let rebuilt = self.map_children(&|child| child.sweep());
         rebuilt
-            .as_escape()
+            .as_fused()
+            .or_else(|| rebuilt.as_escape())
             .or_else(|| rebuilt.as_traversal())
             .or_else(|| rebuilt.as_recovered_escape())
             .or_else(|| rebuilt.as_unfolded())
             .unwrap_or(rebuilt)
+    }
+
+    /// Mapping what was filtered is one pass that decides and produces.
+    ///
+    /// `filter(p).map(f)` visits twice only because that is how it is written;
+    /// what it describes is `filter_map`. Fusing them is what lets code written
+    /// as a chain compare against a library that offers the single operation —
+    /// and against code written as a loop, which does it in one pass already.
+    fn as_fused(&self) -> Option<Self> {
+        let Self::Transform {
+            sequence,
+            item: mapped,
+            body: produce,
+        } = self
+        else {
+            return None;
+        };
+        let Self::Retain {
+            sequence: source,
+            item: tested,
+            body: test,
+        } = sequence.as_ref()
+        else {
+            return None;
+        };
+        // The two closures name the element separately; fusing them means the
+        // second has to speak about the first's binding.
+        let (Pattern::Binding(tested_index), Pattern::Binding(mapped_index)) =
+            (tested.as_ref(), mapped.as_ref())
+        else {
+            return None;
+        };
+        let produced = produce.substitute(*mapped_index, &Self::Local(*tested_index));
+        Some(Self::Sift {
+            sequence: source.clone(),
+            item: tested.clone(),
+            body: Box::new(Self::Branch {
+                condition: test.clone(),
+                consequence: Box::new(Self::Variant {
+                    name: "Some".to_owned(),
+                    payload: vec![produced],
+                }),
+                alternative: Some(Box::new(Self::Variant {
+                    name: "None".to_owned(),
+                    payload: Vec::new(),
+                })),
+            }),
+        })
     }
 
     /// Breaking out of a fold is returning from a loop, and continuing is
@@ -455,6 +506,34 @@ mod tests {
         // `v7` is bound by nothing here, so it stands for whatever a caller
         // passes — under a number no existing hole has claimed
         assert_eq!(sequence.simplify().to_string(), "f0");
+    }
+
+    #[test]
+    fn mapping_what_was_filtered_is_one_pass() {
+        let chained = Form::Transform {
+            sequence: Box::new(Form::Retain {
+                sequence: Box::new(Form::Free(0)),
+                item: Box::new(Pattern::Binding(1)),
+                body: Box::new(Form::Method {
+                    name: "is_ready".to_owned(),
+                    receiver: Box::new(Form::Local(1)),
+                    arguments: Vec::new(),
+                }),
+            }),
+            item: Box::new(Pattern::Binding(2)),
+            body: Box::new(Form::Method {
+                name: "into_owned".to_owned(),
+                receiver: Box::new(Form::Local(2)),
+                arguments: Vec::new(),
+            }),
+        };
+        // the two closures named the element separately; fusing makes the
+        // second speak about the first's binding
+        assert_eq!(
+            chained.simplify().to_string(),
+            "(sift f0 v1 (branch (method is_ready v1) \
+             (variant Some (method into_owned v1)) (variant None)))"
+        );
     }
 
     #[test]

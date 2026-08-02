@@ -410,6 +410,20 @@ pub enum ExternalType {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct LibraryBehaviorMatch {
     pub target: LibraryTarget,
+    /// Other callables the code has equally reimplemented.
+    ///
+    /// `BTreeMap::keys` and `HashMap::keys` derive to one form because they are
+    /// one behavior; which of them a caller reimplemented depends on the type of
+    /// the value they wrote it against, and that is not in the syntax. Choosing
+    /// between them without knowing the type is inventing certainty — the
+    /// previous rule picked the shorter path, so `BTreeMap` code was always told
+    /// `HashMap`.
+    ///
+    /// So a match reports what it established: the behavior, and every API that
+    /// behavior belongs to. Type information narrows this to one; until it does,
+    /// naming them all is the true answer rather than a lucky one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<LibraryTarget>,
     pub span: SourceSpan,
     /// Whether the code does this and other work in the same pass.
     ///

@@ -162,6 +162,16 @@ pub enum Form {
         item: Box<Pattern>,
         body: Box<Form>,
     },
+    /// Producing a new sequence from the elements that yield a value.
+    ///
+    /// This is `filter_map`, and it is the fused form of a `Retain` followed by
+    /// a `Transform`: deciding and producing in one pass. Keeping it apart from
+    /// `Transform` matters because `map` cannot drop an element and this can.
+    Sift {
+        sequence: Box<Form>,
+        item: Box<Pattern>,
+        body: Box<Form>,
+    },
     /// Producing a new sequence containing the elements that satisfy a test.
     Retain {
         sequence: Box<Form>,
@@ -285,6 +295,7 @@ impl Form {
                 .chain(arguments.iter())
                 .collect(),
             Self::Traverse { sequence, body, .. }
+            | Self::Sift { sequence, body, .. }
             | Self::Transform { sequence, body, .. }
             | Self::Retain { sequence, body, .. } => vec![sequence.as_ref(), body.as_ref()],
             Self::Accumulate {
@@ -339,6 +350,7 @@ impl Form {
             Self::Local(bound) => *bound == index,
             Self::Let { pattern, value } => pattern.binds(index) || value.references_local(index),
             Self::Traverse { item, .. }
+            | Self::Sift { item, .. }
             | Self::Transform { item, .. }
             | Self::Retain { item, .. }
                 if item.binds(index) =>
@@ -393,6 +405,15 @@ impl Form {
                 item,
                 body,
             } => Self::Traverse {
+                sequence: apply(sequence),
+                item: item.clone(),
+                body: apply(body),
+            },
+            Self::Sift {
+                sequence,
+                item,
+                body,
+            } => Self::Sift {
                 sequence: apply(sequence),
                 item: item.clone(),
                 body: apply(body),
@@ -790,6 +811,11 @@ impl Display for Form {
                 item,
                 body,
             } => write!(formatter, "(traverse {sequence} {item} {body})"),
+            Self::Sift {
+                sequence,
+                item,
+                body,
+            } => write!(formatter, "(sift {sequence} {item} {body})"),
             Self::Transform {
                 sequence,
                 item,
@@ -1263,6 +1289,18 @@ impl Bindings {
                 },
             )
             | (
+                Form::Sift {
+                    sequence: subject_sequence,
+                    item: subject_item,
+                    body: subject_body,
+                },
+                Form::Sift {
+                    sequence: pattern_sequence,
+                    item: pattern_item,
+                    body: pattern_body,
+                },
+            )
+            | (
                 Form::Retain {
                     sequence: subject_sequence,
                     item: subject_item,
@@ -1519,6 +1557,19 @@ impl Renaming {
                 let sequence = self.boxed(sequence);
                 let item = Box::new(self.pattern(item));
                 Form::Traverse {
+                    sequence,
+                    item,
+                    body: self.boxed(body),
+                }
+            }
+            Form::Sift {
+                sequence,
+                item,
+                body,
+            } => {
+                let sequence = self.boxed(sequence);
+                let item = Box::new(self.pattern(item));
+                Form::Sift {
                     sequence,
                     item,
                     body: self.boxed(body),

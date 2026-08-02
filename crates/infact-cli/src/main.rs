@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use entl_codebase::observe_rust_compiler;
 use entl_tree_sitter::ParserCatalog;
 use infact_catalog::{CatalogRequest, build_catalog};
-use infact_core::{DerivedLibraryBehavior, DerivedMacroBehavior, ExternalCatalog};
+use infact_core::{LibraryTarget, DerivedLibraryBehavior, DerivedMacroBehavior, ExternalCatalog};
 use infact_duplication::{
     ExactConfig, NearConfig, analyze_repository_near_with_catalog, analyze_repository_with_catalog,
 };
@@ -1147,8 +1147,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     println!("{}", serde_json::to_string(fact)?);
                 } else {
                     let behavior_match = &fact.value;
+                    // When several callables share the behavior, saying only one
+                    // of them would be a guess about the receiver's type.
+                    let undecided = if behavior_match.alternatives.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            " (or {})",
+                            behavior_match
+                                .alternatives
+                                .iter()
+                                .map(LibraryTarget::path)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    };
                     println!(
-                        "{}:{}-{}  {}",
+                        "{}:{}-{}  {}{undecided}",
                         behavior_match.span.path.display(),
                         behavior_match.span.start_line,
                         behavior_match.span.end_line,

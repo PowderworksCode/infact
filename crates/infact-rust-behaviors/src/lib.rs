@@ -196,7 +196,9 @@ pub fn analyze_repository(
             // is put in the same one. Locating stays on the form as written,
             // because that is what the spans were taken from.
             let candidate = function.form.simplify();
-            let mut best: BTreeMap<&Form, (&&DerivedLibraryBehavior, bool)> = BTreeMap::new();
+            // Behaviors that share a form are indistinguishable here by
+            // construction, so all of them are kept and reported together.
+            let mut best: BTreeMap<&Form, (Vec<&&DerivedLibraryBehavior>, bool)> = BTreeMap::new();
             for behavior in &reportable {
                 // A behavior derived from this very file is not a finding: the
                 // library is not reimplementing itself. The content digest says
@@ -214,27 +216,56 @@ pub fn analyze_repository(
                     continue;
                 };
                 best.entry(&behavior.program)
-                    .and_modify(|chosen| {
-                        if is_plainer(&behavior.callable_path, &chosen.0.callable_path) {
-                            *chosen = (behavior, fused);
-                        }
-                    })
-                    .or_insert((behavior, fused));
+                    .and_modify(|chosen| chosen.0.push(behavior))
+                    .or_insert_with(|| (vec![behavior], fused));
             }
-            for (behavior, fused) in best.into_values() {
-                let Some(catalog) = catalogs.iter().find(|catalog| {
-                    catalog.package == behavior.callable_package
-                        && catalog.version == behavior.callable_version
-                        && catalog.source_sha256 == behavior.catalog_sha256
-                }) else {
+            for (mut sharing, fused) in best.into_values() {
+                // Only callables whose catalog is present can be named.
+                sharing.retain(|behavior| catalog_for(catalogs, behavior).is_some());
+                // Name the API a caller should reach for, which is the one
+                // highest up the delegation chain. `BinaryHeap::clear` is
+                // `self.drain()`, so both derive one form — but `clear` is what
+                // the library offers for this and `drain` is how it is built.
+                // Recommending the helper would be telling someone to reach past
+                // the API that exists for exactly their case.
+                sharing.sort_by(|left, right| {
+                    delegates_to(right, left)
+                        .cmp(&delegates_to(left, right))
+                        .then_with(|| {
+                            (left.callable_path.len(), &left.callable_path)
+                                .cmp(&(right.callable_path.len(), &right.callable_path))
+                        })
+                });
+                let Some((behavior, rest)) = sharing.split_first() else {
                     continue;
                 };
+                let Some(catalog) = catalog_for(catalogs, behavior) else {
+                    continue;
+                };
+                let alternatives = rest
+                    .iter()
+                    .filter_map(|other| {
+                        let catalog = catalog_for(catalogs, other)?;
+                        Some(LibraryTarget::Callable {
+                            package: catalog.package.clone(),
+                            version: catalog.version.clone(),
+                            path: other.callable_path.clone(),
+                            catalog_sha256: catalog.source_sha256.clone(),
+                        })
+                    })
+                    .collect();
                 let located = function
                     .form
                     .locate(&behavior.program)
                     .or_else(|| candidate.locate(&behavior.program));
                 matches.insert(behavior_match(
-                    file, &function, located, fused, catalog, behavior,
+                    file,
+                    &function,
+                    located,
+                    fused,
+                    catalog,
+                    behavior,
+                    alternatives,
                 )?);
             }
         }
@@ -273,6 +304,33 @@ fn derived_from(behavior: &DerivedLibraryBehavior, file: &ParsedFile) -> bool {
 ///
 /// Shorter wins, so `counts` is preferred over `counts_with_hasher`; ties break
 /// alphabetically so the choice does not depend on pack ordering.
+/// Whether `outer` reaches its behavior by way of `inner`.
+///
+/// Derivation records the chain of functions it followed, so a wrapper's
+/// evidence names the helper it delegated to. That is what makes one of two
+/// identical forms the higher-level API rather than an arbitrary pick.
+fn delegates_to(outer: &DerivedLibraryBehavior, inner: &DerivedLibraryBehavior) -> bool {
+    let target = inner.callable_path.rsplit("::").next().unwrap_or_default();
+    outer.callable_path != inner.callable_path
+        && outer
+            .implementation
+            .iter()
+            .skip(1)
+            .any(|step| step.callable_path == target)
+}
+
+fn catalog_for<'a>(
+    catalogs: &'a [ExternalCatalog],
+    behavior: &DerivedLibraryBehavior,
+) -> Option<&'a ExternalCatalog> {
+    catalogs.iter().find(|catalog| {
+        catalog.package == behavior.callable_package
+            && catalog.version == behavior.callable_version
+            && catalog.source_sha256 == behavior.catalog_sha256
+    })
+}
+
+#[expect(dead_code, reason = "kept until type information decides between candidates")]
 fn is_plainer(candidate: &str, current: &str) -> bool {
     (candidate.len(), candidate) < (current.len(), current)
 }
@@ -290,6 +348,7 @@ fn behavior_match(
     fused: bool,
     catalog: &ExternalCatalog,
     behavior: &DerivedLibraryBehavior,
+    alternatives: Vec<LibraryTarget>,
 ) -> Result<Fact<LibraryBehaviorMatch>> {
     let span = located
         .and_then(|steps| {
@@ -322,6 +381,7 @@ fn behavior_match(
                 path: behavior.callable_path.clone(),
                 catalog_sha256: catalog.source_sha256.clone(),
             },
+            alternatives,
             span,
             fused,
         },
@@ -698,6 +758,8 @@ fn macro_behavior_match(
                 path: behavior.derive_path.clone(),
                 expansion_sha256: behavior.expansion_sha256.clone(),
             },
+            // a derive names exactly one macro
+            alternatives: Vec::new(),
             fused: false,
             span: SourceSpan {
                 path: file.path.clone(),

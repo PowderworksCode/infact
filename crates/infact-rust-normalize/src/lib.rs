@@ -19,29 +19,50 @@ use entl_tree_sitter::ParsedFile;
 use infact_normalize::{Arm, Form, Pattern, Roles};
 use tree_sitter::Node;
 
-/// Methods that return the sequence they were given.
-const IDENTITY_ADAPTERS: &[&str] = &[
+/// Methods that hand back the sequence they were given.
+///
+/// These change nothing about what is iterated, so they are noise wherever they
+/// appear — including as the whole expression. `itertools::sorted` ends with
+/// `v.into_iter()`, which is how a function returns a sequence rather than
+/// something it does to one.
+const SEQUENCE_ADAPTERS: &[&str] = &[
     "iter",
     "into_iter",
     "iter_mut",
     "by_ref",
-    "as_ref",
-    "as_mut",
-    "as_slice",
-    "as_str",
-    "to_owned",
-    "to_vec",
-    "clone",
     "cloned",
     "copied",
-    "into",
+    "to_vec",
+    "as_slice",
+    "as_str",
 ];
+
+/// Conversions that are noise only when feeding something else.
+///
+/// `v.clone().iter().filter(p)` filters the same sequence as `v.iter()`, so a
+/// conversion in a receiver chain is spelling. A conversion that *is* the
+/// expression is not: `e.into()` in `Err(e) => e.into()` is the whole content of
+/// `Result::into_ok`, and erasing it made that function identical to `into_err`,
+/// its opposite. Nine findings named one of those two at random.
+const VALUE_CONVERSIONS: &[&str] = &["as_ref", "as_mut", "to_owned", "clone", "into"];
+
+/// Whether a method may be peeled off a receiver chain.
+fn is_receiver_noise(name: &str) -> bool {
+    SEQUENCE_ADAPTERS.contains(&name) || VALUE_CONVERSIONS.contains(&name)
+}
 
 /// Methods that visit each element without producing a new sequence.
 const TRAVERSAL_METHODS: &[&str] = &["for_each", "try_for_each"];
 
 /// Methods that produce a new sequence by transforming each element.
-const TRANSFORM_METHODS: &[&str] = &["map", "filter_map", "flat_map"];
+const TRANSFORM_METHODS: &[&str] = &["map", "flat_map"];
+
+/// Methods that produce a sequence from the elements that yield a value.
+///
+/// `filter_map` used to be counted as a transform, which said that mapping and
+/// mapping-while-dropping are the same operation. They are not: `map` cannot
+/// change how many elements come out.
+const SIFT_METHODS: &[&str] = &["filter_map"];
 
 /// Methods that produce a new sequence by testing each element.
 const RETAIN_METHODS: &[&str] = &["filter", "take_while", "skip_while"];
@@ -118,6 +139,17 @@ fn unwrap_noise(mut node: Node<'_>) -> Node<'_> {
 
 /// Render a path with every `::<..>` removed, so `HashMap::<K, V>::new` and
 /// `HashMap::new` are one path.
+/// A pattern's parts, including the discarded ones.
+///
+/// Punctuation is skipped; everything else is a position, whether or not the
+/// grammar gives it a name.
+fn all_pattern_children(node: Node<'_>) -> Vec<Node<'_>> {
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .filter(|child| !matches!(child.kind(), "(" | ")" | "[" | "]" | "," | "|"))
+        .collect()
+}
+
 /// Whether a name in pattern position names an alternative rather than binding.
 fn is_variant_name(node: Node<'_>, source: &[u8]) -> bool {
     variant_name(node, source).starts_with(|first: char| first.is_ascii_uppercase())
@@ -221,7 +253,7 @@ fn peel_adapters<'a>(mut node: Node<'a>, source: &'a [u8]) -> Node<'a> {
     loop {
         node = unwrap_noise(node);
         match as_method_call(node, source) {
-            Some(call) if IDENTITY_ADAPTERS.contains(&call.name) && call.arguments.is_empty() => {
+            Some(call) if is_receiver_noise(call.name) && call.arguments.is_empty() => {
                 node = call.receiver;
             }
             _ => return node,
@@ -287,8 +319,12 @@ impl<'a> Normalizer<'a> {
                     parts: children.map(|child| self.bind_pattern(child)).collect(),
                 }
             }
+            // A discarded element is still an element. `_` is anonymous in the
+            // grammar, so collecting only the named children dropped it and made
+            // `(key, _)` and `(_, value)` the same pattern — which is why
+            // `BTreeMap::keys` and `BTreeMap::values` derived to one form.
             "tuple_pattern" | "slice_pattern" => Pattern::Tuple(
-                named_children(node)
+                all_pattern_children(node)
                     .into_iter()
                     .map(|child| self.bind_pattern(child))
                     .collect(),
@@ -371,6 +407,8 @@ impl<'a> Normalizer<'a> {
             1
         } else if RETAIN_METHODS.contains(&call.name) {
             2
+        } else if SIFT_METHODS.contains(&call.name) {
+            3
         } else {
             return None;
         };
@@ -406,6 +444,11 @@ impl<'a> Normalizer<'a> {
         let (sequence, item, body) = (Box::new(sequence), Box::new(item), Box::new(body));
         Some(match kind {
             0 => Form::Traverse {
+                sequence,
+                item,
+                body,
+            },
+            3 => Form::Sift {
                 sequence,
                 item,
                 body,
@@ -753,7 +796,9 @@ impl<'a> Normalizer<'a> {
         }
 
         if let Some(call) = as_method_call(node, self.source) {
-            if IDENTITY_ADAPTERS.contains(&call.name) && call.arguments.is_empty() {
+            // A sequence adapter says nothing even standing alone; a value
+            // conversion standing alone is the value being produced.
+            if SEQUENCE_ADAPTERS.contains(&call.name) && call.arguments.is_empty() {
                 let receiver = peel_adapters(call.receiver, self.source);
                 return self.expression(receiver);
             }

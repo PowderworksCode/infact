@@ -220,12 +220,29 @@ fn delegation_target(form: &Form) -> Option<&str> {
 fn describes_work(form: &Form) -> bool {
     match form {
         Form::Traverse { .. }
+        | Form::Sift { .. }
         | Form::Transform { .. }
         | Form::Retain { .. }
         | Form::Accumulate { .. }
         | Form::Collect { .. } => true,
         _ => form.children().into_iter().any(describes_work),
     }
+}
+
+/// The type a name refers to, with `Self` read as the type it stands for.
+///
+/// `Self` is not a type name: it means whichever type the surrounding `impl` is
+/// for. Taken literally it matches every `impl Self` in the library, so
+/// `Arc::from_raw` — whose body is `Self::from_raw_in(..)` — was deriving the
+/// behavior of `Vec::from_iter_exact`, and fifty-four other callables were
+/// linked to implementations belonging to unrelated types. Where the enclosing
+/// type is unknown, there is no answer, and none is better than an arbitrary
+/// one.
+fn resolve_self<'a>(name: &'a str, container: Option<&'a str>) -> Option<&'a str> {
+    if name == "Self" {
+        return container;
+    }
+    Some(name)
 }
 
 /// The type a form does nothing but construct.
@@ -244,6 +261,9 @@ fn constructed_type(form: &Form) -> Option<&str> {
 }
 
 /// Methods that define what a type is, rather than merely optimizing it.
+///
+/// A type that implements none of these is not a lazy adaptor, and there is
+/// nothing to follow it into.
 ///
 /// An iterator's `next` is its whole contract; its `fold` and `size_hint` are
 /// specializations of that contract. These are the language's own trait
@@ -273,7 +293,21 @@ fn principal_method<'a>(
             // caller never asked for.
             let principal = PRINCIPAL_METHODS.contains(&function.name.as_str());
             let works = describes_work(&form);
-            (principal || works).then_some(((principal, works, form.size()), function))
+            // `next` is the contract; `next_back` and the rest are
+            // specializations of it. Ranking by size alone let `next_back` win
+            // whenever `next` was a one-line delegation, which is exactly when
+            // `next` is the method worth following.
+            let standing = PRINCIPAL_METHODS
+                .iter()
+                .position(|candidate| *candidate == function.name)
+                .map_or(0, |rank| PRINCIPAL_METHODS.len() - rank);
+            // Only a method the language requires can stand for a type's
+            // behavior. Admitting any function that merely does work meant a
+            // type with no principal method at all — `Arc`, `HashMap` — handed
+            // back whichever of its methods happened to be largest, so
+            // `Arc::from_raw` derived the behavior of an unrelated function.
+            // A type with no contract method has no implementation to follow.
+            principal.then_some(((standing, works, form.size()), function))
         })
         .max_by_key(|(rank, _)| *rank)
         .map(|(_, function)| function)
@@ -366,6 +400,7 @@ fn derive_from(
             .and_then(|target| resolve(target, current.container.as_deref(), Some(current)))
             .or_else(|| {
                 let built = constructed_type(&form)?;
+                let built = resolve_self(built, current.container.as_deref())?;
                 principal_method(functions, built)
             });
         let Some(next) = next else {
@@ -388,6 +423,7 @@ fn derive_from(
     // something, the type it constructs is where to look.
     if !describes_work(&form)
         && let Some(constructed) = constructed_type(&form)
+        && let Some(constructed) = resolve_self(constructed, current.container.as_deref())
         && let Some(implementing) = principal_method(functions, constructed)
     {
         form = normalize(implementing)?;

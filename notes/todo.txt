@@ -213,3 +213,240 @@ WATCH FOR:
 VERIFIED GREEN on 08-02: entl 6 MIR tests + full workspace; infact workspace,
 clippy clean, straitjacket policy clean over 8 effects files; straitjacket 68
 tests, clippy clean, own policy clean over 39 files.
+
+
+## Behavior derivation — the algebra, decisions, and candidate sets
+
+State on 08-02: WORKING AND TESTED, NOTHING COMMITTED. Separate thread from the
+allocation work above; the two touch different crates and do not conflict.
+
+The question was whether a library's behavior can be recognized in code that
+reimplements it, for any library, without running anything. It can. `find` now
+matches a hand-written loop, derived from std's source alone — no execution
+anywhere in the pipeline, and rustc's own inliner and LLVM both fail to relate
+those two, so this is not something a compiler was going to hand us.
+
+### What was measured, so nobody re-derives it
+
+Three corpora, all reproducible (commands at the bottom):
+
+  std behaviors        290 -> 483    (a peak of 1,590 was mostly garbage; see below)
+  clippy recall        0/201 -> 14/201, and 22 of 22 reported are on-target
+  dependency corpus    34 -> 1,035 findings over 494 crates
+  undecided matches    76 -> 64
+
+The behavior count going DOWN from 1,590 to 483 was the point, not a loss. The
+permissive gate admitted opaque `match` trees and `Arc`/`HashMap` methods
+resolved to unrelated functions; removing them cost no recall on either corpus.
+
+### The one idea
+
+Each law is an equivalence that holds in the LANGUAGE, not in any library, so
+one set serves every library there is. In crates/infact-normalize/src/simplify.rs:
+
+  unfolding       a name bound to a body is that body
+  traversal       a fold whose accumulator is unused is a traversal
+  escape          breaking out of a fold is returning from a loop
+  recovery        asking a fold for the value it broke with is that return
+  generalization  a name nothing in the form binds is a hole
+  fusion          mapping what was filtered is one pass, not two
+
+These five unlocked NINE std methods at once — find, find_map, try_find, any,
+all, position, for_each, try_for_each, partition — because all of them are
+written with try_fold + ControlFlow. That is the evidence that the approach is
+about the language and not about `find`.
+
+Matching gained one rule of the same kind: a hole APPLIED to a bound name
+matches any expression over that name (Miller pattern unification). That is
+what lets a library's `predicate(item)` match a caller's `item == target`.
+
+### The recurring bug, which is the important part
+
+Eight distinct bugs this session were ONE pattern: a distinction erased in
+normalization. Each produced hundreds to thousands of confidently wrong
+findings, and none was visible in the output.
+
+  true / ()                 both were Form::Literal. 1,390 false matches.
+  map / filter_map          one TRANSFORM_METHODS list. map cannot drop.
+  next / next_back          ranked by size, so the reverse iterator won.
+  e.into() / e              stripped as noise. into_ok became into_err.
+  Self                      read as a type name. 55 behaviors from non-bodies.
+  (k, _) / (_, v)           `_` is anonymous, so the position was dropped.
+                            BTreeMap::keys and ::values were one behavior.
+  arm order                 `match` survived as syntax, so order was behavior.
+  filename collisions       {package}-{leaf}.json. 23% of every pack overwritten.
+
+FOUR of these were found by accident. The last four were found on purpose, by
+crates/infact-rust-behaviors/tests/collisions.rs, which asserts that distinct
+callables derive distinct forms. RUN THAT FIRST after any normalizer change.
+It is the cheapest bug detector in the project.
+
+### Next, in order
+
+1. THE REMAINING 11 SAME-TYPE COLLISIONS. Run the partition script (below) over
+   a fresh std pack. These are pairs no type information can ever separate,
+   because the candidates share a receiver:
+
+     BTreeSet::is_subset / is_superset      <- OPPOSITES
+     Tcp::peer_addr / socket_addr           <- OPPOSITES
+     FileDesc::seek / tell
+     Iterator::for_each / try_for_each      <- one short-circuits
+     BinaryHeap::clear / drain              <- delegation, probably intended
+     Box::new_uninit_in / new_zeroed_in / clone_from_ref_in
+     Duration::from_secs_f32 / f64
+     BTreeMap::keys / into_keys, values / into_values
+     FilterMap::new / Iterator::filter_map / find_map   <- see item 3
+
+   Do these BEFORE MIR. MIR narrows by type, so it will silently absorb every
+   one of them while looking authoritative. That is the whole reason the
+   collision test partitions same-type from cross-type.
+
+2. MIR FOR THE 54 TYPE-AMBIGUOUS MATCHES. Decision taken 08-02: projects must
+   compile, and we accept the nightly pin. Entry alone is 41 of the 54 —
+   std::Entry vs alloc::Entry, identical behavior, different type. The schema
+   already exists: entl-semantics has TypeAt { span, type_ref }, and
+   entl-rust-mir already emits against it.
+
+     a. record the span of the receiver expression that decides the choice
+     b. run the driver over the SCANNED project (dependencies still derive from
+        registry source with no build — that property is worth keeping)
+     c. join candidates x TypeAt -> one API; report an unresolved join as
+        unresolved rather than guessing
+     d. make it required, failing loudly
+
+   LibraryBehaviorMatch already carries `alternatives`, so this narrows an
+   honest set rather than replacing a guess. Keep it that way.
+
+3. LAZY-ADAPTOR DERIVATION. Phase 0 is DONE and the premise holds. A lazy
+   adaptor's behavior derived from `next` is ONE-STEP semantics: FilterMap::next
+   delegates to find_map, so what is stored under `filter_map` IS find_map. The
+   lift is one rewrite — a terminal search is the lazy operation with a stop in
+   it, so drop the stop:
+
+     (do (traverse s x (select SCRUT (None) => (lit) (Some p) => (return (variant Some p)))) (variant None))
+       -> Sift(s, x, SCRUT)
+     (do (traverse s x (branch COND (return (variant Some x)))) (variant None))
+       -> Retain(s, x, COND)
+
+   Verified by hand that `(sift f0 v1 (call f1 v1))` then matches BOTH
+   `.filter_map(f)` and the fused `.filter(p).map(f)`.
+
+   License it only on the ONE branch in derivation.rs where a callable merely
+   constructs a type and we follow into its principal method. That branch is now
+   exactly the lazy-adaptor path — the `principal.then_some(..)` fix removed
+   Arc and HashMap from it, so it needs no further guarding against them.
+
+   Guard it against STATEFUL adaptors, failing closed: refuse when `next`
+   mutates self fields, touches more than one sequence, or loops. Flatten,
+   Peekable and Chunks must refuse; they do not derive today, so refusing costs
+   nothing and admitting them would be undetectable downstream.
+
+   Worth ~63 clippy points (manual_filter_map 29, manual_find_map 30,
+   filter_map_next 4) plus flatten/take_while/zip, which do not derive at all.
+
+4. THE 1,332 "no implementation was found" CALLABLES. A third of std, never
+   looked at. `infact behavior library --explain` reports the tally. Measure
+   before guessing — see the warning below.
+
+### What NOT to spend time on
+
+  Vec::retain (38 clippy points), str::strip_prefix, str::split_once. std's
+  implementations are optimizer-shaped — BackshiftOnDrop with raw pointers, or
+  the work lives in Pattern/Searcher trait impls rather than the named callable.
+  Confirmed three ways earlier: the source does not resemble user code, MIR will
+  not inline try_fold, LLVM unrolls the two forms differently. These need a
+  different mechanism, not more laws.
+
+  needless_range_loop, manual_while_let_some. Real clippy lints, but not "you
+  reimplemented a library function". Chasing them makes us a worse clippy
+  instead of the thing that works on any dependency.
+
+  A table of adaptor name -> operation. It would work and it is exactly the
+  per-library knowledge the design exists to avoid.
+
+### A warning about predictions
+
+I mispredicted the blocker FOUR times in a row, and each time the corpus said
+something different from what the reasoning said:
+
+  `if let` was going to unlock find_map/filter_map/flatten. It unlocked none —
+  those tests are method CHAINS, and Iterator::flatten is a FlattenCompat state
+  machine that does not derive at all.
+  Fusion was going to unlock the chains. It moved clippy by ZERO, because of the
+  one-step semantics in item 3.
+
+The laws have been right every time; the model of what they would REACH has not.
+Measure a hypothesis on one case before building for it. Phase 0 above is what
+that looks like and it took one command.
+
+Also: at one point the scoreboard read 24/201 and it was FAKE — `is_none_or`
+noise was overlapping manual_flatten's annotations, and the metric credited any
+finding whose span covered an annotated line. It now requires the reported API
+to be what the lint asks for. Do not loosen that.
+
+### Reproducing the measurements on the new machine
+
+Everything below lived in a scratch directory and is NOT in the repo. Recreate
+it or the numbers above cannot be checked.
+
+  STD PACK (the input to everything else):
+    L=~/.rustup/toolchains/1.95.0-aarch64-apple-darwin/lib/rustlib/src/rust/library
+    for c in core alloc std; do
+      infact behavior library $L/$c --package $c --version 1.95.0 \
+        --parser-path <entl>/parser-packs --output <pack> --allow-unread
+    done
+  Use the 1.95.0 STABLE source. The nightly-2026-07-18 library source uses
+  syntax the pinned tree-sitter-rust cannot read and yields ~950 callables from
+  core instead of ~1,670, silently. `--allow-unread` is required either way.
+  `--explain` prints why callables were skipped.
+
+  DEPENDENCY CORPUS: 494 crates, the transitive deps of the three repos, read
+  straight from ~/.cargo/registry/src/*/. A run takes about 8 minutes on the
+  old machine. The package list was `<pkg> <version>` pairs, one per line.
+
+  CLIPPY SCOREBOARD: 13 ui tests from rust-clippy with their `//~^` annotations
+  intact, 201 annotated positives. THE HARNESS IS NOW IN tools/, with the list
+  of which clippy files to fetch in tools/README.md. The corpus is not vendored.
+
+  COLLISION PARTITION: tools/pack-collisions.py. Groups a pack by form and
+  splits on whether the colliding callables share a container — same container
+  means types can never help. This is the check item 1 depends on. It should
+  probably become a CLI subcommand rather than a script.
+
+### Transfer
+
+  infact   EVERYTHING BELOW IS UNCOMMITTED.
+           crates/infact-normalize/     Select, Sift, Constant, holes(), arm
+                                        pairing, abstraction matching, simplify.rs
+           crates/infact-rust-normalize/ match, if let, macro names, tuple
+                                        positions, SEQUENCE_ADAPTERS split
+           crates/infact-rust-behaviors/ principal ranking, resolve_self,
+                                        candidate sets, delegation ordering,
+                                        skip tallies, behavior_file_name
+           crates/infact-core/          LibraryBehaviorMatch::alternatives
+           crates/infact-cli/           behavior show, --explain, candidate output
+           tests/                       find.rs, select.rs, collisions.rs + fixtures
+           tools/                       clippy-scoreboard.py, pack-collisions.py
+
+  entl     crates/entl-tree-sitter/src/dialect.rs is the byte-length-preserving
+           rewrite table for unstable syntax. Ten rewrites. It is why core parses
+           at all. Two invariants: never move a byte, only touch source that
+           already failed.
+
+THE NEW MACHINE NEEDS:
+  - the same three-repos-as-siblings layout as the section above
+  - rustc 1.95.0 with rust-src, for the std SOURCE (not just the toolchain)
+  - the 494-crate dep set vendored, or the corpus number is unreproducible
+
+WATCH FOR:
+  - crates/infact-normalize/src/lib.rs is 1,849 lines and OVER straitjacket's
+    file-size rule. It was 1,756 before this work. Splitting it is real work
+    that should happen before much more is added: matching (Bindings), the Form
+    definition, and Renaming are three separable things sharing one file.
+  - infact-rust-errors/ is a foreign, non-compiling crate from another thread.
+    Test with --exclude infact-rust-errors or the workspace will not build.
+  - The `--allow-unread` flag hides parse failures. A pack built with it may be
+    missing whole modules. Check the `unread:` lines.
+
+VERIFIED GREEN on 08-02: infact 39 test groups (excluding infact-rust-errors),
+entl workspace, straitjacket workspace.
