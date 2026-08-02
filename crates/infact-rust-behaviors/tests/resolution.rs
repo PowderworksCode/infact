@@ -40,12 +40,7 @@ fn derived() -> Vec<(String, String)> {
     library
         .behaviors
         .iter()
-        .map(|behavior| {
-            (
-                behavior.callable_path.clone(),
-                behavior.program.to_string(),
-            )
-        })
+        .map(|behavior| (behavior.callable_path.clone(), behavior.program.to_string()))
         .collect()
 }
 

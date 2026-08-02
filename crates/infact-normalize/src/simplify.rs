@@ -425,11 +425,14 @@ impl Form {
         let Self::Sequence(parts) = self else {
             return None;
         };
-        let [Self::Traverse {
-            sequence,
-            item,
-            body,
-        }, exhausted] = parts.as_slice()
+        let [
+            Self::Traverse {
+                sequence,
+                item,
+                body,
+            },
+            exhausted,
+        ] = parts.as_slice()
         else {
             return None;
         };
@@ -474,7 +477,9 @@ impl Form {
         {
             return true;
         }
-        self.children().iter().any(|child| child.assigns_to_a_field())
+        self.children()
+            .iter()
+            .any(|child| child.assigns_to_a_field())
     }
 
     /// How many sequences this walks. More than one is a `Flatten` or a `Zip`,
@@ -482,7 +487,10 @@ impl Form {
     fn sequences_traversed(&self) -> usize {
         let here = usize::from(matches!(
             self,
-            Self::Traverse { .. } | Self::Transform { .. } | Self::Sift { .. } | Self::Retain { .. }
+            Self::Traverse { .. }
+                | Self::Transform { .. }
+                | Self::Sift { .. }
+                | Self::Retain { .. }
         ));
         here + self
             .children()

@@ -662,7 +662,9 @@ fn collect_callables(
         };
         let body = node.child_by_field_name("body");
         let header_end = body.map_or(node.end_byte(), |body| body.start_byte());
-        let header_bytes = source.get(node.start_byte()..header_end).unwrap_or_default();
+        let header_bytes = source
+            .get(node.start_byte()..header_end)
+            .unwrap_or_default();
         let header = std::str::from_utf8(header_bytes).unwrap_or_default();
         let span = source_span(path, node)?;
         let mut syntax_calls = Vec::new();
@@ -1006,7 +1008,6 @@ fn origin_effects(callable: &Callable, callee: &str) -> Vec<Effect> {
     }
     effects.into_iter().collect()
 }
-
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct EffectRelation {

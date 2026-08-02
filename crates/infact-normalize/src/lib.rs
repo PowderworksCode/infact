@@ -925,7 +925,6 @@ impl Display for Form {
     }
 }
 
-
 /// Assigns normalized roles to names as a language normalizer walks a body.
 ///
 /// A name bound by the code becomes a local, numbered by binding order.
@@ -1035,7 +1034,11 @@ mod tests {
             vec![0..1, 2..3],
             "both traversals are the behavior, and the statement between them is not"
         );
-        assert_eq!(body.locate(&traverse()), Some(0..1), "locate stays first-only");
+        assert_eq!(
+            body.locate(&traverse()),
+            Some(0..1),
+            "locate stays first-only"
+        );
     }
 
     /// Matches do not overlap, or a behavior spread over several statements
