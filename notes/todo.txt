@@ -172,12 +172,34 @@ part 1 alone produces.
     `effect-barrier` and `unknown-barrier` both ship working and inert. Nothing
     exercises them outside tests.
 
-[ ] infact-normalize/src/lib.rs is OVER the file-size limit
-    1756 lines against straitjacket's 1500. It is the one finding standing
-    between infact and a clean policy run; entl and straitjacket are both
-    clean. This is the supercompilation work, and `simplify.rs` looks like the
-    extraction that resolves it — finishing that split closes the finding
-    without anyone having to think about the rule.
+[x] infact-normalize/src/lib.rs is OVER the file-size limit   -- DONE 08-02
+    Split along the boundary this note named: matching (`Bindings` and its
+    helpers) to matching.rs, `Renaming` to renaming.rs. 1,901 -> 1,100, and
+    INFACT IS NOW CLEAN UNDER POLICY — `ok, no findings in 115 files`, the
+    first time. The three repos are all clean together.
+
+    The split tightened the boundary rather than only moving lines: lib.rs was
+    building `Bindings` by struct literal and so needed three private fields;
+    it now calls `Bindings::with_fusion`, and only `form`, `follow`,
+    `follow_recording` and `Renaming::form` are crate-visible at all.
+
+    PROVED BEHAVIOR-NEUTRAL, which is the only claim worth making about a
+    move in this crate: re-derived both packs and diffed them against the
+    pre-split ones. All 594 behavior files BYTE-IDENTICAL, recall 26/201 and
+    collisions 9 unchanged.
+
+    The file is long because ~25 `Form` variants get enumerated in five places,
+    and that is the design working rather than sloppiness. Considered and
+    REJECTED: collapsing `Renaming::form` (203 lines) into `map_children`
+    (151), which really are the same walk. It needs a `map_children_mut` and
+    saves ~130 lines, but leaves a catch-all arm, and a future variant carrying
+    a `Pattern` would fall into it, get its children renamed, and have its
+    BINDER SILENTLY NOT RENAMED. That is this codebase's signature bug — a
+    distinction erased in normalization, invisible downstream — and
+    collisions.rs would not catch it, because it only tests what already
+    exists. 130 lines is not worth a fresh instance of it.
+    `Bindings::structural` (278) is not reducible either: it matches on
+    (subject, pattern) PAIRS and already groups the sequence variants with `|`.
 
 ## Elsewhere — findings about THESE crates recorded in entl's note
 
@@ -727,12 +749,12 @@ THE NEW MACHINE NEEDS:
   - the 494-crate dep set vendored, or the corpus number is unreproducible
 
 WATCH FOR:
-  - crates/infact-normalize/src/lib.rs is 1,849 lines and OVER straitjacket's
-    file-size rule. It was 1,756 before this work. Splitting it is real work
-    that should happen before much more is added: matching (Bindings), the Form
-    definition, and Renaming are three separable things sharing one file.
-  - infact-rust-errors/ is a foreign, non-compiling crate from another thread.
-    Test with --exclude infact-rust-errors or the workspace will not build.
+  - crates/infact-normalize/src/lib.rs was 1,849 lines and over straitjacket's
+    file-size rule. SPLIT on 08-02 into matching.rs and renaming.rs; lib.rs is
+    1,100 and the repo is clean. The three-way boundary this warning named was
+    the right one.
+  - infact-rust-errors/ compiles and is part of the workspace. The `--exclude
+    infact-rust-errors` this note used to recommend is no longer needed.
   - The `--allow-unread` flag hides parse failures. A pack built with it may be
     missing whole modules. Check the `unread:` lines.
 
