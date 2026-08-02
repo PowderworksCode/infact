@@ -1,15 +1,17 @@
 //! The wire spelling of every fact enum.
 //!
-//! `serde(rename_all)` and `strum(serialize_all)` state one rule twice, and
-//! the strings below are what a consumer reads. These are the spellings the
-//! hand-written `as_str` arms produced before the mapping became a derive.
+//! `serde(rename_all)` decides what a consumer actually reads, so these are
+//! the strings that must not move. They are the spellings the hand-written
+//! `as_str` arms produced before that mapping became a derive.
+//!
+//! Three of these also expose `as_str`, which straitjacket prints from
+//! (`rules/error_discard.rs`, `config.rs`), so for those the two spellings
+//! must additionally agree.
 
 use infact_core::{Certainty, Containment, DiscardForm, Effect, Reach};
 
-/// Both spellings must agree, or a fact prints one way and serializes another.
-fn agrees<T: serde::Serialize + Copy>(value: T, spelling: &str, as_str: fn(T) -> &'static str) {
-    assert_eq!(as_str(value), spelling);
-    let json = serde_json::to_string(&value).expect("serializing a fact enum");
+fn serializes<T: serde::Serialize>(value: &T, spelling: &str) {
+    let json = serde_json::to_string(value).expect("serializing a fact enum");
     assert_eq!(json, format!("{spelling:?}"));
 }
 
@@ -25,7 +27,8 @@ fn discard_form_spellings() {
         (DiscardForm::CauseErased, "cause-erased"),
         (DiscardForm::Panic, "panic"),
     ] {
-        agrees(value, spelling, DiscardForm::as_str);
+        serializes(&value, spelling);
+        assert_eq!(value.as_str(), spelling);
     }
 }
 
@@ -36,7 +39,8 @@ fn containment_spellings() {
         (Containment::Optional, "optional"),
         (Containment::Infallible, "infallible"),
     ] {
-        agrees(value, spelling, Containment::as_str);
+        serializes(&value, spelling);
+        assert_eq!(value.as_str(), spelling);
     }
 }
 
@@ -46,7 +50,7 @@ fn certainty_spellings() {
         (Certainty::Certain, "certain"),
         (Certainty::Possible, "possible"),
     ] {
-        agrees(value, spelling, Certainty::as_str);
+        serializes(&value, spelling);
     }
 }
 
@@ -58,7 +62,7 @@ fn reach_spellings() {
         (Reach::Sealed, "sealed"),
         (Reach::Unknown, "unknown"),
     ] {
-        agrees(value, spelling, Reach::as_str);
+        serializes(&value, spelling);
     }
 }
 
@@ -77,6 +81,7 @@ fn effect_spellings() {
         (Effect::Time, "time"),
         (Effect::Unsafe, "unsafe"),
     ] {
-        agrees(value, spelling, Effect::as_str);
+        serializes(&value, spelling);
+        assert_eq!(value.as_str(), spelling);
     }
 }
