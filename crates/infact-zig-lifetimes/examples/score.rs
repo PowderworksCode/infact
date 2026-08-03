@@ -19,8 +19,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use entl_tree_sitter::{LoadedParser, ParserPack, ParserRuntime};
-use entl_zig_observe::fields;
-use infact_zig_lifetimes::{OwnershipClass, RULES, classify};
+use entl_zig_observe::{FieldAssignment, MethodCall, assignments, fields, method_calls};
+use infact_zig_lifetimes::{
+    EVIDENCE_RULES, FieldEvidence, OwnershipClass, RULES, classify, classify_with_evidence,
+};
 
 /// How many held-out buckets the per-rule stability check uses.
 const FOLDS: usize = 5;
@@ -82,6 +84,9 @@ fn main() {
 
     // (file, container, field) -> observed field
     let mut observed = BTreeMap::new();
+    // file -> everything that file says about its own fields elsewhere
+    let mut file_assignments: BTreeMap<String, Vec<FieldAssignment>> = BTreeMap::new();
+    let mut file_calls: BTreeMap<String, Vec<MethodCall>> = BTreeMap::new();
     let mut parsed_files = 0usize;
     for file in &files {
         let path = root.join(file);
@@ -98,6 +103,8 @@ fn main() {
                 field,
             );
         }
+        file_assignments.insert((*file).clone(), assignments(&tree));
+        file_calls.insert((*file).clone(), method_calls(&tree));
     }
 
     let mut matched = 0usize;
@@ -110,6 +117,9 @@ fn main() {
     // a rule carried by one subsystem shows up as a fold it fails on.
     let mut folds: BTreeMap<&'static str, [(usize, usize); FOLDS]> = BTreeMap::new();
     let mut leaks = 0usize;
+    // Answers that name an owning class for a field that is not owning, or the
+    // reverse. Only evidence rules can produce these.
+    let mut double_frees = 0usize;
     let mut unmatched: Vec<&Row> = Vec::new();
 
     for row in &rows {
@@ -120,21 +130,54 @@ fn main() {
         };
         matched += 1;
         tally.entry(row.class.label()).or_default().0 += 1;
-        let Some(found) = classify(field) else {
-            continue;
+        // The safe list first; evidence only for what it declines.
+        let found = match classify(field) {
+            Some(found) => found,
+            None => {
+                let empty_assignments: Vec<FieldAssignment> = Vec::new();
+                let empty_calls: Vec<MethodCall> = Vec::new();
+                let mine: Vec<FieldAssignment> = file_assignments
+                    .get(&row.file)
+                    .unwrap_or(&empty_assignments)
+                    .iter()
+                    .filter(|assignment| assignment.field == field.name)
+                    .cloned()
+                    .collect();
+                let calls: Vec<MethodCall> = file_calls
+                    .get(&row.file)
+                    .unwrap_or(&empty_calls)
+                    .iter()
+                    .filter(|call| call.receiver_tail == field.name)
+                    .cloned()
+                    .collect();
+                let evidence = FieldEvidence {
+                    assignments: &mine,
+                    calls: &calls,
+                };
+                match classify_with_evidence(field, evidence) {
+                    Some(found) => found,
+                    None => continue,
+                }
+            }
         };
         fired += 1;
         tally.entry(found.class.label()).or_default().1 += 1;
-        let rule = per_rule.entry(found.rule.id()).or_default();
+        let rule = per_rule.entry(found.basis.id()).or_default();
         rule.0 += 1;
-        let bucket = &mut folds.entry(found.rule.id()).or_default()[fold(&row.file)];
+        let bucket = &mut folds.entry(found.basis.id()).or_default()[fold(&row.file)];
         bucket.0 += 1;
         if found.class == row.class {
             correct += 1;
             rule.1 += 1;
             bucket.1 += 1;
             tally.entry(row.class.label()).or_default().2 += 1;
+        } else if found.basis.can_double_free() {
+            // Named an owning class and was wrong: Rust is handed memory to
+            // free that something else frees. This is the dangerous direction,
+            // and only an evidence rule can reach it.
+            double_frees += 1;
         } else if row.class.is_owning() {
+            // Named a non-owning class for a field that owns: a leak.
             leaks += 1;
         }
     }
@@ -201,22 +244,33 @@ fn main() {
     );
     println!(
         "wrong but both classes non-owning : {}",
-        fired - correct - leaks
+        fired - correct - leaks - double_frees
     );
-    println!("  a double-free needs an OWNED or SHARED answer, which no rule can produce.");
+    println!("wrong on an owning-class answer   : {double_frees} -- DOUBLE-FREE risk, not a leak");
+    println!("  only an evidence rule can produce one; the declaration list cannot.");
 
     println!("\n-- per rule --");
     println!(
         "{:<18}{:>8}{:>10}{:>12}   per fold",
         "rule", "fired", "precision", "worst fold"
     );
-    for rule in RULES {
-        let (n, ok) = per_rule.get(rule.id()).copied().unwrap_or((0, 0));
+    let ids: Vec<(&'static str, bool)> = RULES
+        .iter()
+        .map(|rule| (rule.id(), false))
+        .chain(
+            EVIDENCE_RULES
+                .iter()
+                .map(|rule| (rule.id(), rule.can_double_free())),
+        )
+        .collect();
+    for (id, risky) in ids {
+        let rule_id = id;
+        let (n, ok) = per_rule.get(rule_id).copied().unwrap_or((0, 0));
         if n == 0 {
-            println!("{:<18}{n:>8}{:>10}", rule.id(), "-");
+            println!("{rule_id:<18}{n:>8}{:>10}", "-");
             continue;
         }
-        let buckets = folds.get(rule.id()).copied().unwrap_or_default();
+        let buckets = folds.get(rule_id).copied().unwrap_or_default();
         let mut worst = f64::NAN;
         let mut shown = Vec::new();
         for (fired, correct) in buckets {
@@ -231,11 +285,12 @@ fn main() {
             }
         }
         println!(
-            "{:<18}{n:>8}{:>9.1}%{:>11.0}%   {}",
-            rule.id(),
+            "{:<18}{n:>8}{:>9.1}%{:>11.0}%   {} {}",
+            rule_id,
             ok as f64 / n as f64 * 100.0,
             worst,
-            shown.join(" ")
+            shown.join(" "),
+            if risky { "  <- can double-free" } else { "" }
         );
     }
 
