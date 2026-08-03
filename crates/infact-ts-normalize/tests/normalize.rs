@@ -392,3 +392,155 @@ fn a_backwards_search_is_not_a_forwards_one() {
         );
     }
 }
+
+/// A step's span has to line up with the step, not with the source statement
+/// that happened to sit in that position.
+///
+/// Normalization drops statements outright — a guard that only throws, a
+/// binding nothing reads — so counting source statements separately would slide
+/// every later span by one and report a match at the wrong line.
+#[test]
+fn spans_stay_with_the_steps_that_survive_normalization() {
+    let file = parse(
+        "typescript",
+        "caller.ts",
+        "export function f(xs: number[], p: unknown) {\n\
+         \x20 if (!p) { throw new Error('no'); }\n\
+         \x20 const unused = 1;\n\
+         \x20 const total = xs.length;\n\
+         \x20 return total;\n\
+         }",
+    );
+    let function = infact_ts_normalize::normalize_file(&file)
+        .into_iter()
+        .find(|found| found.name == "f")
+        .expect("f");
+    let Form::Sequence(steps) = &function.form else {
+        panic!("expected a sequence, got {}", function.form);
+    };
+    assert_eq!(
+        steps.len(),
+        function.statements.len(),
+        "one span per surviving step: {} steps, {} spans",
+        steps.len(),
+        function.statements.len()
+    );
+    // the throw guard and the unused binding are gone, so the first surviving
+    // step is the `const total` on line 4 — not line 2
+    assert_eq!(
+        function.statements.first().map(|span| span.start_line),
+        Some(4),
+        "the first step is the first statement that survived, {:?}",
+        function.statements
+    );
+}
+
+/// Reversing and then searching is searching backwards.
+#[test]
+fn reversing_before_a_search_is_a_backwards_search() {
+    let reversed = typescript(
+        "export function f(xs: string[], t: string) { return [...xs].reverse().find(x => x === t); }",
+        "f",
+    );
+    let backwards = typescript(
+        "export function f(xs: string[], t: string) { return xs.filter(x => x === t).pop(); }",
+        "f",
+    );
+    assert_eq!(
+        reversed, backwards,
+        "`reverse().find(p)` asks what `filter(p).pop()` asks:\n  {reversed}\n  {backwards}"
+    );
+    assert!(
+        reversed.to_string().contains("traverse-back"),
+        "and it walks backwards: {reversed}"
+    );
+}
+
+/// A behavior nested deep inside a function is reported where it is written.
+///
+/// Saying which function contains a match is not much help when the function is
+/// four hundred lines, and matching against one enormous form is both slower and
+/// less precise than matching against the statement that carries the behavior.
+#[test]
+fn every_statement_carries_its_own_form_and_span() {
+    let file = parse(
+        "typescript",
+        "caller.ts",
+        "export function outer(xs: string[], t: string) {\n\
+         \x20 const ready = true;\n\
+         \x20 if (ready) {\n\
+         \x20   for (const x of xs) {\n\
+         \x20     if (x === t) { return x; }\n\
+         \x20   }\n\
+         \x20 }\n\
+         \x20 return undefined;\n\
+         }",
+    );
+    let function = infact_ts_normalize::normalize_file(&file)
+        .into_iter()
+        .find(|found| found.name == "outer")
+        .expect("outer");
+
+    // the walk is on line 4, three levels in, and that is where it is reported
+    let walk = function
+        .located
+        .iter()
+        .find(|located| located.form.simplify().to_string().contains("traverse"))
+        .expect("the traversal was located");
+    assert_eq!(
+        walk.span.start_line,
+        4,
+        "the walk is reported at its own line, not the function's: {:?}",
+        function
+            .located
+            .iter()
+            .map(|l| (l.span.start_line, l.depth))
+            .collect::<Vec<_>>()
+    );
+    assert!(walk.depth > 0, "and it knows it is nested");
+    assert!(
+        walk.form.size() < function.form.size(),
+        "a statement's form is smaller than the whole function's"
+    );
+}
+
+/// A counted `while` walks a sequence, and reads as the same walk a `for` does.
+///
+/// `while (++index < length)` is how a great deal of JavaScript iterates —
+/// lodash writes 45 of its files that way — with the step folded into the test
+/// and the initializer in front of the loop.
+#[test]
+fn a_counted_while_is_the_same_walk_as_a_counted_for() {
+    let while_written = javascript(
+        "function f(xs, p) {
+           var index = -1, length = xs.length;
+           while (++index < length) { if (p(xs[index])) { return true; } }
+           return false;
+         }",
+        "f",
+    );
+    let for_written = javascript(
+        "function f(xs, p) {
+           for (var k = 0; k < xs.length; k++) { if (p(xs[k])) { return true; } }
+           return false;
+         }",
+        "f",
+    );
+    assert_eq!(
+        while_written, for_written,
+        "the step being in the test does not change what is walked:\n  {while_written}\n  {for_written}"
+    );
+}
+
+/// A `while` that counts nothing is still not a walk.
+#[test]
+fn an_uncounted_while_is_left_alone() {
+    let form = javascript(
+        "function f(queue) { while (queue.length) { queue.pop(); } return queue; }",
+        "f",
+    );
+    assert!(
+        !form.to_string().contains("traverse"),
+        "a loop with no counter describes no traversal: {form}"
+    );
+}

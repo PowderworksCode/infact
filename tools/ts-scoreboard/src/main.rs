@@ -21,7 +21,10 @@ use serde::Deserialize;
 /// `xs.filter(p)[0]` is a search worth reporting when `xs` is an array and
 /// nothing of the kind when it is a `Set` or someone's own type that spells a
 /// method `filter`. The text is identical; only the type differs.
-fn observed_receivers(cases: &[Case], typescript: Option<PathBuf>) -> BTreeMap<String, Vec<String>> {
+fn observed_receivers(
+    cases: &[Case],
+    typescript: Option<PathBuf>,
+) -> BTreeMap<String, Vec<String>> {
     let root = std::env::temp_dir().join("ts-scoreboard-corpus");
     if let Err(error) = std::fs::remove_dir_all(&root)
         && error.kind() != std::io::ErrorKind::NotFound
@@ -35,8 +38,11 @@ fn observed_receivers(cases: &[Case], typescript: Option<PathBuf>) -> BTreeMap<S
     )
     .expect("tsconfig");
     for (index, case) in cases.iter().enumerate() {
-        std::fs::write(root.join("src").join(format!("case_{index}.ts")), &case.code)
-            .expect("case file");
+        std::fs::write(
+            root.join("src").join(format!("case_{index}.ts")),
+            &case.code,
+        )
+        .expect("case file");
     }
     let options = entl_ts_observe::Options {
         typescript: typescript.filter(|path| path.is_file()),
@@ -148,7 +154,10 @@ fn main() {
     let harness = {
         let discovery = ParserCatalog::discover([paths.parser_packs.clone()]);
         assert!(discovery.errors.is_empty(), "{:?}", discovery.errors);
-        Harness { catalog: discovery.catalog, runtime: ParserRuntime::new().expect("runtime") }
+        Harness {
+            catalog: discovery.catalog,
+            runtime: ParserRuntime::new().expect("runtime"),
+        }
     };
 
     // The library: every builtin SpiderMonkey self-hosts, derived here.
@@ -161,7 +170,9 @@ fn main() {
             .parse("javascript", &path.to_string_lossy(), source)
             .unwrap_or_else(|error| panic!("{error}"));
         for function in normalize_file(&file) {
-            if function.damaged { continue; }
+            if function.damaged {
+                continue;
+            }
             let form = function.form.simplify().canonical();
             // The same gate the Rust pipeline applies. Without it a handful of
             // near-empty engine helpers match almost anything: on this corpus
@@ -188,7 +199,14 @@ fn main() {
     eprintln!("receiver types observed for {} case files", receivers.len());
 
     #[derive(Default)]
-    struct Tally { positives: u32, hit: u32, off_target: u32, negatives: u32, false_positive: u32, unparsed: u32 }
+    struct Tally {
+        positives: u32,
+        hit: u32,
+        off_target: u32,
+        negatives: u32,
+        false_positive: u32,
+        unparsed: u32,
+    }
     let mut by_rule: BTreeMap<String, Tally> = BTreeMap::new();
     let mut fired: Vec<(String, String)> = Vec::new();
 
@@ -240,39 +258,76 @@ fn main() {
         {
             named.clear();
         }
-        for name in &named { fired.push((case.kind.clone(), (*name).to_owned())); }
-        let on_target = named.iter().any(|name| case.apis.iter().any(|api| api == name));
+        for name in &named {
+            fired.push((case.kind.clone(), (*name).to_owned()));
+        }
+        let on_target = named
+            .iter()
+            .any(|name| case.apis.iter().any(|api| api == name));
         if case.kind == "invalid" {
             tally.positives += 1;
-            if on_target { tally.hit += 1; }
-            else if !named.is_empty() { tally.off_target += 1; }
+            if on_target {
+                tally.hit += 1;
+            } else if !named.is_empty() {
+                tally.off_target += 1;
+            }
         } else {
             tally.negatives += 1;
             // a finding on code the rule calls correct is a false positive
             if !named.is_empty() {
                 tally.false_positive += 1;
-                eprintln!("FP [{}] {:?} <- {}", case.rule, named,
-                    case.code.replace('\n', " ").trim().chars().take(88).collect::<String>());
+                eprintln!(
+                    "FP [{}] {:?} <- {}",
+                    case.rule,
+                    named,
+                    case.code
+                        .replace('\n', " ")
+                        .trim()
+                        .chars()
+                        .take(88)
+                        .collect::<String>()
+                );
             }
         }
     }
 
     println!("\n=== which behaviors fire, by case kind ===");
     let mut hist: BTreeMap<(String, String), u32> = BTreeMap::new();
-    for (kind, name) in &fired { *hist.entry((kind.clone(), name.clone())).or_default() += 1; }
+    for (kind, name) in &fired {
+        *hist.entry((kind.clone(), name.clone())).or_default() += 1;
+    }
     let mut rows: Vec<_> = hist.into_iter().collect();
     rows.sort_by_key(|((_, _), n)| std::cmp::Reverse(*n));
-    for ((kind, name), n) in rows.iter().take(14) { println!("  {kind:<8} {name:<28} {n}"); }
+    for ((kind, name), n) in rows.iter().take(14) {
+        println!("  {kind:<8} {name:<28} {n}");
+    }
 
-    println!("\n{:<38} {:>9} {:>5} {:>10} {:>9} {:>6} {:>8}",
-        "rule", "positives", "found", "off-target", "negatives", "false", "unparsed");
+    println!(
+        "\n{:<38} {:>9} {:>5} {:>10} {:>9} {:>6} {:>8}",
+        "rule", "positives", "found", "off-target", "negatives", "false", "unparsed"
+    );
     let (mut tp, mut th, mut tn, mut tf) = (0, 0, 0, 0);
     for (rule, t) in &by_rule {
-        println!("{:<38} {:>9} {:>5} {:>10} {:>9} {:>6} {:>8}",
-            rule, t.positives, t.hit, t.off_target, t.negatives, t.false_positive, t.unparsed);
-        tp += t.positives; th += t.hit; tn += t.negatives; tf += t.false_positive;
+        println!(
+            "{:<38} {:>9} {:>5} {:>10} {:>9} {:>6} {:>8}",
+            rule, t.positives, t.hit, t.off_target, t.negatives, t.false_positive, t.unparsed
+        );
+        tp += t.positives;
+        th += t.hit;
+        tn += t.negatives;
+        tf += t.false_positive;
     }
-    println!("{:<38} {:>9} {:>5} {:>10} {:>9} {:>6}", "TOTAL", tp, th, "", tn, tf);
-    if tp > 0 { println!("\nrecall  {:.1}%  ({th}/{tp})", 100.0 * f64::from(th) / f64::from(tp)); }
-    if tn > 0 { println!("false positives on annotated-correct code: {tf}/{tn}"); }
+    println!(
+        "{:<38} {:>9} {:>5} {:>10} {:>9} {:>6}",
+        "TOTAL", tp, th, "", tn, tf
+    );
+    if tp > 0 {
+        println!(
+            "\nrecall  {:.1}%  ({th}/{tp})",
+            100.0 * f64::from(th) / f64::from(tp)
+        );
+    }
+    if tn > 0 {
+        println!("false positives on annotated-correct code: {tf}/{tn}");
+    }
 }
