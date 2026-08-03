@@ -1054,3 +1054,117 @@ one.
     `infact-rust-normalize` has `StatementSpan` and the TypeScript one does not.
 
 [ ] Widen the corpus past three rule files before trusting 16.1% as the number.
+
+### Running it on a real project — pi.dev, 1,047 files, 238k lines
+
+Everything above was measured against lint fixtures. Pointing it at a real
+TypeScript monorepo changed what the open problems are. Recorded so nobody
+re-derives it.
+
+WHAT THE PROVIDER DID: 18 seconds, 1.9GB, 88,013 calls, 47,012 receiver types,
+609 gaps (0.7%), every span repository-relative. Scale was the thing least
+likely to hold and it held.
+
+WHAT NEEDED FIXING, in the order the evidence forced it:
+
+  1. PARSER SETUP, NOT MATCHING. A scan that would not finish in eleven minutes
+     was 96% tree-sitter, and 78% of that was `runtime.load` being called once
+     per file. `LoadedParser::parse` then rebuilt a `Parser`, a `WasmStore` and
+     called `set_language` on every call: a 19-byte file took 123ms and a 40KB
+     file took 210ms, so nearly all of the smaller number was setup. Fixed in
+     entl (PR #7). This was never a TypeScript problem — `parse_repository`
+     calls `parse` per file, so every analyzer paid it.
+
+     Do NOT assume matching is the bottleneck. It was 3%.
+
+  2. FOUR KINDS OF JAVASCRIPT WERE UNREADABLE. Named arrow functions (862 of
+     pi's, a quarter of its named functions), counted `while` loops (45 of
+     lodash's files), `reverse().find(p)`, and multi-declarator statements.
+     Each was found by running against real code, none by reading the code.
+
+  3. AN ANCHOR PREFILTER SKIPS 99.5% OF PAIRS. A pattern only matches a subject
+     containing every name it states outright, so `subject ⊇ pattern` on the set
+     of method names, constants, paths, variants, fields and operators is a
+     necessary condition, and it is a set lookup rather than a tree walk. On a
+     40x40 workload it removed 19,350 of 19,440 pairs at 0.001ms against
+     0.093ms. Verified sound on a corpus: 97 findings with and without.
+
+     STILL ONLY IN tools/. It belongs in infact-normalize beside `matches`, and
+     infact-rust-behaviors runs the identical `for behavior in &reportable`
+     loop, so the Rust pipeline gets the same win. Wanted first: a property test
+     asserting the prefilter never rejects a pair `contains` accepts.
+
+### The confounds, which cost more than the bugs
+
+A WORKSPACE LINKS ITS OWN PACKAGES INTO node_modules. pi has
+`node_modules/@earendil-works/pi-ai -> ../../packages/ai`. Deriving a library
+from node_modules therefore derives the project, and then reports the project
+for reimplementing itself: 795 findings, nearly all self-matches. Canonicalizing
+both sides and dropping anything that resolves back inside the project takes it
+to 5. This is not a pi quirk — every npm/pnpm/yarn workspace does it.
+
+A DELIBERATE FORK IS NOT A FINDING. `coding-agent/src/core` is a copy of
+`agent/src/harness` on purpose. Suppression has to be by LOCATION, not by file:
+fold the mirrored prefixes to one place, and a finding living entirely inside
+them counts once and drops, while a finding that also appears outside keeps its
+second location and stays. 23 findings suppressed, and `findLastIndex` — which
+appears twice inside the fork and once outside — correctly survived.
+
+### What pi actually has, and what that says about the premise
+
+  93   `error instanceof Error ? error.message : String(error)`, no helper
+       anywhere in the repository. 22 files, 41 sites at function granularity.
+       `runner.ts` writes it eight times in eight adjacent methods.
+   6   `message.content.filter(b => b.type === "text").map(b => b.text)` under
+       six different names in four packages.
+   5   a filter for tool-call content
+   3   a hand-rolled `findLastIndex`
+
+NONE of these is lint-shaped. pi runs Biome 2.3.5 with `recommended: true` and
+`--error-on-warnings` in CI, and it PASSES on every file above. Biome has no
+`findLast` rule and no `includes` rule at all. Two of the four are not
+single-file questions in principle: the error ternary is correct code at all 93
+sites, and the finding IS the count.
+
+THE ORIGINAL PREMISE DID NOT FIRE. "You hand-wrote what a library already does"
+found 5 things across 2,669 behaviors derived from pi's own dependencies, and
+zero against `yaml` alone. Applications do not reimplement a YAML parser's
+internals, and pi's dependency set is parsers and SDKs with no utility belt in
+53 packages. Speculatively adding lodash-es and remeda found one thing, and that
+one thing is `Array.prototype.some`, which the language already has.
+
+What DOES fire on a real codebase is the repository against ITSELF. That is a
+different entry point from `library-opportunity` and on this evidence the more
+valuable one.
+
+### Two thresholds, not one
+
+Big-and-repeated finds copied code. Small-and-everywhere finds a missing word in
+the project's vocabulary. One setting can only ever see one of them — ranking by
+`count x size` buried the error ternary under the compaction clones, and a
+7-node floor with the `is_comparable` gate excluded it outright, because a
+ternary over `instanceof` is neither a traversal nor a decision.
+
+The split that works: a form containing a branch, traversal, method or call is a
+candidate abstraction; a bare comparison is an idiom. Idioms are reported and
+labelled as NOT defects, because `xs.length > 0` in 73 files is how the language
+is written.
+
+Thresholds are 7 nodes / 4 files and 4 nodes / 10 files, calibrated against ONE
+repository. Moving the file cutoff from 4 to 3 changed the result set
+substantially. Treat the ranking as a hint.
+
+### Open
+
+[ ] Land the anchor prefilter in infact-normalize, with the property test.
+[ ] `infact-ts-behaviors`, so this is a command rather than tools/ts-scoreboard.
+    `infact-analysis` still calls `infact_rust_behaviors::analyze_repository`
+    unconditionally; that is where language routing goes.
+[ ] The library walk's depth cap reports "could not be read" when it means "I
+    chose not to look past depth 8". Relabel and raise it.
+[ ] Nested-match placement is the innermost STATEMENT. A behavior spanning
+    several statements inside a callback still lands on the callback. Recording
+    block-level spans would tighten it.
+[ ] Parse caching. Parsing is 89% of dependency derivation and ~50% of a project
+    scan, and it is now genuine work rather than setup. `docs/design.md` already
+    lists it; node_modules barely changes between runs.
