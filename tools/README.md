@@ -94,8 +94,18 @@ Recorded on 08-02: **25/155 positives, 4/252 false positives**, over
 four false positives need type information the checker supplies but this harness
 joins only per-file; see the note in `notes/todo.txt`.
 
-    node tools/ts-scoreboard/export.mjs        # rule tests -> cases.json
-    cargo run --manifest-path tools/ts-scoreboard/Cargo.toml
+    (cd $M/ts-lints && npm install typescript@5)   # once
+    node tools/ts-scoreboard/export.mjs            # rule tests -> cases.json
+    cargo run --manifest-path tools/ts-scoreboard/Cargo.toml --bin ts-scoreboard \
+      -- --typescript $(realpath $M/ts-lints/node_modules/typescript/lib/typescript.js)
+
+`--typescript` must be ABSOLUTE. It is handed to entl's observer script, which
+resolves it relative to ITSELF, so a relative path silently loses the checker —
+and losing the checker only shows up as two extra false positives, which reads
+like a regression in the matcher rather than a missing input.
+
+Version 5, deliberately: `npm install typescript` now installs the Go port,
+whose package has no `lib/typescript.js` and no compiler API to call.
 
 Neither the library source nor the rule tests are vendored. Both are fetched
 into `<measure>/`:
@@ -125,9 +135,11 @@ Fetch them with:
       https://raw.githubusercontent.com/sindresorhus/eslint-plugin-unicorn/main/test/prefer-array-find.js
 
 `export.mjs` parses those rule tests with the TypeScript compiler rather than by
-pattern, because they are TypeScript. It needs a `typescript` install; pass
-`--typescript <path to typescript.js>` to the scorer to pick a specific one,
-which is also what selects the checker used to observe receiver types.
+pattern, because they are TypeScript. It finds one by resolving `typescript`
+from the working directory first and from `<measure>/ts-lints` second, so an
+install beside the corpus is enough; `--typescript <path>` or `$TYPESCRIPT`
+overrides both. The same flag on the scorer selects the checker used to observe
+receiver types.
 
 Same layout as above:
 
