@@ -1339,6 +1339,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "infact-behaviors"
+version = "0.0.0"
+dependencies = [
+ "infact-normalize",
+]
+
+[[package]]
 name = "infact-catalog"
 version = "0.0.0"
 dependencies = [
@@ -1363,6 +1370,7 @@ dependencies = [
  "infact-rust-behaviors",
  "infact-rust-effects",
  "infact-rust-normalize",
+ "infact-ts-behaviors",
  "serde",
  "serde_json",
  "tempfile",
@@ -1488,6 +1496,25 @@ version = "0.0.0"
 dependencies = [
  "entl-tree-sitter",
  "infact-normalize",
+ "tree-sitter",
+]
+
+[[package]]
+name = "infact-ts-behaviors"
+version = "0.0.0"
+dependencies = [
+ "entl-codebase",
+ "entl-tree-sitter",
+ "infact-behaviors",
+ "infact-core",
+ "infact-fact-pack",
+ "infact-normalize",
+ "infact-ts-normalize",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
  "tree-sitter",
 ]
 

@@ -94,6 +94,26 @@ Recorded on 08-02: **25/155 positives, 4/252 false positives**, over
 four false positives need type information the checker supplies but this harness
 joins only per-file; see the note in `notes/todo.txt`.
 
+Re-measured on 08-03 through `infact-ts-behaviors` rather than through a copy of
+the pipeline written inside the harness: **unchanged, 25/155 and 4/252**, from
+**89 callables and 19 behaviors, 16 of them reportable**. The harness now calls
+`derive_library` and `analyze_repository`, so what it scores is what a consumer
+would get, including spans, implementation evidence and digests.
+
+`pack-collisions.py` runs over a TypeScript pack unchanged, and should be run
+over one for the same reason it is run over std:
+
+    infact behavior library <measure>/spidermonkey --language typescript \
+      --package ecmascript --version local --parser-path ../entl/parser-packs \
+      --output <measure>/packs-typescript/ecmascript --allow-unread --explain
+    python3 tools/pack-collisions.py <measure>/packs-typescript/ecmascript/behaviors
+
+Recorded 08-03: **19 distinct forms from 19 behaviors, zero collisions.**
+
+Keep TypeScript packs OUT of `measure/packs/`. `clippy-scoreboard.py` scores
+every pack with a `behaviors/` subdirectory under it, and handing Rust code a
+set of JavaScript-derived behaviors measures something nobody asked about.
+
     (cd $M/ts-lints && npm install typescript@5)   # once
     node tools/ts-scoreboard/export.mjs            # rule tests -> cases.json
     cargo run --manifest-path tools/ts-scoreboard/Cargo.toml --bin ts-scoreboard \

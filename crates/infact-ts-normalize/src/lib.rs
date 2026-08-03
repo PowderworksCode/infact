@@ -1353,6 +1353,18 @@ pub fn normalize_module(file: &ParsedFile) -> Form {
     valued(normalizer.block(root))
 }
 
+/// Normalize a file's top-level statements, keeping where each one was written.
+///
+/// The same as [`normalize_module`], with the spans a consumer needs to point at
+/// the run of statements a behavior was matched in. Without them a match on
+/// top-level code can only name the file.
+pub fn normalize_module_located(file: &ParsedFile) -> (Form, Vec<StatementSpan>) {
+    let root = file.tree.root_node();
+    let mut normalizer = Normalizer::new(&file.source);
+    let (form, spans) = normalizer.block_located(root);
+    (valued(form), spans)
+}
+
 /// Every named function, however the language spells one.
 ///
 /// `function f() {}`, a class method, and `const f = () => {}` all define a

@@ -21,6 +21,22 @@ use infact_rust_behaviors::{
 use infact_rust_effects::{RustStdFactPackRequest, build_std_fact_pack, derive_std_effects};
 use serde::Deserialize;
 
+/// Which frontend reads a library's source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum BehaviorLanguage {
+    Rust,
+    Typescript,
+}
+
+/// What every frontend hands back, so the command that writes a pack does not
+/// have to know which one produced it.
+struct DerivedAnyLibrary {
+    catalog: ExternalCatalog,
+    behaviors: Vec<DerivedLibraryBehavior>,
+    unparsed: Vec<String>,
+    skipped: std::collections::BTreeMap<String, usize>,
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "infact")]
 struct Args {
@@ -280,6 +296,13 @@ enum BehaviorCommand {
     /// Derive a whole library's behaviors from its source.
     Library {
         source_root: PathBuf,
+
+        /// Which language's frontend reads the source.
+        ///
+        /// The laws and the walk are shared; only how a function, a type and a
+        /// public name are spelled differs.
+        #[arg(long, default_value = "rust")]
+        language: BehaviorLanguage,
 
         #[arg(long)]
         package: String,
@@ -824,6 +847,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             command:
                 BehaviorCommand::Library {
                     source_root,
+                    language,
                     package,
                     version,
                     config,
@@ -842,7 +866,42 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .map(|path| resolve(&base, path)),
             );
             let parsers = parser_catalog(parser_paths)?;
-            let derived = derive_library(&source_root, &parsers, &package, &version)?;
+            let derived = match language {
+                BehaviorLanguage::Rust => {
+                    let derived = derive_library(&source_root, &parsers, &package, &version)?;
+                    DerivedAnyLibrary {
+                        catalog: derived.catalog,
+                        behaviors: derived.behaviors,
+                        unparsed: derived.unparsed,
+                        skipped: derived.skipped,
+                    }
+                }
+                BehaviorLanguage::Typescript => {
+                    let derived = infact_ts_behaviors::derive_library(
+                        &source_root,
+                        &parsers,
+                        &package,
+                        &version,
+                    )?;
+                    // A function read in part is a hole in the pack, so it is
+                    // named in the unread list as well as counted among the
+                    // skips: the count says how big the hole is and the names
+                    // say whether it is anywhere that matters.
+                    let mut unparsed = derived.unparsed;
+                    unparsed.extend(
+                        derived
+                            .damaged
+                            .iter()
+                            .map(|name| format!("{name}: the parser could not read it whole")),
+                    );
+                    DerivedAnyLibrary {
+                        catalog: derived.catalog,
+                        behaviors: derived.behaviors,
+                        unparsed,
+                        skipped: derived.skipped,
+                    }
+                }
+            };
             let (catalog, behaviors) = (&derived.catalog, &derived.behaviors);
 
             std::fs::create_dir_all(output.join("api"))?;

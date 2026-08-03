@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/infact-analysis",
+    "crates/infact-behaviors",
     "crates/infact-catalog",
     "crates/infact-core",
     "crates/infact-duplication",
@@ -11,6 +12,7 @@ members = [
     "crates/infact-normalize",
     "crates/infact-rust-normalize",
     "crates/infact-ts-normalize",
+    "crates/infact-ts-behaviors",
     "crates/infact-rust-effects",
     "crates/infact-errors",
     "crates/infact-rust-behaviors",
