@@ -23,6 +23,28 @@ use serde::{Deserialize, Serialize};
 
 pub const NORMALIZED_FORM_SCHEMA: u32 = 1;
 
+/// The deepest a form may nest and still describe an operation.
+///
+/// A behavior anywhere near this describes a subsystem rather than an
+/// operation.
+pub const MAXIMUM_FORM_DEPTH: u32 = 32;
+
+/// The smallest form worth reporting as a match.
+///
+/// Calibrated against derived behaviors and the code they are matched into.
+/// The smallest genuine behavior measured is seven nodes, while the forms that
+/// collide across unrelated code are two or three: a field accessor, a one-line
+/// delegation, a struct literal. Anything below this floor describes too little
+/// to identify an API.
+pub const MINIMUM_REPORTABLE_SIZE: u32 = 6;
+
+/// The least a behavior must name to identify an API rather than a shape.
+///
+/// Measured against the behaviors that matter: `sorted` names a container and a
+/// method, which is two. A traversal that names nothing is every library's `map`
+/// and matches everything.
+pub const MINIMUM_ANCHORS: u32 = 2;
+
 /// A name introduced by the code being normalized.
 ///
 /// Only binding order survives normalization. Which identifier the author chose
@@ -828,6 +850,83 @@ impl Form {
     pub fn matches(&self, pattern: &Self) -> bool {
         let mut bindings = Bindings::default();
         bindings.form(self, pattern)
+    }
+
+    /// Whether a form describes work rather than plumbing.
+    #[must_use]
+    pub fn describes_work(&self) -> bool {
+        match self {
+            Self::Traverse { .. }
+            | Self::Sift { .. }
+            | Self::Transform { .. }
+            | Self::Retain { .. }
+            | Self::Accumulate { .. }
+            | Self::Collect { .. } => true,
+            _ => self.children().into_iter().any(Self::describes_work),
+        }
+    }
+
+    /// Whether a form chooses among alternatives it names.
+    ///
+    /// One arm is not a decision — `match x { Some(v) => v }` says only that a
+    /// value was unwrapped, which most code does somewhere. Two named
+    /// alternatives is the point at which the shape belongs to a particular
+    /// type's API.
+    fn describes_decision(&self) -> bool {
+        if let Self::Select { arms, .. } = self {
+            let named = arms
+                .iter()
+                .filter_map(|arm| match &arm.pattern {
+                    Pattern::Variant { name, .. } => Some(name.as_str()),
+                    _ => None,
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            if named.len() >= 2 {
+                return true;
+            }
+        }
+        self.children().into_iter().any(Self::describes_decision)
+    }
+
+    /// Whether a form describes something that can be compared across
+    /// libraries.
+    ///
+    /// Derivation used to demand a sequence operation, which confined it to
+    /// iterator behaviors and rejected everything else a library does. What
+    /// actually has to hold is that the form describes a *decision or a
+    /// traversal* rather than plumbing: iterating over something, or choosing
+    /// among named alternatives. A getter, a delegation, or a struct literal
+    /// describes neither, and would collide with unrelated code wherever it
+    /// appeared.
+    ///
+    /// This is a property of the form and names no language, which is why it
+    /// lives here: it was measured to hold unchanged for TypeScript-derived
+    /// forms before a second frontend existed to need it.
+    #[must_use]
+    pub fn is_comparable(&self) -> bool {
+        self.describes_work() || self.describes_decision()
+    }
+
+    /// Whether a derived behavior is specific enough to report when matched.
+    ///
+    /// The last condition is what separates a behavior from a shape.
+    /// `Option::map_or` is `match self { Some(t) => f(t), None => default }`:
+    /// two named alternatives, and everything else a hole. It therefore
+    /// describes *every* way of consuming an `Option`, subsumes the narrower
+    /// behaviors, and reported nine hundred times across five hundred crates —
+    /// technically right and useless. `unwrap_or` says the same thing about
+    /// `None` but is concrete about `Some`, and stays.
+    ///
+    /// So a behavior must name at least as much as it leaves open. This is a
+    /// property of the form rather than a threshold chosen to make a number
+    /// look good: a form with more holes than anchors matches more situations
+    /// than it distinguishes.
+    #[must_use]
+    pub fn is_reportable(&self) -> bool {
+        self.size() >= MINIMUM_REPORTABLE_SIZE
+            && self.anchors() >= MINIMUM_ANCHORS
+            && self.anchors() >= self.holes()
+            && self.is_comparable()
     }
 
     /// Whether this form describes no behavior worth comparing.
