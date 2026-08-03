@@ -808,6 +808,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "entl-zig-observe"
+version = "0.0.0"
+dependencies = [
+ "entl-tree-sitter",
+ "tree-sitter",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1498,6 +1506,14 @@ dependencies = [
  "entl-tree-sitter",
  "infact-normalize",
  "tree-sitter",
+]
+
+[[package]]
+name = "infact-zig-lifetimes"
+version = "0.0.0"
+dependencies = [
+ "entl-tree-sitter",
+ "entl-zig-observe",
 ]
 
 [[package]]
