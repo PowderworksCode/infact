@@ -32,6 +32,12 @@
 //! 5. **Syntactic noise.** Type annotations, assertions, parentheses,
 //!    non-null assertions, and blocks wrapping a single expression.
 
+mod cleanup;
+
+use cleanup::{
+    drop_unused_bindings, inline_aliases, is_presence_test, push_flattened, replace_element_access,
+    trim_protocol_arguments, valued,
+};
 use entl_tree_sitter::ParsedFile;
 use infact_normalize::{Arm, Direction, Form, Pattern, Roles};
 use tree_sitter::Node;
@@ -87,6 +93,20 @@ pub struct NormalizedFunction {
     pub start_line: u32,
     pub end_line: u32,
     pub form: Form,
+    /// Where each step of `form` came from, when `form` is a sequence.
+    ///
+    /// Aligned with the steps by construction rather than by recomputing the
+    /// body's statements: normalization drops some statements outright — a
+    /// guard that only throws, a binding nothing reads, a name bound to another
+    /// name — so counting source statements separately would slide the spans
+    /// against the steps and report a match at the wrong line. Silently wrong
+    /// coordinates are worse than coarse ones, so they are carried along
+    /// instead of reconstructed.
+    pub statements: Vec<StatementSpan>,
+    /// Every statement inside this function, at every depth, with its own form
+    /// and span. This is what lets a match be reported at the line that carries
+    /// it rather than at the function that contains it.
+    pub located: Vec<LocatedForm>,
     /// Whether the grammar failed anywhere inside this function.
     ///
     /// SpiderMonkey runs its self-hosted JavaScript through the C preprocessor,
@@ -94,6 +114,41 @@ pub struct NormalizedFunction {
     /// reads. The damage is local: a consumer should decline the callable
     /// rather than derive a behavior from a body it only partly understood.
     pub damaged: bool,
+}
+
+/// One statement, its normalized form, and where it was written.
+///
+/// A behavior is usually found *inside* a function rather than being the whole
+/// of one, and saying which function is not much help when the function is four
+/// hundred lines. Recording every statement at every depth as it is normalized
+/// gives a consumer somewhere exact to point, and gives it small forms to
+/// compare instead of one enormous one.
+#[derive(Debug, Clone)]
+pub struct LocatedForm {
+    pub span: StatementSpan,
+    /// How deeply nested the statement is; 0 is the function body's own level.
+    pub depth: u32,
+    pub form: Form,
+}
+
+/// The source extent of one step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatementSpan {
+    pub start_byte: u64,
+    pub end_byte: u64,
+    pub start_line: u32,
+    pub end_line: u32,
+}
+
+impl StatementSpan {
+    fn of(node: Node<'_>) -> Self {
+        Self {
+            start_byte: node.start_byte() as u64,
+            end_byte: node.end_byte() as u64,
+            start_line: u32::try_from(node.start_position().row + 1).unwrap_or(u32::MAX),
+            end_line: u32::try_from(node.end_position().row + 1).unwrap_or(u32::MAX),
+        }
+    }
 }
 
 fn text<'a>(node: Node<'_>, source: &'a [u8]) -> &'a str {
@@ -108,6 +163,9 @@ fn named_children<'a>(node: Node<'a>) -> Vec<Node<'a>> {
 struct Normalizer<'a> {
     source: &'a [u8],
     roles: Roles,
+    /// Every statement normalized so far, with where it came from.
+    located: Vec<LocatedForm>,
+    depth: u32,
 }
 
 impl<'a> Normalizer<'a> {
@@ -115,6 +173,8 @@ impl<'a> Normalizer<'a> {
         Self {
             source,
             roles: Roles::new(),
+            located: Vec::new(),
+            depth: 0,
         }
     }
 
@@ -125,25 +185,50 @@ impl<'a> Normalizer<'a> {
     // -- statements ---------------------------------------------------------
 
     fn block(&mut self, node: Node<'_>) -> Form {
+        self.block_located(node).0
+    }
+
+    /// A block, and where each surviving step was written.
+    fn block_located(&mut self, node: Node<'_>) -> (Form, Vec<StatementSpan>) {
         let mut steps = Vec::new();
+        self.depth += 1;
         for child in named_children(node) {
             if child.kind() == "comment" {
                 continue;
             }
             if let Some(step) = self.statement(child) {
-                steps.push(step);
+                push_flattened(&mut steps, step, StatementSpan::of(child), child);
             }
         }
         let steps = drop_unused_bindings(inline_aliases(steps));
-        match steps.len() {
+        self.depth -= 1;
+        let (forms, spans): (Vec<_>, Vec<_>) = steps.into_iter().unzip();
+        let form = match forms.len() {
             0 => Form::Sequence(Vec::new()),
-            1 => steps.into_iter().next().unwrap_or(Form::Literal),
-            _ => Form::Sequence(steps),
-        }
+            1 => forms.into_iter().next().unwrap_or(Form::Literal),
+            _ => Form::Sequence(forms),
+        };
+        (form, spans)
     }
 
     /// One statement, or nothing when it carries no behavior.
+    ///
+    /// Every statement that produces a form is recorded with its own span, so a
+    /// match found deep inside a function can be reported where it is written.
     fn statement(&mut self, node: Node<'_>) -> Option<Form> {
+        let form = self.statement_form(node)?;
+        // a bare block adds nesting but no statement of its own
+        if node.kind() != "statement_block" && !form.is_trivial() {
+            self.located.push(LocatedForm {
+                span: StatementSpan::of(node),
+                depth: self.depth,
+                form: form.clone(),
+            });
+        }
+        Some(form)
+    }
+
+    fn statement_form(&mut self, node: Node<'_>) -> Option<Form> {
         match node.kind() {
             "comment" | "empty_statement" => None,
             "expression_statement" => {
@@ -330,14 +415,15 @@ impl<'a> Normalizer<'a> {
                 continue;
             }
             if let Some(step) = self.statement(child) {
-                steps.push(step);
+                steps.push((step, StatementSpan::of(child)));
             }
         }
         let steps = drop_unused_bindings(inline_aliases(steps));
-        match steps.len() {
+        let forms = steps.into_iter().map(|(form, _)| form).collect::<Vec<_>>();
+        match forms.len() {
             0 => Form::Literal,
-            1 => steps.into_iter().next().unwrap_or(Form::Literal),
-            _ => Form::Sequence(steps),
+            1 => forms.into_iter().next().unwrap_or(Form::Literal),
+            _ => Form::Sequence(forms),
         }
     }
 
@@ -362,12 +448,86 @@ impl<'a> Normalizer<'a> {
         })
     }
 
+    /// A counted `while` is a walk too.
+    ///
+    /// `while (++index < length) { .. a[index] .. }` is how a great deal of
+    /// JavaScript iterates — lodash writes 45 of its files that way — and it is
+    /// the same traversal a counted `for` describes, with the step folded into
+    /// the test and the initializer sitting in front of the loop. Reading it as
+    /// opaque left every library written in that style contributing nothing.
     fn while_statement(&mut self, node: Node<'_>) -> Option<Form> {
         let body = node.child_by_field_name("body")?;
+        if let Some((counter, direction)) = self.while_counter(node)
+            && let Some(indexed) = find_indexed(body, &counter, self.source)
+        {
+            let sequence = self.expression(indexed.sequence);
+            let item = self.roles.bind(&indexed.binding);
+            if let Form::Local(index) = item {
+                let walked = self.loop_body(body, &indexed);
+                let walked =
+                    replace_element_access(&walked, &sequence, &counter, &Form::Local(index));
+                let walked = trim_protocol_arguments(&walked, &Form::Local(index), &sequence);
+                return Some(Form::Traverse {
+                    sequence: Box::new(sequence),
+                    item: Box::new(Pattern::Binding(index)),
+                    body: Box::new(walked),
+                    direction,
+                });
+            }
+        }
         Some(Form::Opaque {
             kind: "while".to_owned(),
             parts: vec![self.statement(body).unwrap_or(Form::Literal)],
         })
+    }
+
+    /// The name a `while` header counts with, and which way it runs.
+    ///
+    /// Either the test advances the counter itself — `while (++k < n)` — or it
+    /// compares a counter the body advances. A loop whose counter is never
+    /// advanced is not a walk, and is left alone.
+    fn while_counter(&self, node: Node<'_>) -> Option<(String, Direction)> {
+        let condition = node.child_by_field_name("condition")?;
+        let condition = match condition.kind() {
+            "parenthesized_expression" => condition.named_child(0)?,
+            _ => condition,
+        };
+        if condition.kind() != "binary_expression" {
+            return None;
+        }
+        let comparison = self.text(condition.child_by_field_name("operator")?);
+        let left = condition.child_by_field_name("left")?;
+        let body = node.child_by_field_name("body")?;
+        // the counter is either advanced in the test or advanced in the body
+        let (counter, advanced_here) = match left.kind() {
+            "update_expression" => (
+                self.text(left.child_by_field_name("argument")?).to_owned(),
+                self.text(left).to_owned(),
+            ),
+            "identifier" => (self.text(left).to_owned(), String::new()),
+            _ => return None,
+        };
+        let advance = if advanced_here.is_empty() {
+            let body_text = self.text(body);
+            if body_text.contains(&format!("{counter}++"))
+                || body_text.contains(&format!("++{counter}"))
+            {
+                format!("{counter}++")
+            } else if body_text.contains(&format!("{counter}--"))
+                || body_text.contains(&format!("--{counter}"))
+            {
+                format!("{counter}--")
+            } else {
+                return None;
+            }
+        } else {
+            advanced_here
+        };
+        match comparison {
+            "<" | "<=" if advance.contains("++") => Some((counter, Direction::Forward)),
+            ">" | ">=" if advance.contains("--") => Some((counter, Direction::Backward)),
+            _ => None,
+        }
     }
 
     fn switch_statement(&mut self, node: Node<'_>) -> Form {
@@ -496,7 +656,18 @@ impl<'a> Normalizer<'a> {
             },
             "string" | "template_string" => Form::Constant(self.text(node).to_owned()),
             "regex" => Form::Construct("RegExp".to_owned()),
-            "array" => Form::Construct("Array".to_owned()),
+            "array" => {
+                // `[...xs]` is a copy of `xs`, and a copy is not behavior. Any
+                // other array literal is a construction.
+                let children = named_children(node);
+                match children.as_slice() {
+                    [only] if only.kind() == "spread_element" => match only.named_child(0) {
+                        Some(inner) => self.expression(inner),
+                        None => Form::Construct("Array".to_owned()),
+                    },
+                    _ => Form::Construct("Array".to_owned()),
+                }
+            }
             "object" => Form::Construct("Object".to_owned()),
             "unary_expression" => self.unary(node),
             "binary_expression" => self.binary(node),
@@ -721,6 +892,34 @@ impl<'a> Normalizer<'a> {
         {
             return operation.build(sequence, item, body);
         }
+        // `xs.reverse().find(p)` walks from the back, which is `findLast`.
+        //
+        // Reading it as a plain `find` would say the code already calls the
+        // library it should — the opposite of the truth. Rewriting it into
+        // "the last thing that passed" lets the ordinary law do the rest, and
+        // a `find` over an unreversed sequence is left exactly as it was.
+        if name == "find"
+            && let [callback] | [callback, _] = arguments
+            && let Form::Method {
+                name: adapter,
+                receiver: reversed,
+                arguments: none,
+            } = &sequence
+            && adapter == "reverse"
+            && none.is_empty()
+            && let Some((item, body)) = self.callback(*callback)
+        {
+            return Form::Method {
+                name: "last".to_owned(),
+                receiver: Box::new(Form::Retain {
+                    sequence: reversed.clone(),
+                    item: Box::new(item),
+                    body: Box::new(body),
+                }),
+                arguments: Vec::new(),
+            };
+        }
+
         // Taking one end of a sequence, however it is spelled.
         //
         // `a[0]`, `a.at(0)` and `a.shift()` all take the first; `a.pop()` and
@@ -1005,11 +1204,6 @@ fn is_screaming_case(name: &str) -> bool {
         && name.chars().any(|character| character.is_ascii_uppercase())
 }
 
-/// Whether a condition asks only whether an element is present.
-fn is_presence_test(form: &Form) -> bool {
-    matches!(form, Form::Binary { operator, .. } if operator == "in")
-}
-
 /// An element access found in a loop body, and what names it.
 struct Indexed<'a> {
     sequence: Node<'a>,
@@ -1074,102 +1268,6 @@ fn find_indexed<'a>(body: Node<'a>, counter: &str, source: &[u8]) -> Option<Inde
     })
 }
 
-/// Replace a bound name with a value throughout a form.
-fn substitute_local(form: &Form, index: u32, value: &Form) -> Form {
-    match form {
-        Form::Local(bound) if *bound == index => value.clone(),
-        other => other.map_children(&|child| substitute_local(child, index, value)),
-    }
-}
-
-/// Replace names bound to nothing but another name.
-///
-/// A specification implementation opens by giving its receiver a local name —
-/// `var O = ToObject(this)` — and then speaks about `O`. Once the coercion is
-/// recognized as identity, the binding says only that `O` *is* `this`, which is
-/// a fact about spelling. A reimplementation names the same value once, so a
-/// form carrying the extra binding could never match one written without it.
-fn inline_aliases(steps: Vec<Form>) -> Vec<Form> {
-    let mut kept: Vec<Form> = Vec::new();
-    let mut pending = steps;
-    while !pending.is_empty() {
-        let step = pending.remove(0);
-        if let Form::Let { pattern, value } = &step
-            && let Pattern::Binding(index) = pattern.as_ref()
-            && matches!(value.as_ref(), Form::Free(_) | Form::Local(_))
-        {
-            pending = pending
-                .iter()
-                .map(|later| substitute_local(later, *index, value))
-                .collect();
-            continue;
-        }
-        kept.push(step);
-    }
-    kept
-}
-
-/// Replace the element access itself with the item a traversal binds.
-///
-/// A body that names the element first — `var v = a[k]` — speaks about `v`
-/// afterwards, and binding `v` is enough. A body that does not, and writes
-/// `a[k]` wherever it means the element, has to have those accesses rewritten
-/// or the traversal binds an item nothing mentions. Most engine builtins are
-/// written the second way.
-fn replace_element_access(form: &Form, sequence: &Form, counter: &str, item: &Form) -> Form {
-    if let Form::Field { value, name } = form
-        && name == counter
-        && value.as_ref() == sequence
-    {
-        return item.clone();
-    }
-    form.map_children(&|child| replace_element_access(child, sequence, counter, item))
-}
-
-/// Drop the arguments a traversal supplies from its own state.
-///
-/// The iteration protocol hands a callback the element, its index, and the
-/// sequence: `predicate(kValue, k, O)`. Only the first is the value being
-/// decided about — the other two are the traversal talking about itself, and
-/// they are supplied by every caller of the protocol rather than written by
-/// anyone. Code that reimplements the behavior writes `predicate(item)`, so
-/// keeping them means the two never meet.
-fn trim_protocol_arguments(form: &Form, item: &Form, sequence: &Form) -> Form {
-    if let Form::Call { callee, arguments } = form
-        && arguments.len() > 1
-        && arguments.first() == Some(item)
-        && arguments.last() == Some(sequence)
-    {
-        return Form::Call {
-            callee: callee.clone(),
-            arguments: vec![item.clone()],
-        };
-    }
-    form.map_children(&|child| trim_protocol_arguments(child, item, sequence))
-}
-
-/// Drop `let` steps whose name nothing later refers to.
-///
-/// A specification implementation binds things a reimplementation never needs —
-/// a `thisArg` pulled out of the argument list, a length read before the walk.
-/// Once the operations that consumed them have been recognized as noise, the
-/// bindings are left naming nothing, and a form carrying them cannot match one
-/// written without them.
-fn drop_unused_bindings(steps: Vec<Form>) -> Vec<Form> {
-    let mut kept: Vec<Form> = Vec::new();
-    for (position, step) in steps.iter().enumerate() {
-        let unused = matches!(step, Form::Let { pattern, .. }
-            if matches!(pattern.as_ref(), Pattern::Binding(index)
-                if !steps[position + 1..]
-                    .iter()
-                    .any(|later| later.references_local(*index))));
-        if !unused {
-            kept.push(step.clone());
-        }
-    }
-    kept
-}
-
 /// The first descendant of `kind`, including the node itself.
 fn descendant<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
     if node.kind() == kind {
@@ -1181,12 +1279,18 @@ fn descendant<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
 }
 
 /// Normalize one function, declaring its parameters before its body.
-pub fn normalize_function(function: Node<'_>, source: &[u8]) -> Form {
-    let mut normalizer = Normalizer::new(source);
+/// Declare a function's parameters, and its receiver, as values.
+///
+/// Without them every bare call looks alike, and a function a reader could go
+/// and look at cannot be told from an argument the caller supplied.
+fn declare_parameters(function: Node<'_>, source: &[u8], normalizer: &mut Normalizer<'_>) {
     if let Some(parameters) = function
         .child_by_field_name("parameters")
         .or_else(|| function.child_by_field_name("parameter"))
     {
+        if parameters.kind() == "identifier" {
+            normalizer.roles.declare(text(parameters, source));
+        }
         for parameter in named_children(parameters) {
             let name = match parameter.kind() {
                 "identifier" => Some(parameter),
@@ -1201,33 +1305,34 @@ pub fn normalize_function(function: Node<'_>, source: &[u8]) -> Form {
     }
     // the receiver is data the caller supplied, exactly like a parameter
     normalizer.roles.declare("this");
+}
+
+pub fn normalize_function(function: Node<'_>, source: &[u8]) -> Form {
+    let mut normalizer = Normalizer::new(source);
+    declare_parameters(function, source, &mut normalizer);
     match function.child_by_field_name("body") {
-        Some(body) => valued(normalizer.block(body)),
+        Some(body) if body.kind() == "statement_block" => valued(normalizer.block(body)),
+        Some(body) => valued(normalizer.expression(body)),
         None => Form::Sequence(Vec::new()),
     }
 }
 
-/// A body's trailing `return` is what the body is worth.
-///
-/// A library implements a search as a function and ends it `return undefined`;
-/// a caller writes the same search as an expression and ends it with the value.
-/// Only the LAST step is touched: a `return` anywhere earlier is an escape from
-/// the middle of the work, which is behavior and has to stay.
-fn valued(form: Form) -> Form {
-    match form {
-        Form::Return(value) => *value,
-        Form::Sequence(mut steps) => {
-            // the last step is inspected before it is removed: popping inside
-            // the test would discard it whenever the pattern did not match,
-            // which silently loses the statement the body was there for
-            if let Some(Form::Return(value)) = steps.last().cloned() {
-                steps.pop();
-                steps.push(*value);
-            }
-            Form::Sequence(steps)
+/// Normalize one function, keeping where each step of the body was written.
+pub fn normalize_function_located(
+    function: Node<'_>,
+    source: &[u8],
+) -> (Form, Vec<StatementSpan>, Vec<LocatedForm>) {
+    let mut normalizer = Normalizer::new(source);
+    declare_parameters(function, source, &mut normalizer);
+    let (form, spans) = match function.child_by_field_name("body") {
+        Some(body) if body.kind() == "statement_block" => {
+            let (form, spans) = normalizer.block_located(body);
+            (valued(form), spans)
         }
-        other => other,
-    }
+        Some(body) => (valued(normalizer.expression(body)), Vec::new()),
+        None => (Form::Sequence(Vec::new()), Vec::new()),
+    };
+    (form, spans, normalizer.located)
 }
 
 /// Normalize a bare body, with no parameters in scope.
@@ -1248,8 +1353,28 @@ pub fn normalize_module(file: &ParsedFile) -> Form {
     valued(normalizer.block(root))
 }
 
+/// Every named function, however the language spells one.
+///
+/// `function f() {}`, a class method, and `const f = () => {}` all define a
+/// named function, and TypeScript uses the third constantly. Collecting only
+/// the first two left roughly a quarter of a real project's named functions
+/// unread — and unread reads downstream as "nothing there", which is the
+/// failure worth going out of the way to avoid.
 fn collect_functions<'a>(node: Node<'a>, output: &mut Vec<Node<'a>>) {
     if matches!(node.kind(), "function_declaration" | "method_definition") {
+        output.push(node);
+        return;
+    }
+    // `const f = () => ..` binds a function to a name; the declarator is what
+    // carries the name, and the arrow is what carries the body.
+    if node.kind() == "variable_declarator"
+        && node
+            .child_by_field_name("value")
+            .is_some_and(|value| matches!(value.kind(), "arrow_function" | "function_expression"))
+        && node
+            .child_by_field_name("name")
+            .is_some_and(|name| name.kind() == "identifier")
+    {
         output.push(node);
         return;
     }
@@ -1266,15 +1391,23 @@ pub fn normalize_file(file: &ParsedFile) -> Vec<NormalizedFunction> {
         .into_iter()
         .filter_map(|node| {
             let name = node.child_by_field_name("name")?;
+            // a declarator names the binding and the arrow holds the body
+            let definition = match node.kind() {
+                "variable_declarator" => node.child_by_field_name("value")?,
+                _ => node,
+            };
             // a signature with no body declares behavior rather than describing it
-            node.child_by_field_name("body")?;
+            definition.child_by_field_name("body")?;
+            let located = normalize_function_located(definition, &file.source);
             Some(NormalizedFunction {
                 name: text(name, &file.source).to_owned(),
                 start_byte: node.start_byte() as u64,
                 end_byte: node.end_byte() as u64,
                 start_line: u32::try_from(node.start_position().row + 1).unwrap_or(u32::MAX),
                 end_line: u32::try_from(node.end_position().row + 1).unwrap_or(u32::MAX),
-                form: normalize_function(node, &file.source),
+                form: located.0,
+                statements: located.1,
+                located: located.2,
                 damaged: node.has_error(),
             })
         })
