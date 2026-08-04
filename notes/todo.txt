@@ -1035,17 +1035,105 @@ shipped TS pack declares. So:
 No change to the pack format is needed. What is missing is the crate that builds
 one.
 
+### TypeScript HAS a behaviors path now — 08-03, and what it measured
+
+`infact-behaviors` (neutral) and `infact-ts-behaviors` (the frontend) landed.
+TypeScript can derive behaviors, build packs, and match them against a
+repository. What follows is what was measured rather than what was expected,
+because two of the three expectations were wrong again.
+
+  ecmascript pack   89 callables, 19 behaviors, 16 reportable
+  collisions        19 distinct forms from 19 behaviors — ZERO
+  ts scoreboard     25/155 and 4/252 — IDENTICAL to the hand-written prototype
+  std pack          464 behaviors, BYTE-IDENTICAL after the CLI change
+  clippy            26/201, 36/36 on-target — unchanged
+
+The score not moving is the honest headline. The prototype inside the harness
+was already finding what the laws can find on this corpus; what the crate adds
+is that the answer now carries spans, an implementation chain, and digests, and
+that a second frontend proved the neutral core is actually neutral. Four more
+behaviors derive (15 -> 19) because delegation is now followed, and none of the
+four is one this corpus asks about.
+
+WHAT THE NEUTRAL CORE IS. `infact-behaviors::Library::derive` — resolve a name,
+follow a delegation, follow a construction into the constructed type's contract
+method, lift a one-step form, refuse. It takes callables already normalized and
+returns the form plus the chain followed. The one thing that differs by language
+is the CONTRACT METHOD LIST, so it is a parameter: Rust's is
+`next, next_back, poll, poll_next` and JavaScript's is `next`. Everything else
+was identical, which is the claim `is_comparable`/`is_reportable` moving onto
+`Form` in PR #10 was already making.
+
+infact-rust-behaviors DOES NOT USE IT YET. That is the next slice, and its
+proof is the one this note already describes for a move in this area: re-derive
+both packs and diff them byte for byte. Deliberately not done in the same change
+as the frontend, so that a regression in either has exactly one place to be.
+
+A FINDING WORTH MORE THAN THE FEATURE — `parse_repository` DISCARDS FILES.
+
+  It drops any file whose tree has an error, whole. Measured on SpiderMonkey:
+  three of four files carry `#if` preprocessor lines the grammar cannot read,
+  and discarding them left 18 callables out of 89. Tree-sitter recovers
+  locally, so 88 of those functions were perfectly readable and exactly one
+  (`ArrayToLocaleString`) was actually damaged.
+
+  MEASURED ON RUST, WHERE NOBODY HAD LOOKED: deriving `core` reports
+  **31 unread files**. Every item in those 31 is missing from the std pack, and
+  `--allow-unread` is what makes that a warning rather than a stop. The 1,332
+  "no implementation was found" callables in item 4 below have an unmeasured
+  overlap with this — a callable whose implementation lives in a discarded file
+  looks exactly like a callable with no implementation.
+
+  infact-ts-behaviors reads the file anyway and declines the damaged functions
+  BY NAME. That belongs in entl — parsing is entl's — and the Rust side would
+  gain from it, but changing it there moves every recorded number at once, so
+  it is recorded here rather than done quietly. DO NOT reach for a dialect
+  rewrite: blanking the directives leaves BOTH branches of the conditional and
+  silently merges them, which is the erasure class this project keeps paying
+  for.
+
+TWO GAPS THE FIXTURE FOUND, both language-neutral:
+
+  A call buried in an expression is not followed. `delegation_target` is a shape
+  test over the WHOLE form, so `return indexOf(x) !== -1` — which is how
+  `includes` is normally written — describes a comparison rather than a search.
+  Rust has the same hole; `counts` is followed only because its body is exactly
+  the call. Worth measuring before building: how many std callables are
+  one-expression wrappers of this shape.
+
+  A constructor function is not a type. `type_declarations` reads `class`,
+  `interface` and `type`, so pre-class JavaScript — `function Foo() {}` plus
+  `Foo.prototype.bar = ...` — declares nothing followable. Neither is
+  `Array.prototype.find = function () {}` collected as a callable at all, nor
+  `module.exports`. Those are the shapes an older npm package is written in, and
+  they bound what this reaches on real dependencies far more than the laws do.
+
 ### Next
 
-[ ] `infact-ts-behaviors`, and extract the neutral core while doing it
-    `is_comparable`, `is_reportable`, `describes_work`, `constructed_type`,
-    `principal_method` and `derive_from` in `infact-rust-behaviors/derivation.rs`
-    operate on `Form` and strings only — measured at 380 of its 620 lines — and
-    they already ran unmodified against TypeScript forms in the scoreboard. That
-    is the second consumer this note said to wait for before extracting a shared
-    crate. What genuinely does not carry over: `registry_sources`
-    (~/.cargo/registry), `is_library_source` (src/ layout), and all of
-    `macro_derivation.rs`.
+[x] `infact-ts-behaviors`, and extract the neutral core while doing it
+    -- DONE 08-03, see above. The extraction predicted here was accurate: the
+    neutral part really was the walk plus the gates, and `registry_sources`,
+    `is_library_source` and `macro_derivation.rs` really were the parts that do
+    not carry over. `is_library_source` has a TypeScript twin rather than a
+    shared implementation, because what it encodes is a per-ecosystem
+    convention: Cargo's `tests/ benches/ examples/` against npm's
+    `node_modules/ dist/ __tests__/` and `*.test.ts`.
+
+[ ] `infact-rust-behaviors` adopts `infact-behaviors`
+    The walk now exists twice: `Library::derive` in the neutral crate and
+    `derive_from` in derivation.rs, written to be the same walk on purpose so
+    the second can be deleted. Two behavioural details have to survive the
+    swap and are easy to lose:
+      - `max_by_key` returns the LAST maximum, so candidate ORDER decides ties
+        in `principal_method`. The neutral crate takes callables in the order
+        `library_functions` produced them for exactly this reason.
+      - a callable with no body must refuse as "the implementation has no body"
+        and not as "no implementation was found". They are different tallies
+        and item 4 below is built on one of them.
+    THE PROOF IS THE ONLY THING THAT MATTERS HERE: re-derive std and itertools
+    and diff byte for byte, then re-run collisions.rs and the clippy scoreboard.
+    A baseline for that diff is already recorded: 464 behaviors for std
+    (core 190 + alloc 119 + std 155) and 130 for itertools.
 
 [ ] Span-precise type join
     Two of the four remaining false positives are ones the checker CAN answer —

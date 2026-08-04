@@ -1,0 +1,26 @@
+[package]
+name = "infact-ts-behaviors"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "TypeScript and JavaScript library-behavior match facts derived by Infact."
+
+[dependencies]
+entl-codebase.workspace = true
+entl-tree-sitter.workspace = true
+infact-behaviors = { path = "../infact-behaviors" }
+infact-core = { path = "../infact-core" }
+infact-fact-pack = { path = "../infact-fact-pack" }
+infact-normalize = { path = "../infact-normalize" }
+infact-ts-normalize = { path = "../infact-ts-normalize" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tree-sitter.workspace = true
+
+[lints]
+workspace = true
