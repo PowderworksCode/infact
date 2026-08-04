@@ -1,5 +1,59 @@
 infact — todo
 
+## Imported names are qualified, and the ceiling was 23% but the take was 2.6%
+
+Landed 08-04. `from pyparsing import Regex` makes `Regex` mean
+`pyparsing.Regex` in that file, so two packages importing different things
+under one spelling stop being one form. The import statement names its own
+module, so this needs no filesystem and no other file.
+
+### Measured before building, and the prediction was still too high
+
+The question was whether qualification is worth anything, given it can only
+help a form that contains a path naming something Python does not define
+globally. Of 775 ambiguous forms:
+
+    containing ANY non-builtin path    177 groups / 442 callables   (the ceiling)
+    inside one distribution            718
+    spanning distributions              57
+      ...with a non-builtin path        11
+
+So at most 23% of the ambiguity, and that was an upper bound. What it actually
+bought:
+
+                                     before        after
+    ambiguous forms                     775          750
+    callables inside one       2,077 (2.84%)  2,022 (2.76%)
+    distinct forms                   68,163       68,265
+
+55 callables. 2.6% of the ambiguity against a 23% ceiling, because containing a
+non-builtin path is not the same as the members RESOLVING to different modules:
+most such paths are names defined in the file that uses them, and those stay
+bare. Same shape of error as the `lazy import` prediction — the reasoning was
+directionally right and the size was wrong, and the corpus is what said so.
+
+### What it cost, checked rather than assumed
+
+Cross-package matching is the capability qualification was most likely to
+break, since two implementations of one operation call different modules by
+construction:
+
+    forms shared across directories   1,791 -> 1,716
+      once vendored copies are one      207 ->   191
+      and the names differ                5 ->     5
+
+The five that matter are unchanged. `two_libraries_that_implement_one_operation_meet`
+still passes, because the ruamel/PyYAML pair carries no qualifiable path at all
+— what differs between them lives inside raises, which are dropped.
+
+### Declined: qualifying names the file defines itself
+
+That needs the package layout on disk — walking up while `__init__.py` exists —
+which would make the normalizer read directories and make its output depend on
+where a file sits rather than what it says. For 55 callables it is not worth
+it. Reconsider only if a consumer produces a WRONG finding traceable to a bare
+local name, which is a different and better trigger than a percentage.
+
 ## What the forms can now be asked, and the funnel that matters
 
 `--example duplicates` is new and only became worth writing once callees

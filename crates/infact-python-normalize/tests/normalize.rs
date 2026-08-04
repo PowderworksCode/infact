@@ -883,3 +883,85 @@ fn two_libraries_that_implement_one_operation_meet() {
         "these build the same pairs from the same nodes and differ only in what they raise"
     );
 }
+
+/// Two names that are spelled alike and mean different things are not one form.
+///
+/// `from re import Regex` and `from pyparsing import Regex` are different
+/// operations wearing one name. The import statement says which module was
+/// read, so this needs no filesystem and nothing outside the file.
+#[test]
+fn one_name_imported_from_two_modules_is_two_things() {
+    let standard = form(
+        "from re import Regex
+
+def f(pattern, text):
+    return Regex(pattern, text, 0)
+",
+        "f",
+    );
+    let third_party = form(
+        "from pyparsing import Regex
+
+def f(pattern, text):
+    return Regex(pattern, text, 0)
+",
+        "f",
+    );
+    assert_ne!(
+        standard, third_party,
+        "these call different things that share a spelling"
+    );
+}
+
+/// An alias is not behavior; what it points at is.
+#[test]
+fn importing_under_another_name_changes_nothing() {
+    let plain = form(
+        "from json.decoder import JSONDecoder
+
+def f(text):
+    return JSONDecoder(text, None)
+",
+        "f",
+    );
+    let aliased = form(
+        "from json.decoder import JSONDecoder as Decoder
+
+def f(text):
+    return Decoder(text, None)
+",
+        "f",
+    );
+    assert_eq!(
+        plain, aliased,
+        "renaming an import at the door does not change what is called"
+    );
+}
+
+/// A name the file did not import stays bare.
+///
+/// Qualifying a locally defined class would need the package layout on disk,
+/// and measuring said the whole of qualification was worth 55 callables out of
+/// 2,077 — nowhere near enough to make the normalizer read directories.
+#[test]
+fn a_name_the_file_did_not_import_is_left_unqualified() {
+    let left = form(
+        "class Helper:
+    pass
+
+def f(x):
+    return Helper(x, x, x)
+",
+        "f",
+    );
+    let right = form(
+        "def f(x):
+    return Helper(x, x, x)
+",
+        "f",
+    );
+    assert_eq!(
+        left, right,
+        "a name defined here and a name from nowhere are both just the name"
+    );
+}

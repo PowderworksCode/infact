@@ -33,6 +33,8 @@
 
 mod cleanup;
 
+use std::collections::BTreeMap;
+
 use cleanup::{drop_unused_bindings, fuse_container_fills, inline_aliases, push_flattened, valued};
 use entl_tree_sitter::ParsedFile;
 use infact_normalize::{Arm, Direction, Form, Pattern, Roles};
@@ -138,21 +140,115 @@ fn code_children<'a>(node: Node<'a>) -> Vec<Node<'a>> {
         .collect()
 }
 
+/// The names a file imported, and the module each names.
+///
+/// `from json.decoder import JSONDecoder` makes `JSONDecoder` mean
+/// `json.decoder.JSONDecoder` in this file and nowhere else, so two packages
+/// that each import a different `Regex` stop being one form. The statement
+/// says which module it read, so this needs no filesystem and no other file.
+///
+/// Only imports are qualified. A class defined in the file it is used in stays
+/// bare, because naming its module would need the package layout on disk, and
+/// measuring said the whole of qualification is worth at most 23% of the
+/// remaining ambiguity — not enough to make the normalizer read directories.
+type Imports = BTreeMap<String, String>;
+
+fn imports_of(root: Node<'_>, source: &[u8]) -> Imports {
+    let mut imports = Imports::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "import_from_statement" => {
+                let module = node
+                    .child_by_field_name("module_name")
+                    .map(|module| text(module, source).to_owned())
+                    .unwrap_or_default();
+                let mut cursor = node.walk();
+                for imported in node.children_by_field_name("name", &mut cursor) {
+                    let (origin, local) = alias(imported, source);
+                    imports.insert(local, format!("{module}.{origin}"));
+                }
+            }
+            "import_statement" => {
+                let mut cursor = node.walk();
+                for imported in node.children_by_field_name("name", &mut cursor) {
+                    let (origin, local) = alias(imported, source);
+                    // `import a.b.c` binds `a`; `import a.b as c` binds `c`.
+                    match imported.kind() {
+                        "aliased_import" => imports.insert(local, origin),
+                        _ => {
+                            let head = origin.split('.').next().unwrap_or(&origin).to_owned();
+                            imports.insert(head.clone(), head)
+                        }
+                    };
+                }
+            }
+            _ => {}
+        }
+        for child in named_children(node) {
+            stack.push(child);
+        }
+    }
+    imports
+}
+
+/// What an import names, and what this file calls it.
+fn alias(node: Node<'_>, source: &[u8]) -> (String, String) {
+    match node.kind() {
+        "aliased_import" => {
+            let origin = node
+                .child_by_field_name("name")
+                .map(|name| text(name, source).to_owned())
+                .unwrap_or_default();
+            let local = node
+                .child_by_field_name("alias")
+                .map(|name| text(name, source).to_owned())
+                .unwrap_or_else(|| origin.clone());
+            (origin, local)
+        }
+        _ => {
+            let name = text(node, source).to_owned();
+            (name.clone(), name)
+        }
+    }
+}
+
+/// The tree a node belongs to.
+fn root_of(node: Node<'_>) -> Node<'_> {
+    let mut current = node;
+    while let Some(parent) = current.parent() {
+        current = parent;
+    }
+    current
+}
+
 struct Normalizer<'a> {
     source: &'a [u8],
+    imports: &'a Imports,
     roles: Roles,
     located: Vec<LocatedForm>,
     depth: u32,
 }
 
 impl<'a> Normalizer<'a> {
-    fn new(source: &'a [u8]) -> Self {
+    fn new(source: &'a [u8], imports: &'a Imports) -> Self {
         Self {
             source,
+            imports,
             roles: Roles::new(),
             located: Vec::new(),
             depth: 0,
         }
+    }
+
+    /// What a name means outside this body, qualified when the file says so.
+    fn path(&self, name: &str) -> Form {
+        Form::Path(
+            self.imports
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| name.to_owned()),
+        )
     }
 
     fn text(&self, node: Node<'_>) -> &'a str {
@@ -676,7 +772,7 @@ impl<'a> Normalizer<'a> {
                 // with them `keys` and `values`. Python spells constants the
                 // same way and inherits the same erasure.
                 if is_screaming_case(name) && !self.roles.is_value(name) {
-                    return Form::Path(name.to_owned());
+                    return self.path(name);
                 }
                 self.roles.resolve(name)
             }
@@ -1039,9 +1135,7 @@ impl<'a> Normalizer<'a> {
         // trade the TypeScript frontend made; qualifying would need to resolve
         // imports across files, and that is a different observation.
         let callee = match callee.kind() {
-            "identifier" if !self.roles.is_value(self.text(callee)) => {
-                Form::Path(self.text(callee).to_owned())
-            }
+            "identifier" if !self.roles.is_value(self.text(callee)) => self.path(self.text(callee)),
             _ => self.expression(callee),
         };
         Form::Call {
@@ -1274,7 +1368,8 @@ fn declare_parameters(function: Node<'_>, source: &[u8], normalizer: &mut Normal
 }
 
 pub fn normalize_function(function: Node<'_>, source: &[u8]) -> Form {
-    let mut normalizer = Normalizer::new(source);
+    let imports = imports_of(root_of(function), source);
+    let mut normalizer = Normalizer::new(source, &imports);
     declare_parameters(function, source, &mut normalizer);
     match function.child_by_field_name("body") {
         Some(body) if body.kind() == "block" => valued(normalizer.block(body)),
@@ -1288,7 +1383,21 @@ pub fn normalize_function_located(
     function: Node<'_>,
     source: &[u8],
 ) -> (Form, Vec<StatementSpan>, Vec<LocatedForm>) {
-    let mut normalizer = Normalizer::new(source);
+    {
+        let imports = imports_of(root_of(function), source);
+        located_with(function, source, &imports)
+    }
+}
+
+/// The body of `normalize_function_located`, with the file's imports supplied.
+///
+/// `normalize_file` reads a file's imports once rather than once per function.
+fn located_with<'a>(
+    function: Node<'_>,
+    source: &'a [u8],
+    imports: &'a Imports,
+) -> (Form, Vec<StatementSpan>, Vec<LocatedForm>) {
+    let mut normalizer = Normalizer::new(source, imports);
     declare_parameters(function, source, &mut normalizer);
     let (form, spans) = match function.child_by_field_name("body") {
         Some(body) if body.kind() == "block" => {
@@ -1303,7 +1412,8 @@ pub fn normalize_function_located(
 
 /// Normalize a bare body, with no parameters in scope.
 pub fn normalize_body(body: Node<'_>, source: &[u8]) -> Form {
-    let mut normalizer = Normalizer::new(source);
+    let imports = imports_of(root_of(body), source);
+    let mut normalizer = Normalizer::new(source, &imports);
     normalizer.block(body)
 }
 
@@ -1315,7 +1425,8 @@ pub fn normalize_body(body: Node<'_>, source: &[u8]) -> Form {
 /// one failure mode worth going out of the way to avoid.
 pub fn normalize_module(file: &ParsedFile) -> Form {
     let root = file.tree.root_node();
-    let mut normalizer = Normalizer::new(&file.source);
+    let imports = imports_of(root, &file.source);
+    let mut normalizer = Normalizer::new(&file.source, &imports);
     valued(normalizer.block(root))
 }
 
@@ -1338,12 +1449,13 @@ fn collect_functions<'a>(node: Node<'a>, output: &mut Vec<Node<'a>>) {
 pub fn normalize_file(file: &ParsedFile) -> Vec<NormalizedFunction> {
     let mut nodes = Vec::new();
     collect_functions(file.tree.root_node(), &mut nodes);
+    let imports = imports_of(file.tree.root_node(), &file.source);
     nodes
         .into_iter()
         .filter_map(|node| {
             let name = node.child_by_field_name("name")?;
             node.child_by_field_name("body")?;
-            let located = normalize_function_located(node, &file.source);
+            let located = located_with(node, &file.source, &imports);
             // A decorated function is written `@d` then `def f(): ..`, and the
             // decorators are part of what a reader would be pointed at.
             let outer = node
