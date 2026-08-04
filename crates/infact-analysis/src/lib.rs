@@ -19,10 +19,29 @@ use thiserror::Error;
 pub struct FactPackSet {
     manifests: Vec<FactPackManifest>,
     catalogs: Vec<ExternalCatalog>,
-    behaviors: Vec<DerivedLibraryBehavior>,
+    /// Derived behaviors, kept with the language of the pack they came from.
+    ///
+    /// A behavior is a language-neutral `Form`, which is the whole point — and
+    /// it is exactly why the language cannot be dropped here. A form derived
+    /// from JavaScript will happily match a Rust function of the same shape, and
+    /// the finding would name an ECMAScript builtin at a Rust call site with no
+    /// sign that anything had gone wrong. Nothing prevented that before
+    /// TypeScript packs existed, because nothing but Rust packs did.
+    behaviors: Vec<(String, DerivedLibraryBehavior)>,
     macro_behaviors: Vec<DerivedMacroBehavior>,
     call_effects: Vec<CallEffectCatalog>,
     capabilities: BTreeSet<String>,
+}
+
+impl FactPackSet {
+    /// The behaviors derived from one language's source.
+    fn behaviors_for(&self, language: &str) -> Vec<DerivedLibraryBehavior> {
+        self.behaviors
+            .iter()
+            .filter(|(subject, _)| subject == language)
+            .map(|(_, behavior)| behavior.clone())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -100,6 +119,8 @@ pub enum Error {
     #[error(transparent)]
     RustBehaviors(#[from] infact_rust_behaviors::Error),
     #[error(transparent)]
+    TypeScriptBehaviors(#[from] infact_ts_behaviors::Error),
+    #[error(transparent)]
     RustEffects(#[from] infact_rust_effects::Error),
     #[error(transparent)]
     RustErrors(#[from] infact_errors::Error),
@@ -116,9 +137,10 @@ impl FactPackSet {
                     "callable-signatures" => set
                         .catalogs
                         .push(read_json(&content.blob_path, &content.kind)?),
-                    "library-behavior" => set
-                        .behaviors
-                        .push(read_json(&content.blob_path, &content.kind)?),
+                    "library-behavior" => set.behaviors.push((
+                        pack.manifest.subject.language.clone(),
+                        read_json(&content.blob_path, &content.kind)?,
+                    )),
                     "macro-behavior" => set
                         .macro_behaviors
                         .push(read_json(&content.blob_path, &content.kind)?),
@@ -282,11 +304,15 @@ pub fn analyze_repository_with_observations(
             );
     }
     if selection.library_behaviors {
+        // Each frontend sees only the behaviors derived from its own language.
+        // A `Form` names no language, so a JavaScript-derived search matches a
+        // Rust function of the same shape perfectly well and would report an
+        // ECMAScript builtin at a Rust call site.
         let report = infact_rust_behaviors::analyze_repository(
             root,
             parsers,
             &packs.catalogs,
-            &packs.behaviors,
+            &packs.behaviors_for("rust"),
             &packs.macro_behaviors,
         )?;
         batch.library_behaviors = report.matches;
@@ -303,6 +329,34 @@ pub fn analyze_repository_with_observations(
                         message: diagnostic.message,
                     }),
             );
+
+        let typescript = packs.behaviors_for("typescript");
+        // Parsing a repository is the expensive part, so it is not paid for a
+        // language no pack describes.
+        if !typescript.is_empty() {
+            let report = infact_ts_behaviors::analyze_repository(
+                root,
+                parsers,
+                &packs.catalogs,
+                &typescript,
+            )?;
+            batch.library_behaviors.extend(report.matches);
+            batch
+                .diagnostics
+                .extend(
+                    report
+                        .diagnostics
+                        .into_iter()
+                        .map(|diagnostic| AnalysisDiagnostic {
+                            analyzer: "library-behaviors".to_owned(),
+                            path: diagnostic.path,
+                            line: 1,
+                            message: diagnostic.message,
+                        }),
+                );
+            batch.library_behaviors.sort();
+            batch.library_behaviors.dedup();
+        }
     }
     batch.diagnostics.sort_by(|left, right| {
         left.path
@@ -359,6 +413,37 @@ mod tests {
 
     fn effect_packs(cache: &FactPackCache) -> FactPackSet {
         FactPackSet::load(&[install_pack("rust-core", cache)]).unwrap()
+    }
+
+    /// A behavior is only ever matched by the frontend for its own language.
+    ///
+    /// A `Form` names no language, which is the whole point of it — and it is
+    /// why this has to be enforced where packs are loaded rather than left to
+    /// each matcher. A search derived from JavaScript matches a Rust function of
+    /// the same shape perfectly well, and the finding would name an ECMAScript
+    /// builtin at a Rust call site with nothing in the output saying so.
+    ///
+    /// Nothing prevented that before TypeScript packs existed. Nothing but the
+    /// pack's own subject can prevent it now.
+    #[test]
+    fn behaviors_are_only_offered_to_the_language_they_came_from() {
+        let cache_root = tempfile::tempdir().unwrap();
+        let cache = FactPackCache::open(cache_root.path().join("cache")).unwrap();
+        // itertools rather than core: core is the effects pack and carries no
+        // library behaviors at all, which would make this pass by finding
+        // nothing on either side.
+        let packs = FactPackSet::load(&[install_pack("rust-itertools", &cache)]).unwrap();
+
+        let rust = packs.behaviors_for("rust");
+        assert!(
+            !rust.is_empty(),
+            "the rust-core pack must carry behaviors, or this test passes by \
+             finding nothing anywhere"
+        );
+        assert!(packs.behaviors_for("typescript").is_empty());
+        // and not by matching a prefix, a suffix, or an empty subject
+        assert!(packs.behaviors_for("").is_empty());
+        assert!(packs.behaviors_for("rus").is_empty());
     }
 
     /// Observations sharpen the analysis; without them it still runs.
