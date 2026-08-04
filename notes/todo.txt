@@ -1070,6 +1070,8 @@ both packs and diff them byte for byte. Deliberately not done in the same change
 as the frontend, so that a regression in either has exactly one place to be.
 
 A FINDING WORTH MORE THAN THE FEATURE — `parse_repository` DISCARDS FILES.
+(FIXED FOR RUST TOO on 08-04; see the last section of this file for what that
+cost and what it bought. What follows is the finding as first measured.)
 
   It drops any file whose tree has an error, whole. Measured on SpiderMonkey:
   three of four files carry `#if` preprocessor lines the grammar cannot read,
@@ -1276,3 +1278,88 @@ substantially. Treat the ranking as a hint.
 [ ] Parse caching. Parsing is 89% of dependency derivation and ~50% of a project
     scan, and it is now genuine work rather than setup. `docs/design.md` already
     lists it; node_modules barely changes between runs.
+
+## Reading the files that were being thrown away — 08-04
+
+`parse_repository` discards any file whose tree has an error, WHOLE. Found while
+building the TypeScript frontend, where three of SpiderMonkey's four files carry
+`#if` preprocessor lines and discarding them left 18 callables out of 89. Then
+measured on Rust, where nobody had looked.
+
+### What was hidden
+
+    core                31 unread files, holding 1,363 functions
+
+Among them `cmp.rs` (136 fns), `fmt/mod.rs` (160), `slice/index.rs` (94),
+`str/pattern.rs` (81), `ptr/mod.rs` (58), `sync/atomic.rs` (112). Everything
+they define was missing from the std pack, and `--allow-unread` is what turned
+that into a warning rather than a stop. The failure looks exactly like a library
+that simply has less in it.
+
+It also poisoned a tally this note leans on: a callable whose implementation sat
+in a discarded file is INDISTINGUISHABLE from one with no implementation
+anywhere, so part of item 4's 1,332 was never a coverage question at all.
+
+### The fix, and what it is not
+
+Read the file anyway; decline the functions whose own subtree carries an error,
+BY NAME. Tree-sitter recovers locally, so the damage is bounded to the construct
+that caused it: across core+alloc+std, 22 functions were actually damaged where
+31 whole files were being dropped.
+
+NOT a dialect rewrite. Blanking the directives leaves BOTH branches of a
+conditional in place and silently merges them, which is the erasure class this
+project keeps paying for. The existing dialect table is for syntax that can be
+neutralised without moving a byte; `#if` is not that.
+
+### Measured, every number
+
+    callables       4,029 -> 4,308   (core 1,668 -> 1,786, alloc 656 -> 727,
+                                      std 1,705 -> 1,795)
+    behaviors         464 -> 488     (+30 gained, 6 lost)
+    no-implementation 1,332 -> 1,270
+    damaged functions       22       named, not merely counted
+    itertools         130 -> 130     its source has no unreadable file
+    clippy          26/201, 36/36 on-target — UNCHANGED
+    collisions      9 -> 10 same-container, 12 cross — see below
+    ts scoreboard   25/155, 4/252 — unchanged
+
+THE CHECK THAT MATTERS MOST: of the 458 behaviors present before and after,
+**ZERO changed their derived program and ZERO changed their implementation
+chain.** The only difference in those files is `catalog_sha256`, which must
+change because the catalog now covers more source. So this is additive plus six
+refusals, not a re-derivation.
+
+### The six that were lost, and why that is correct
+
+    core::Argument::{as_u16, fmt}   core::Option::{as_pin_mut, as_pin_ref}
+    core::prefetch_read_instruction std::Storage::get
+
+Reading more source means more names, and `resolve` only resolves a name the
+library uses ONCE. Each of these was unique before because its competitor lived
+in a file that was being thrown away. Refusing an ambiguous name is the behavior
+this note already argued for at length — picking either would attribute one
+type's behavior to another and nothing downstream would show it. The loss is the
+resolver working, not the change failing.
+
+### The one new collision is not an erasure
+
+    std::{begin_panic, panic_any}
+
+`panic_any` is `crate::panicking::begin_panic(msg)` and nothing else — a genuine
+delegation, the class this note calls "expected and already handled", and
+`delegates_to` already prefers the wrapper when reporting. `begin_panic` only
+became visible because its file is now read. `pack-collisions.py` cannot tell
+this from an erasure because the two names do not extend one another; that is a
+limit of the script's heuristic and not a new bug.
+
+### Where the code should live
+
+`parse_library` is now written twice, once in each behavior frontend. It names
+no language and belongs in entl beside `parse_repository` — the boundary is
+explicit in AGENTS.md ("parsing belongs to Entl"). It is not in the neutral core
+because that crate deliberately depends on nothing but `infact-normalize`.
+
+[ ] Move `parse_library` into entl as `parse_repository_recovering`, additive,
+    leaving `parse_repository` alone for consumers who want a file with an error
+    to be no file at all.

@@ -8,7 +8,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use entl_tree_sitter::{ParsedFile, ParserCatalog, parse_repository};
+use entl_codebase::{InventoryOptions, walk};
+use entl_tree_sitter::{ParsedFile, ParserCatalog, ParserRuntime};
 use infact_behaviors::{Library, LibraryCallable, Refusal, SourceId, container_name, leaf_name};
 use infact_core::{
     CallableContainer, DerivedLibraryBehavior, EXTERNAL_CATALOG_SCHEMA, ExternalCallable,
@@ -29,6 +30,83 @@ use crate::{DERIVED_LIBRARY_BEHAVIOR_SCHEMA, Error, Result, node_text, source_sh
 /// which is exactly when `next` is the method worth following.
 const CONTRACT_METHODS: &[&str] = &["next", "next_back", "poll", "poll_next"];
 
+/// A library's sources, read whole where possible and in part where not.
+pub(crate) struct ParsedLibrary {
+    pub(crate) files: Vec<ParsedFile>,
+    /// Files that parsed with errors and were read anyway.
+    pub(crate) damaged: Vec<PathBuf>,
+    /// Files that could not be read at all.
+    pub(crate) unreadable: Vec<String>,
+}
+
+/// Parse a library, keeping what a file with an error in it still says.
+///
+/// `parse_repository` discards any file whose tree has an error, whole. That is
+/// right for a repository being analyzed, where the answer is about the file. It
+/// is wrong for a library being derived FROM, and it was hiding a large hole:
+/// deriving `core` reports 31 unread files holding **1,363 functions**, among
+/// them `cmp.rs`, `fmt/mod.rs`, `slice/index.rs`, `ptr/mod.rs` and
+/// `str/pattern.rs`. Every item in them was missing from the std pack, and
+/// `--allow-unread` turned that into a warning rather than a stop.
+///
+/// Tree-sitter recovers locally, so the damage is bounded to the construct that
+/// caused it. A function whose own subtree carries an error is declined by name;
+/// the rest of the file is exactly as readable as it was.
+///
+/// A callable whose implementation sat in a discarded file was indistinguishable
+/// from one with no implementation anywhere, which is why the "no implementation
+/// was found" tally could not be read as it stood.
+///
+/// This is duplicated in `infact-ts-behaviors`, which needed it first. It names
+/// no language and belongs in entl beside `parse_repository`; it is here twice
+/// rather than in the neutral core because the neutral core deliberately depends
+/// on nothing but `infact-normalize`.
+pub(crate) fn parse_library(
+    root: impl AsRef<Path>,
+    catalog: &ParserCatalog,
+) -> Result<ParsedLibrary> {
+    let tree = walk(root, &InventoryOptions::default())?;
+    let runtime = ParserRuntime::new()?;
+    let mut parsed = ParsedLibrary {
+        files: Vec::new(),
+        damaged: Vec::new(),
+        unreadable: tree
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.path.display(), diagnostic.message))
+            .collect(),
+    };
+    for file in &tree.files {
+        let Some(language) = file
+            .language
+            .as_ref()
+            .map(|detection| detection.language.as_str())
+        else {
+            continue;
+        };
+        let Some(pack) = catalog.resolve(language, &file.path) else {
+            continue;
+        };
+        let source = match tree.read_bytes(&file.path) {
+            Ok(source) => source,
+            Err(error) => {
+                parsed
+                    .unreadable
+                    .push(format!("{}: {error}", file.path.display()));
+                continue;
+            }
+        };
+        let read = runtime
+            .load(pack.clone())?
+            .parse(file.path.clone(), std::sync::Arc::<[u8]>::from(source))?;
+        if read.tree.root_node().has_error() {
+            parsed.damaged.push(file.path.clone());
+        }
+        parsed.files.push(read);
+    }
+    Ok(parsed)
+}
+
 /// A function found in the library source.
 struct LibraryFunction<'a> {
     file: &'a ParsedFile,
@@ -46,19 +124,29 @@ fn collect_functions<'a>(
     container: Option<&str>,
     reachable: bool,
     output: &mut Vec<LibraryFunction<'a>>,
+    damaged: &mut Vec<String>,
 ) {
     if node.kind() == "function_item"
         && let Some(name) = node
             .child_by_field_name("name")
             .and_then(|name| node_text(name, &file.source))
     {
-        output.push(LibraryFunction {
-            file,
-            node,
-            name: name.to_owned(),
-            container: container.map(str::to_owned),
-            reachable,
-        });
+        // A function the parser could not read whole is declined by name.
+        // Something is missing from its body, and normalizing what survived
+        // would describe a behavior nobody wrote — a confident wrong answer,
+        // which is the worst thing this can produce. It is not collected at
+        // all, so it is neither a callable to derive nor a delegation target.
+        if node.has_error() {
+            damaged.push(name.to_owned());
+        } else {
+            output.push(LibraryFunction {
+                file,
+                node,
+                name: name.to_owned(),
+                container: container.map(str::to_owned),
+                reachable,
+            });
+        }
     }
     // an `impl` names a type, a `trait` names itself; either qualifies the
     // functions written inside it
@@ -81,7 +169,7 @@ fn collect_functions<'a>(
         });
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        collect_functions(child, file, nested, nested_reachable, output);
+        collect_functions(child, file, nested, nested_reachable, output, damaged);
     }
 }
 
@@ -174,15 +262,23 @@ fn is_library_source(path: &Path) -> bool {
     })
 }
 
-fn library_functions(files: &[ParsedFile]) -> Vec<LibraryFunction<'_>> {
+fn library_functions(files: &[ParsedFile]) -> (Vec<LibraryFunction<'_>>, Vec<String>) {
     let mut functions = Vec::new();
+    let mut damaged = Vec::new();
     for file in files {
         if file.pack.language().id != "rust" || !is_library_source(&file.path) {
             continue;
         }
-        collect_functions(file.tree.root_node(), file, None, true, &mut functions);
+        collect_functions(
+            file.tree.root_node(),
+            file,
+            None,
+            true,
+            &mut functions,
+            &mut damaged,
+        );
     }
-    functions
+    (functions, damaged)
 }
 
 /// Which sources declare each named type.
@@ -245,8 +341,8 @@ pub fn derive_behavior(
     catalog: &ExternalCatalog,
     callable_path: &str,
 ) -> Result<DerivedLibraryBehavior> {
-    let parsed = parse_repository(source_root, parsers)?;
-    let functions = library_functions(&parsed.files);
+    let parsed = parse_library(source_root, parsers)?;
+    let (functions, _damaged) = library_functions(&parsed.files);
     let source_of = sources(&parsed.files);
     let callables = callables(&functions, &source_of);
     let library = Library::new(
@@ -446,8 +542,8 @@ pub fn derive_catalog(
     package: &str,
     version: &str,
 ) -> Result<ExternalCatalog> {
-    let parsed = parse_repository(source_root, parsers)?;
-    let functions = library_functions(&parsed.files);
+    let parsed = parse_library(source_root, parsers)?;
+    let (functions, _damaged) = library_functions(&parsed.files);
     catalog_from(&parsed, &functions, package, version)
 }
 
@@ -480,8 +576,8 @@ pub fn derive_library(
     package: &str,
     version: &str,
 ) -> Result<DerivedLibrary> {
-    let parsed = parse_repository(source_root, parsers)?;
-    let functions = library_functions(&parsed.files);
+    let parsed = parse_library(source_root, parsers)?;
+    let (functions, damaged) = library_functions(&parsed.files);
     let source_of = sources(&parsed.files);
     let catalog = catalog_from(&parsed, &functions, package, version)?;
     let callables = callables(&functions, &source_of);
@@ -504,11 +600,28 @@ pub fn derive_library(
             Err(error) => return Err(error),
         }
     }
-    let mut unparsed = parsed
-        .diagnostics
-        .iter()
-        .map(|diagnostic| format!("{}: {}", diagnostic.path.display(), diagnostic.message))
-        .collect::<Vec<_>>();
+    // A function read in part is a skip like any other and has to be counted as
+    // one. Left out of the tally, a grammar that stopped reading a construct
+    // would look like a library that simply had less in it.
+    if !damaged.is_empty() {
+        *skipped
+            .entry("the implementation could not be read whole".to_owned())
+            .or_insert(0) += damaged.len();
+    }
+    // A file read in part is still a hole, and it is still reported: what is
+    // gone is the pretence that the whole file was gone with it.
+    let mut unparsed = parsed.unreadable;
+    unparsed.extend(
+        parsed
+            .damaged
+            .iter()
+            .map(|path| format!("{}: read in part, the rest of it kept", path.display())),
+    );
+    unparsed.extend(
+        damaged
+            .iter()
+            .map(|name| format!("{name}: the parser could not read this function whole")),
+    );
     unparsed.sort();
     unparsed.dedup();
     Ok(DerivedLibrary {
@@ -541,7 +654,7 @@ fn skip_reason(error: &Error) -> String {
 }
 
 fn catalog_from(
-    parsed: &entl_tree_sitter::ParsedRepository,
+    parsed: &ParsedLibrary,
     functions: &[LibraryFunction<'_>],
     package: &str,
     version: &str,
