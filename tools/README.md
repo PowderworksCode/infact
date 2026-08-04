@@ -77,6 +77,42 @@ type-aware resolver would absorb them while looking authoritative.
 itertools on every build. This script is for running it over a std pack, which
 is too large to derive in a test.
 
+## depcorpus.py
+
+Scans every crate unpacked under `~/.cargo/registry/src` with one behavior pack.
+
+The clippy corpus says whether a change finds MORE. This says whether it finds
+more of the same thing, which is a different question and the one that has twice
+caught a change being technically right and useless.
+
+**The number that matters is the share held by the noisiest API**, not the total.
+`Option::is_none_or` once fired 1,390 times across five hundred crates and
+`map_or` nine hundred; both were correct, both subsumed every narrower behavior,
+and both had to be removed. One API holding most of the findings is that failure
+however good the total looks.
+
+The second number is the repeat multiplier — distinct `(crate, file, api)`
+against raw findings. Reporting every occurrence rather than the first was the
+largest recall win the Rust side has had, and the risk was that real code would
+multiply the same way and drown the output. It does not; 1.36x when measured.
+
+    cargo build --release -p infact-cli
+    python3 tools/depcorpus.py <measure>/packs/std          # every crate
+    python3 tools/depcorpus.py <measure>/packs/std 40       # a smoke test
+
+Nothing is vendored, so two machines will not agree on the total unless they
+agree on their registries. **Compare shares, and re-run the baseline pack rather
+than trusting a total recorded elsewhere.** A full run over 778 crates takes
+about forty minutes.
+
+Recorded 08-04, over 778 crates with the 488-behavior std pack:
+
+    findings                  1,828
+    crates with >= 1 finding    293
+    distinct APIs named          67
+    top API   Option::unwrap_or 311 (17.0%)
+    is_none_or                   48
+
 ## ts-scoreboard
 
 Scores TypeScript behavior matches the way `clippy-scoreboard.py` scores Rust
