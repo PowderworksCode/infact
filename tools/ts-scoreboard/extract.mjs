@@ -5,8 +5,62 @@
 // annotated positives; `valid: [...]` entries are annotated NEGATIVES, which
 // clippy's ui tests do not give us and which are worth just as much — a
 // finding on a valid case is a false positive with ground truth attached.
-import ts from "/home/exedev/powderworks-ts/tsprobe/node_modules/typescript/lib/typescript.js";
 import fs from "node:fs";
+import path from "node:path";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
+
+// Where the TypeScript compiler is, without naming one machine.
+//
+// This module lives in the repository and the corpus it reads lives outside it,
+// so a bare `import "typescript"` resolves from the wrong place: ESM looks
+// beside the importing FILE, and the install is beside the CORPUS. Resolving
+// from the working directory and from <measure>/ts-lints is what makes
+// `node tools/ts-scoreboard/export.mjs` work from either. An explicit path wins
+// over both, which is the same override the scorer takes.
+//
+// This was a hardcoded absolute path into one checkout, which made the harness
+// unrunnable anywhere else — the same failure the other two harnesses had
+// before their paths were derived from the repository.
+// Where the rule tests and the generated cases.json live.
+//
+// Derived from this file's location, the same way the two Python harnesses
+// derive theirs, so a run does not depend on which directory it started in.
+export const corpus = path.join(
+  process.env.INFACT_MEASURE ?? path.join(import.meta.dirname, "../../../measure"),
+  "ts-lints",
+);
+
+function loadTypeScript() {
+  const flag = process.argv.indexOf("--typescript");
+  const explicit =
+    (flag >= 0 ? process.argv[flag + 1] : undefined) ?? process.env.TYPESCRIPT;
+  const tried = [];
+  const candidates = [
+    ...(explicit ? [explicit] : []),
+    "typescript",
+  ];
+  const bases = [process.cwd(), corpus, import.meta.dirname];
+  for (const base of bases) {
+    // a directory is not a module, so resolution starts from a file inside it
+    const require = createRequire(pathToFileURL(path.join(base, "-")));
+    for (const candidate of candidates) {
+      try {
+        return require(candidate);
+      } catch {
+        tried.push(`${candidate} from ${base}`);
+      }
+    }
+  }
+  throw new Error(
+    `no TypeScript compiler found. Install one beside the corpus\n` +
+      `  (cd <measure>/ts-lints && npm install typescript@5)\n` +
+      `or pass --typescript <path to typescript.js>. Tried:\n  ` +
+      tried.join("\n  "),
+  );
+}
+
+const ts = loadTypeScript();
 
 function text(node, sf) {
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
