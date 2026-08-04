@@ -13,6 +13,7 @@ entl-semantics = { path = "../../../entl/crates/entl-semantics" }
 entl-tree-sitter.workspace = true
 infact-core = { path = "../infact-core" }
 infact-fact-pack = { path = "../infact-fact-pack" }
+infact-flow = { path = "../infact-flow" }
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
