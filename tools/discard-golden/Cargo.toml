@@ -1,0 +1,16 @@
+[package]
+name = "discard-golden"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+description = "Freezes what the error-discard analyzer reports, so a refactor can be shown to change nothing."
+
+# Deliberately outside the Infact workspace, like the other harnesses here:
+# this is how the work is measured, not part of what ships.
+[workspace]
+
+[dependencies]
+entl-tree-sitter = { path = "../../../entl/crates/entl-tree-sitter" }
+infact-core = { path = "../../crates/infact-core" }
+infact-errors = { path = "../../crates/infact-errors" }
+tree-sitter = "0.26"
