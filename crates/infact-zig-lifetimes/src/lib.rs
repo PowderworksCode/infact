@@ -62,6 +62,12 @@
 
 use entl_zig_observe::{ContainerField, Span};
 
+mod evidence;
+pub mod flow;
+pub mod origin;
+
+pub use evidence::{EVIDENCE_RULES, EvidenceRule, FieldEvidence, classify_with_evidence};
+
 /// The ownership classes Bun's port uses, as spelled in its classification.
 ///
 /// The full set is listed because a consumer reads it from that file and needs
@@ -345,13 +351,46 @@ fn is_fn_pointer(zig_type: &str) -> bool {
     false
 }
 
+/// What an answer rests on.
+///
+/// The two carry different risk and a consumer must be able to tell them apart:
+/// a [`Rule`] cannot name a class that hands Rust memory to free, and an
+/// [`EvidenceRule`] can. Keeping them in one enum rather than one trait means a
+/// consumer that ignores the distinction gets a compile error rather than a
+/// double-free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Basis {
+    /// The declaration alone settled it. Never an owning class.
+    Declaration(Rule),
+    /// An assignment or a call settled it. May be an owning class; see
+    /// [`EvidenceRule::can_double_free`].
+    Evidence(EvidenceRule),
+}
+
+impl Basis {
+    pub fn id(self) -> &'static str {
+        match self {
+            Basis::Declaration(rule) => rule.id(),
+            Basis::Evidence(rule) => rule.id(),
+        }
+    }
+
+    /// Would a wrong answer on this basis hand Rust memory it does not own?
+    pub fn can_double_free(self) -> bool {
+        match self {
+            Basis::Declaration(_) => false,
+            Basis::Evidence(rule) => rule.can_double_free(),
+        }
+    }
+}
+
 /// One derived answer, with what produced it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Classification {
     pub class: OwnershipClass,
-    pub rule: Rule,
-    /// See [`Rule::measured_precision`]. Carried on the fact so a consumer never
-    /// has to look the number up to weigh the answer.
+    pub basis: Basis,
+    /// The measured precision of whatever produced this. Carried on the fact so
+    /// a consumer never has to look the number up to weigh the answer.
     pub measured_precision: f32,
     pub worst_fold_precision: f32,
     /// The declaration this was derived from.
@@ -369,7 +408,7 @@ pub fn classify(field: &ContainerField) -> Option<Classification> {
     let rule = RULES.iter().copied().find(|rule| rule.matches(field))?;
     Some(Classification {
         class: rule.class().into(),
-        rule,
+        basis: Basis::Declaration(rule),
         measured_precision: rule.measured_precision(),
         worst_fold_precision: rule.worst_fold_precision(),
         span: field.span,
