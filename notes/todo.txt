@@ -1,5 +1,71 @@
 infact — todo
 
+## A counted `while` is a traversal, and the reason it was opaque was wrong
+
+Landed 08-04. `while i < len(xs): v = xs[i]; ..; i += 1` now becomes the same
+`Traverse` as `for v in xs`, and `while i < n: ..; i += 1` the same as
+`for i in range(n)`. `infact-ts-normalize` calls recognizing an index walk "the
+single most important thing this module does".
+
+### The stated reason did not survive a census
+
+The code said "a `while` walks something the syntax does not name". Over 2,513
+`while` loops in the installed corpus:
+
+     761  30.3%  while True / while 1      <- walks nothing at all
+     467  18.6%  other comparison
+     292  11.6%  counter compared and rebound
+     282  11.2%  compound condition
+     168   6.7%  advances a cursor
+     137   5.5%  calls something each time
+     131   5.2%  until a flag is set
+      99   3.9%  drains a container
+      75   3.0%  reads an attribute
+      58   2.3%  spins on a flag
+      30   1.2%  walrus: read until exhausted
+
+The single largest category walks nothing, so the stated reason was wrong about
+the biggest slice of what it was covering.
+
+### And then 11.6% was wrong too, in the other direction
+
+That 11.6% was quoted here and written into a doc comment before it was
+checked. It came from a loose classifier: condition is a comparison and the
+counter is rebound ANYWHERE, including inside a branch, including loops that
+index nothing. Tightened to what a traversal actually requires:
+
+    307  condition is a bounded comparison
+     94    ...advanced by one at the TOP LEVEL of the body
+     53      ...and indexes a sequence with it
+     41      ...indexes nothing: a walk over a range
+
+So the addressable population is 94 of 2,513 — 3.7%, not 11.6%. The rule takes
+89 of them, and `while` opacity went 2,631 -> 2,542. Third time this session
+the reasoning has been directionally right and numerically wrong before the
+corpus corrected it; the pattern is that a category counted loosely is not the
+category a rule can act on.
+
+### Why it is worth having anyway
+
+Not for the 0.102% -> 0.099% opacity, which is noise. For the equivalence: a
+counted `while` and a `for` over the same sequence are now one form, so a
+consumer matching either spelling finds both. That is the same reason the
+append-loop-equals-comprehension rule matters, and it cannot be read off an
+opacity number.
+
+An advance inside a branch is deliberately declined — it does not visit every
+element, and giving it a traversal's shape would claim it did. Counting
+backwards over a range is declined for the same kind of reason: `range(n - 1,
+-1, -1)` is not a spelling anyone writes, so there is no equivalence to claim.
+
+### A latent bug this turned up in the block pipeline
+
+Dead bindings are now dropped BEFORE fusing as well as after. A counted walk
+leaves its counter behind — `i = 0` with nothing left to read it — and that
+dead step sat BETWEEN the empty container and the loop filling it, which hid an
+ordinary append loop from `fuse_container_fills`. Any dead statement in that
+position would have done the same; the counted loop is just what produced one.
+
 ## Imported names are qualified, and the ceiling was 23% but the take was 2.6%
 
 Landed 08-04. `from pyparsing import Regex` makes `Regex` mean

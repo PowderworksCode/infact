@@ -965,3 +965,140 @@ def f(x):
         "a name defined here and a name from nowhere are both just the name"
     );
 }
+
+// -- Rule 13: an index walk is a traversal ------------------------------------
+
+/// The rule this exists for: a counted `while` and a `for` are one walk.
+///
+/// `infact-ts-normalize` calls recognizing an index walk "the single most
+/// important thing this module does". Python needs it for the same reason,
+/// and until now every `while` was one opaque form regardless of what it did.
+#[test]
+fn a_counted_while_and_a_for_are_the_same_walk() {
+    let counted = form(
+        "def f(xs):
+    out = []
+    i = 0
+    while i < len(xs):
+        v = xs[i]
+        out.append(g(v))
+        i += 1
+    return out
+",
+        "f",
+    );
+    let walked = form(
+        "def f(xs):
+    out = []
+    for v in xs:
+        out.append(g(v))
+    return out
+",
+        "f",
+    );
+    assert_eq!(
+        counted, walked,
+        "counting to the end of a sequence is walking it"
+    );
+}
+
+/// Counting down is not counting up.
+#[test]
+fn a_backwards_index_walk_is_not_a_forwards_one() {
+    let forwards = form(
+        "def f(xs):
+    i = 0
+    while i < len(xs):
+        if p(xs[i]):
+            return xs[i]
+        i += 1
+",
+        "f",
+    );
+    let backwards = form(
+        "def f(xs):
+    i = len(xs) - 1
+    while i >= 0:
+        if p(xs[i]):
+            return xs[i]
+        i -= 1
+",
+        "f",
+    );
+    assert_ne!(
+        forwards, backwards,
+        "finding the first match is not finding the last"
+    );
+}
+
+/// A loop that advances its counter only sometimes is not a traversal.
+///
+/// `while i < n: if p(xs[i]): i += 1` does not visit every element, and giving
+/// it a traversal's shape would claim it did. This is the guard that keeps the
+/// rule above from swallowing every counted loop.
+#[test]
+fn a_conditional_advance_is_not_a_walk() {
+    let form = form(
+        "def f(xs):
+    i = 0
+    while i < len(xs):
+        if p(xs[i]):
+            i += 1
+    return i
+",
+        "f",
+    );
+    assert!(
+        format!("{form}").contains("while"),
+        "this must stay opaque, got {form}"
+    );
+}
+
+/// A `while` that walks nothing stays opaque, and says what it is.
+///
+/// 30.3% of `while` loops in the installed corpus are `while True`, which
+/// leaves through a `break` rather than reaching the end of anything. The
+/// census behind that number is in `notes/todo.txt`.
+#[test]
+fn an_unbounded_loop_is_still_held_opaque() {
+    let form = form(
+        "def f(source):
+    while True:
+        chunk = source.read()
+        if not chunk:
+            break
+        handle(chunk)
+",
+        "f",
+    );
+    assert!(
+        format!("{form}").contains("while"),
+        "an unbounded loop names no sequence, got {form}"
+    );
+}
+
+/// A counted loop that indexes nothing is a walk over a range.
+#[test]
+fn a_counted_while_and_a_range_for_are_the_same_walk() {
+    let counted = form(
+        "def f(n):
+    total = 0
+    i = 0
+    while i < n:
+        total += g(i)
+        i += 1
+    return total
+",
+        "f",
+    );
+    let ranged = form(
+        "def f(n):
+    total = 0
+    for i in range(n):
+        total += g(i)
+    return total
+",
+        "f",
+    );
+    assert_eq!(counted, ranged, "counting to n is walking range(n)");
+}

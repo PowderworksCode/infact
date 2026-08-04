@@ -270,7 +270,13 @@ impl<'a> Normalizer<'a> {
                 push_flattened(&mut steps, step, StatementSpan::of(child));
             }
         }
-        let steps = drop_unused_bindings(fuse_container_fills(inline_aliases(steps)));
+        // Dead bindings are dropped BEFORE fusing as well as after. A counted
+        // walk leaves its counter behind — `i = 0` with nothing left to read it
+        // — and a dead step sitting between the empty container and the loop
+        // that fills it would hide an ordinary append loop from the fusion.
+        let steps = drop_unused_bindings(fuse_container_fills(drop_unused_bindings(
+            inline_aliases(steps),
+        )));
         self.depth -= 1;
         let (forms, spans): (Vec<_>, Vec<_>) = steps.into_iter().unzip();
         let form = match forms.len() {
@@ -485,10 +491,129 @@ impl<'a> Normalizer<'a> {
         (self.expression(node), Direction::Forward)
     }
 
+    /// An index walk is a traversal, however the loop is spelled.
+    ///
+    /// `while i < len(xs): v = xs[i]; ..; i += 1` visits each element of `xs`
+    /// in turn, which is what `for v in xs` says. `infact-ts-normalize` calls
+    /// recognizing this "the single most important thing this module does",
+    /// and Python needs it for the same reason: the two spellings are the same
+    /// operation and a consumer that saw two forms would report neither.
+    ///
+    /// The addressable population is smaller than it first looks. Of 2,513
+    /// `while` loops in the installed corpus, 307 test a bounded comparison,
+    /// only 94 advance the counter by one at the top level of the body — an
+    /// advance inside a branch does not visit every element — and of those 53
+    /// index a sequence with it. The other 41 are handled by `counted_range`.
+    fn while_index_walk(&mut self, node: Node<'_>) -> Option<Form> {
+        let condition = node.child_by_field_name("condition")?;
+        let body = node.child_by_field_name("body")?;
+        let (counter, direction, advance) = loop_counter(condition, body, self.source)?;
+        let Some(indexed) = find_indexed(body, &counter, self.source) else {
+            return self.counted_range(condition, body, &counter, direction, advance);
+        };
+
+        // Order matters: the sequence and the counter have to be read with the
+        // roles the code outside the loop gave them, before the item shadows
+        // anything. Resolving the counter after binding would hand back the
+        // item and replace every access with itself.
+        let sequence = self.expression(indexed.sequence);
+        let counter_form = self.roles.resolve(&counter);
+        let Form::Local(item) = self.roles.bind(&indexed.binding) else {
+            return None;
+        };
+
+        let skipped = [
+            Some(advance.id()),
+            indexed.declaration.map(|node| node.id()),
+        ];
+        let walked = self.walk_body(body, &skipped);
+        let walked = replace_element_access(&walked, &sequence, &counter_form, &Form::Local(item));
+        Some(Form::Traverse {
+            sequence: Box::new(sequence),
+            item: Box::new(Pattern::Binding(item)),
+            body: Box::new(walked),
+            direction,
+        })
+    }
+
+    /// A counted loop that indexes nothing is a walk over a range.
+    ///
+    /// `while i < n: total += i; i += 1` visits every number below `n`, which
+    /// is what `for i in range(n)` says. Measured over the installed corpus
+    /// there are 41 of these against 53 that index a sequence, so declining
+    /// them would leave nearly half the addressable loops on the floor.
+    ///
+    /// Only forwards. Counting down has no one spelling to meet — `range(n - 1,
+    /// -1, -1)` is not what anyone writes — so claiming an equivalence there
+    /// would be inventing one.
+    fn counted_range(
+        &mut self,
+        condition: Node<'_>,
+        body: Node<'_>,
+        counter: &str,
+        direction: Direction,
+        advance: Node<'_>,
+    ) -> Option<Form> {
+        if direction != Direction::Forward {
+            return None;
+        }
+        let bound = code_children(condition).get(1).copied()?;
+        let sequence = Form::Call {
+            callee: Box::new(Form::Path("range".to_owned())),
+            arguments: vec![self.expression(bound)],
+        };
+        let Form::Local(item) = self.roles.bind(counter) else {
+            return None;
+        };
+        let walked = self.walk_body(body, &[Some(advance.id())]);
+        Some(Form::Traverse {
+            sequence: Box::new(sequence),
+            item: Box::new(Pattern::Binding(item)),
+            body: Box::new(walked),
+            direction,
+        })
+    }
+
+    /// A loop body, without the statements the traversal has already accounted
+    /// for: the counter's advance, and the assignment that named the element.
+    fn walk_body(&mut self, body: Node<'_>, skipped: &[Option<usize>]) -> Form {
+        let mut steps = Vec::new();
+        self.depth += 1;
+        for child in code_children(body) {
+            if skipped.contains(&Some(child.id())) {
+                continue;
+            }
+            if let Some(step) = self.statement(child) {
+                push_flattened(&mut steps, step, StatementSpan::of(child));
+            }
+        }
+        // Dead bindings are dropped BEFORE fusing as well as after. A counted
+        // walk leaves its counter behind — `i = 0` with nothing left to read it
+        // — and a dead step sitting between the empty container and the loop
+        // that fills it would hide an ordinary append loop from the fusion.
+        let steps = drop_unused_bindings(fuse_container_fills(drop_unused_bindings(
+            inline_aliases(steps),
+        )));
+        self.depth -= 1;
+        let forms: Vec<_> = steps.into_iter().map(|(form, _)| form).collect();
+        match forms.len() {
+            0 => Form::Sequence(Vec::new()),
+            1 => forms.into_iter().next().unwrap_or(Form::Literal),
+            _ => Form::Sequence(forms),
+        }
+    }
+
     fn while_statement(&mut self, node: Node<'_>) -> Form {
-        // A `while` walks something the syntax does not name. Held opaque
-        // rather than guessed at, so the gap stays visible instead of turning
-        // every loop into the same traversal.
+        if let Some(walk) = self.while_index_walk(node) {
+            return walk;
+        }
+        // What is left is not one thing, and none of it is "a walk over
+        // something unnamed" — that was the stated reason here and the corpus
+        // disagreed. Of 2,513 `while` loops, 30.3% are `while True`, which
+        // walks nothing and leaves through a `break`; 18.6% test a comparison
+        // that names no sequence; the rest spin on flags, drain containers or
+        // advance cursors. Held opaque, with the condition and body kept as
+        // parts so two different loops are not one form.
         let condition = node
             .child_by_field_name("condition")
             .map_or(Form::Literal, |condition| self.expression(condition));
@@ -1475,4 +1600,155 @@ pub fn normalize_file(file: &ParsedFile) -> Vec<NormalizedFunction> {
             })
         })
         .collect()
+}
+
+/// An element access found in a loop body, and what names it.
+struct Indexed<'a> {
+    sequence: Node<'a>,
+    binding: String,
+    /// The assignment that gave the element a name, when there is one.
+    declaration: Option<Node<'a>>,
+}
+
+/// The counter a `while` bounds and advances, and which way it runs.
+///
+/// All three have to agree or this is some other loop that happens to compare
+/// a number: the condition bounds the name, the body advances it, and the two
+/// point the same way. Counting up under `<` walks forwards; counting down
+/// under `>` or `>=` walks backwards, which is the difference between finding
+/// the first match and the last.
+fn loop_counter<'a>(
+    condition: Node<'_>,
+    body: Node<'a>,
+    source: &[u8],
+) -> Option<(String, Direction, Node<'a>)> {
+    if condition.kind() != "comparison_operator" {
+        return None;
+    }
+    let children = code_children(condition);
+    let [left, right] = children.as_slice() else {
+        return None;
+    };
+    if left.kind() != "identifier" {
+        return None;
+    }
+    // A bound that is itself the counter would make the loop's end depend on
+    // where it already is, which is not a walk over a sequence.
+    let counter = text(*left, source).to_owned();
+    if text(*right, source)
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .any(|word| word == counter)
+    {
+        return None;
+    }
+    let operator = condition
+        .child(1)
+        .map(|node| text(node, source))
+        .unwrap_or_default();
+    let advance = find_advance(body, &counter, source)?;
+    let step = text(inner(advance).child_by_field_name("operator")?, source);
+    let direction = match (operator, step) {
+        ("<" | "<=", "+=") => Direction::Forward,
+        (">" | ">=", "-=") => Direction::Backward,
+        _ => return None,
+    };
+    Some((counter, direction, advance))
+}
+
+/// The expression a statement wraps, since `i += 1` arrives inside an
+/// `expression_statement` and the fields live on the assignment.
+fn inner(node: Node<'_>) -> Node<'_> {
+    code_children(node).first().copied().unwrap_or(node)
+}
+
+/// The statement that advances the counter by one.
+///
+/// Returns the STATEMENT rather than the assignment inside it, because the
+/// caller drops it from the body by identity and the body is a list of
+/// statements.
+///
+/// Only a top-level statement of the loop body counts. An advance buried in a
+/// branch runs some of the time, and a traversal that visits every element
+/// would be the wrong shape for it.
+fn find_advance<'a>(body: Node<'a>, counter: &str, source: &[u8]) -> Option<Node<'a>> {
+    code_children(body).into_iter().find(|child| {
+        let statement = inner(*child);
+        statement.kind() == "augmented_assignment"
+            && statement
+                .child_by_field_name("left")
+                .is_some_and(|left| text(left, source) == counter)
+            && statement
+                .child_by_field_name("right")
+                .is_some_and(|right| text(right, source).trim() == "1")
+    })
+}
+
+/// The sequence a loop body indexes with `counter`, and the name it binds.
+///
+/// A body normally names the element first — `v = xs[i]` — and then works with
+/// the name. When it does not, the access itself is the element and a name is
+/// supplied, because a traversal has to bind one.
+fn find_indexed<'a>(body: Node<'a>, counter: &str, source: &[u8]) -> Option<Indexed<'a>> {
+    fn walk<'a>(node: Node<'a>, counter: &str, source: &[u8], found: &mut Option<Node<'a>>) {
+        if found.is_some() {
+            return;
+        }
+        if node.kind() == "subscript"
+            && node
+                .child_by_field_name("subscript")
+                .is_some_and(|index| text(index, source) == counter)
+        {
+            *found = Some(node);
+            return;
+        }
+        for child in named_children(node) {
+            walk(child, counter, source, found);
+        }
+    }
+    let mut found = None;
+    walk(body, counter, source, &mut found);
+    let access = found?;
+    let sequence = access.child_by_field_name("value")?;
+
+    let mut declaration = None;
+    let mut binding = None;
+    for child in code_children(body) {
+        let statement = inner(child);
+        if statement.kind() != "assignment" {
+            continue;
+        }
+        if statement
+            .child_by_field_name("right")
+            .is_some_and(|right| right.id() == access.id())
+            && let Some(name) = statement.child_by_field_name("left")
+            && name.kind() == "identifier"
+        {
+            binding = Some(text(name, source).to_owned());
+            declaration = Some(child);
+        }
+    }
+    Some(Indexed {
+        sequence,
+        binding: binding.unwrap_or_else(|| format!("__item_{counter}")),
+        declaration,
+    })
+}
+
+/// Replace `xs[i]` with the item the traversal binds.
+///
+/// Without this the body still reads the sequence by index and no `for` loop
+/// over the same sequence could ever match it.
+fn replace_element_access(form: &Form, sequence: &Form, counter: &Form, item: &Form) -> Form {
+    if let Form::Method {
+        name,
+        receiver,
+        arguments,
+    } = form
+        && name == "index"
+        && receiver.as_ref() == sequence
+        && arguments.as_slice() == std::slice::from_ref(counter)
+    {
+        return item.clone();
+    }
+    form.map_children(&|child| replace_element_access(child, sequence, counter, item))
 }
