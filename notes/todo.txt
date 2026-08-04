@@ -1542,3 +1542,29 @@ entirely when no pack describes TypeScript.
 [ ] The two frontends parse the repository once each. One walk feeding both
     would halve that, and needs `parse_repository` to hand back files grouped by
     language rather than each analyzer filtering the whole set.
+
+
+## The dependency corpus after reading the damaged files — 08-04
+
+Re-ran the 778-crate registry scan with both packs, because a pack that gained
+30 behaviors is exactly where a new `is_none_or` would come from.
+
+    findings                  1,828  ->  1,828
+    crates with >= 1 finding    293  ->    293
+    distinct APIs named          67  ->     67
+    Option::unwrap_or     311 (17.0%) ->  identical
+    Option::is_none_or             48 ->     48
+
+BIT-FOR-BIT IDENTICAL. The 30 new behaviors add library-surface coverage and
+report nothing new anywhere: they are `Formatter::pad`, the atomics,
+`io::Error::kind`, `Vec::remove` and their like — API a caller does not
+hand-roll. Worth recording as a shape rather than a disappointment: reading more
+of a library adds behaviors near the parts of it people do not reimplement,
+because the parts they DO reimplement were the readable, ordinary ones already.
+
+The scan script is not in tools/ — it is thirty lines around
+`infact behaviors <crate>` and the number that matters is the top-API share,
+not the total. Both are recorded above so a re-run can be compared.
+
+[ ] Put the dependency-corpus scan in tools/ beside the other two harnesses.
+    It has now been reconstructed from scratch twice.
