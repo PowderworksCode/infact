@@ -1,0 +1,17 @@
+[package]
+name = "infact-zig-lifetimes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Derives Zig pointer-field ownership from observed container fields."
+
+[dependencies]
+entl-zig-observe = { path = "../../../entl/crates/entl-zig-observe" }
+
+[dev-dependencies]
+entl-tree-sitter.workspace = true
+
+[lints]
+workspace = true
