@@ -101,12 +101,15 @@ fn array_like(head: &str) -> bool {
 }
 
 /// The case a reported span belongs to.
+///
+/// Every file in the corpus is named `case_<n>.ts` by `write_corpus`, so a name
+/// that does not read as one is not a case and there is no failure to report.
 fn case_index(path: &Path) -> Option<usize> {
     path.file_stem()?
         .to_str()?
         .strip_prefix("case_")?
         .parse()
-        .ok()
+        .ok() // straitjacket-allow:error-discard — a name that is not `case_<n>` names no case
 }
 
 /// Where a run reads from, all overridable so this is not tied to one machine.
