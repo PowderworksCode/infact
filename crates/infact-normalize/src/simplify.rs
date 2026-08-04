@@ -20,6 +20,8 @@
 //!
 //! Applied to a fixpoint, they carry both sides toward the same shape.
 
+use std::cell::Cell;
+
 use crate::{Direction, Form, Pattern};
 
 /// How many times to sweep before giving up.
@@ -30,12 +32,38 @@ use crate::{Direction, Form, Pattern};
 /// that stops early.
 const MAX_SWEEPS: usize = 8;
 
+/// How many calls one `simplify` may replace with the body they name.
+///
+/// A bound is necessary because unfolding can be made to run forever by code
+/// that applies a function to itself — the Y combinator is the shortest way,
+/// and CPython's `test_inspect` writes one. Nothing about the binding group
+/// says so in advance, so this is what stops it.
+///
+/// IT IS ALSO A TUNING KNOB, which the first version of this comment claimed it
+/// was not. Measured over CPython's `Lib`, the total size of every form the
+/// Python frontend produces still rises with every increase — 2,390,857 nodes
+/// at 4, 2,418,798 at 16, 2,443,675 at 64, with no plateau anywhere. Real
+/// bodies consume all of it, because unfolding a call into a body that is used
+/// twice makes the form bigger on purpose: that is how a caller's inlined shape
+/// comes to match a library's.
+///
+/// So the value trades how much a form says against how large it gets, and it
+/// has NOT been calibrated against whether matching improves — that needs a
+/// matching corpus, which Python does not have yet. 64 is the value the
+/// pathological cases were fixed at, not a measured optimum.
+const MAX_UNFOLDS: u32 = 64;
+
 impl Form {
     /// Rewrite until no law applies.
     pub fn simplify(&self) -> Self {
+        // The fuel spans the whole call rather than one pass. Per-pass, eight
+        // sweeps compound: each one unfolds a self-application 64 levels deeper
+        // than the last, and the form a bounded rewrite left behind was still
+        // large enough to exhaust a debug build's stack when anything walked it.
+        let fuel = Cell::new(MAX_UNFOLDS);
         let mut current = self.clone();
         for _ in 0..MAX_SWEEPS {
-            let next = current.sweep();
+            let next = current.sweep(&fuel);
             if next == current {
                 break;
             }
@@ -134,8 +162,8 @@ impl Form {
     }
 
     /// One pass: rewrite the children, then this node.
-    fn sweep(&self) -> Self {
-        let rebuilt = self.map_children(&|child| child.sweep());
+    fn sweep(&self, fuel: &Cell<u32>) -> Self {
+        let rebuilt = self.map_children(&|child| child.sweep(fuel));
         rebuilt
             .as_fused()
             .or_else(|| rebuilt.as_searched())
@@ -144,7 +172,7 @@ impl Form {
             .or_else(|| rebuilt.as_escape())
             .or_else(|| rebuilt.as_traversal())
             .or_else(|| rebuilt.as_recovered_escape())
-            .or_else(|| rebuilt.as_unfolded())
+            .or_else(|| rebuilt.as_unfolded(fuel))
             .unwrap_or(rebuilt)
     }
 
@@ -446,7 +474,7 @@ impl Form {
     ///
     /// Only the outermost application is unfolded here; sweeping repeatedly
     /// reaches the rest.
-    fn as_unfolded(&self) -> Option<Self> {
+    fn as_unfolded(&self, fuel: &Cell<u32>) -> Option<Self> {
         let Self::Sequence(steps) = self else {
             return None;
         };
@@ -459,12 +487,13 @@ impl Form {
                 bindings.push((*index, value.as_ref().clone()));
             }
         }
+        let bindings = unfoldable(&bindings);
         if bindings.is_empty() {
             return None;
         }
         let rewritten = steps
             .iter()
-            .map(|step| step.apply_bindings(&bindings))
+            .map(|step| step.apply_bindings(&bindings, fuel))
             .collect::<Vec<_>>();
         // a binding nothing refers to any more is noise
         let used = |index: u32| {
@@ -495,21 +524,42 @@ impl Form {
     }
 
     /// Replace calls to bound lambdas with their bodies.
-    fn apply_bindings(&self, bindings: &[(u32, Self)]) -> Self {
+    /// `fuel` bounds how many calls one pass may replace.
+    ///
+    /// [`unfoldable`] refuses the bindings whose *names* cycle, and that is not
+    /// enough on its own: a recursion can arrive through an ARGUMENT instead.
+    /// The Y combinator is the shortest example and CPython's `test_inspect`
+    /// contains it —
+    ///
+    /// ```text
+    ///   def Y(le):
+    ///       def g(f):
+    ///           return le(lambda x: f(f)(x))
+    ///       return g(g)
+    /// ```
+    ///
+    /// — where `g` names nothing recursive, and substituting `g` for `f`
+    /// produces `f(f)` again. No analysis of the binding group can see that
+    /// coming, so unfolding is bounded rather than made clever. Running out
+    /// leaves a partly unfolded form, which is the same thing `MAX_SWEEPS`
+    /// already does one level up.
+    fn apply_bindings(&self, bindings: &[(u32, Self)], fuel: &Cell<u32>) -> Self {
         if let Self::Call { callee, arguments } = self
             && let Self::Local(index) = callee.as_ref()
             && let Some((_, Self::Lambda { parameters, body })) =
                 bindings.iter().find(|(bound, _)| bound == index)
+            && fuel.get() > 0
         {
+            fuel.set(fuel.get() - 1);
             let mut substituted = body.as_ref().clone();
             for (parameter, argument) in parameters.iter().zip(arguments) {
                 if let Pattern::Binding(bound) = parameter {
                     substituted = substituted.substitute(*bound, argument);
                 }
             }
-            return substituted.apply_bindings(bindings);
+            return substituted.apply_bindings(bindings, fuel);
         }
-        self.map_children(&|child| child.apply_bindings(bindings))
+        self.map_children(&|child| child.apply_bindings(bindings, fuel))
     }
 
     /// Replace a bound name with a value throughout.
@@ -517,6 +567,41 @@ impl Form {
         match self {
             Self::Local(bound) if *bound == index => value.clone(),
             other => other.map_children(&|child| child.substitute(index, value)),
+        }
+    }
+}
+
+/// The bindings that can be unfolded without the unfolding going on forever.
+///
+/// Replacing a call with the body it calls does not terminate when the body
+/// calls back: a self-recursive local function expands into a copy of itself
+/// containing another call to itself, and so on until the stack is gone. A
+/// group of local functions that call each other does the same thing one step
+/// further out.
+///
+/// This is not hypothetical and it is not a Python problem, though Python is
+/// where it surfaced: `json/encoder.py` defines `_iterencode`,
+/// `_iterencode_list` and `_iterencode_dict` inside one factory and has each
+/// call the others, and simplifying it aborted the process. Any language whose
+/// frontend binds a nested function to a name reaches the same shape.
+///
+/// A binding is safe when every group member its body names is itself safe,
+/// which is a least fixed point over an acyclic subgraph. A binding that names
+/// itself is never safe, because it is never in the set being tested against.
+/// A binding that only calls safe ones still unfolds, because substituting into
+/// a directed acyclic graph terminates.
+fn unfoldable(bindings: &[(u32, Form)]) -> Vec<(u32, Form)> {
+    let mut safe: Vec<(u32, Form)> = Vec::new();
+    loop {
+        let next = bindings.iter().find(|(index, lambda)| {
+            !safe.iter().any(|(known, _)| known == index)
+                && bindings.iter().all(|(other, _)| {
+                    !lambda.references_local(*other) || safe.iter().any(|(known, _)| known == other)
+                })
+        });
+        match next {
+            Some(binding) => safe.push(binding.clone()),
+            None => return safe,
         }
     }
 }
@@ -965,6 +1050,104 @@ mod tests {
         // the call becomes the body with the argument in place, and the binding
         // nothing refers to any more disappears
         assert_eq!(sequence.simplify().to_string(), "f9");
+    }
+
+    /// Unfolding a name that calls itself does not terminate.
+    ///
+    /// The body replacing the call contains the same call, so each pass makes
+    /// the form strictly larger and the recursion in `apply_bindings` runs to
+    /// the end of the stack. Found on CPython's `json/encoder.py`, which binds
+    /// three mutually recursive generators inside one factory; simplifying it
+    /// aborted the process rather than failing. A half-gigabyte stack did not
+    /// help, which is what said it was a cycle and not depth.
+    #[test]
+    fn a_name_bound_to_a_body_that_calls_itself_is_left_alone() {
+        let recursive = Form::Sequence(vec![
+            Form::Let {
+                pattern: Box::new(Pattern::Binding(0)),
+                value: Box::new(lambda(
+                    1,
+                    Form::Call {
+                        callee: Box::new(Form::Local(0)),
+                        arguments: vec![Form::Local(1)],
+                    },
+                )),
+            },
+            Form::Call {
+                callee: Box::new(Form::Local(0)),
+                arguments: vec![Form::Free(9)],
+            },
+        ]);
+        assert_eq!(
+            recursive.simplify(),
+            recursive.simplify(),
+            "it terminates, which is the whole assertion"
+        );
+        assert!(
+            recursive.simplify().to_string().contains("let"),
+            "the binding survives: {}",
+            recursive.simplify()
+        );
+    }
+
+    /// The same, one step further out: two names that call each other.
+    #[test]
+    fn names_bound_to_bodies_that_call_each_other_are_left_alone() {
+        let mutual = Form::Sequence(vec![
+            Form::Let {
+                pattern: Box::new(Pattern::Binding(0)),
+                value: Box::new(lambda(
+                    2,
+                    Form::Call {
+                        callee: Box::new(Form::Local(1)),
+                        arguments: vec![Form::Local(2)],
+                    },
+                )),
+            },
+            Form::Let {
+                pattern: Box::new(Pattern::Binding(1)),
+                value: Box::new(lambda(
+                    3,
+                    Form::Call {
+                        callee: Box::new(Form::Local(0)),
+                        arguments: vec![Form::Local(3)],
+                    },
+                )),
+            },
+            Form::Call {
+                callee: Box::new(Form::Local(0)),
+                arguments: vec![Form::Free(9)],
+            },
+        ]);
+        assert!(mutual.simplify().to_string().contains("let"));
+    }
+
+    /// A binding that merely CALLS a safe one still unfolds, because
+    /// substituting through an acyclic group terminates. Refusing those too
+    /// would have been a cheaper fix and a worse one.
+    #[test]
+    fn a_chain_of_bindings_that_does_not_cycle_still_unfolds() {
+        let chained = Form::Sequence(vec![
+            Form::Let {
+                pattern: Box::new(Pattern::Binding(0)),
+                value: Box::new(lambda(1, Form::Local(1))),
+            },
+            Form::Let {
+                pattern: Box::new(Pattern::Binding(2)),
+                value: Box::new(lambda(
+                    3,
+                    Form::Call {
+                        callee: Box::new(Form::Local(0)),
+                        arguments: vec![Form::Local(3)],
+                    },
+                )),
+            },
+            Form::Call {
+                callee: Box::new(Form::Local(2)),
+                arguments: vec![Form::Free(9)],
+            },
+        ]);
+        assert_eq!(chained.simplify().to_string(), "f9");
     }
 
     #[test]

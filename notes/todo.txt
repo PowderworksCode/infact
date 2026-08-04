@@ -1,5 +1,134 @@
 infact — todo
 
+## infact-python-normalize exists, and it found two bugs in the shared core
+
+Landed 08-04. A frontend onto `infact-normalize`, same shape as the TypeScript
+one, ~1,100 lines of reader plus ~250 of form passes. It depends on the Python
+parser pack (entl PR #13) and on nothing else new.
+
+### What it canonicalizes, in the order that matters
+
+  1. BUILDING A SEQUENCE. Python writes "make a new list from an old one" three
+     ways and one of them is three statements:
+
+         out = []                          [g(x) for x in xs if p(x)]
+         for x in xs:                ==
+             if p(x):
+                 out.append(g(x))
+
+     `fuse_container_fills` is the pass. This is Python's version of the rule
+     that an index walk and a `for..of` are one traversal; without it the two
+     commonest spellings of the same operation reduce to unrelated forms and
+     nothing else in the crate is worth anything.
+  2. FAILURE. `try`/`except` becomes a `Select` whose arms name the exception,
+     which is the shape Rust's `match` on a `Result` already has. The type name
+     is kept: recovering from a missing key is not recovering from a bad value.
+  3. PRECONDITIONS. A guard that only raises, and `assert`, are dropped, exactly
+     as the TypeScript frontend drops a throw-only guard.
+
+DELIBERATELY NOT DONE: no builtin is folded into the loop it stands for. `sum`,
+`sorted`, `max` stay ordinary calls. Rust and TypeScript recognize their
+iteration METHODS because those take a closure whose body IS the behavior;
+Python's builtins take a whole sequence and are opaque, and reducing them would
+say a caller had reimplemented what it in fact called.
+
+### Coverage, measured before claiming any
+
+`--example coverage` over CPython `Lib` plus the installed site-packages —
+7,680 files, 165,145 functions, 5.05M form nodes:
+
+    opaque nodes   4,339   0.086% of form nodes
+      while        4,323   deliberate: a `while` walks something unnamed
+      reversed        16   deliberate: a backwards comprehension
+
+That is ALL of it. Every accidental gap is closed; the only things the frontend
+cannot read are the two it declines to guess at.
+
+It did not start there. The first measurement was 15,620 opaque nodes (0.309%)
+and RANKING them is what made it cheap to fix:
+
+    slice              11,243   72% of everything unreadable -- `xs[1:2]`
+    while               4,323
+    line_continuation      14   a `\` shifting `comparison`'s positional read
+    ==, <, is, <=          17   the same bug, handing an operator to `expression`
+
+The slice rule also has to keep the bound the source left out, or `xs[1:]` and
+`xs[:1]` — opposite halves — become one form.
+
+### TWO BUGS IN infact-normalize, BOTH FOUND BY RUNNING ON REAL CODE
+
+Neither is a Python bug. Both are in `simplify.rs`, both abort the process
+rather than failing, and both are reachable from Rust and TypeScript the moment
+a frontend binds a nested function to a name.
+
+  1. UNFOLDING A NAME THAT CALLS ITSELF NEVER TERMINATES. `apply_bindings`
+     replaces a call with the body it names and then recurses on the result; if
+     the body calls back, each pass is strictly larger. CPython's
+     `json/encoder.py` binds `_iterencode`, `_iterencode_list` and
+     `_iterencode_dict` inside one factory with each calling the others. Fixed
+     by `unfoldable()`, which keeps only the acyclic part of a binding group.
+
+  2. A CYCLE CAN ARRIVE THROUGH AN ARGUMENT, where no analysis of the binding
+     group can see it. The Y combinator is the shortest example and
+     `Lib/test/test_inspect` writes one:
+
+         def Y(le):
+             def g(f):
+                 return le(lambda x: f(f)(x))
+             return g(g)
+
+     `g` names nothing recursive; substituting `g` for `f` produces `f(f)`
+     again. Fixed with fuel — `MAX_UNFOLDS` — rather than with more cleverness.
+
+WHAT SAID IT WAS A CYCLE AND NOT DEPTH: a half-gigabyte stack did not help, and
+then a full gigabyte did not either. Worth remembering as the cheapest test.
+
+The fuel SPANS THE WHOLE `simplify()` CALL, not one pass. Per-pass it compounded:
+eight sweeps each unfolding 64 levels deeper than the last left a form that was
+bounded and still large enough to exhaust a debug build's stack when anything
+walked it. Release passed and debug aborted, which is the worst way to find out.
+
+[ ] MAX_UNFOLDS IS A TUNING KNOB AND HAS NOT BEEN TUNED. The first comment I
+    wrote called it "a backstop rather than a tuning knob". That was wrong and
+    the corpus said so: total form size over CPython's `Lib` keeps rising with
+    every increase and never plateaus —
+
+        4 -> 2,390,857 nodes    16 -> 2,418,798    64 -> 2,443,675
+
+    Real bodies consume all of it, because unfolding into a body used twice
+    makes the form bigger ON PURPOSE — that is how a caller's inlined shape
+    comes to match a library's. So the value trades what a form says against how
+    large it gets, and 64 is where the pathological cases were fixed, not a
+    measured optimum. Calibrating it needs a matching corpus.
+
+### The collision discipline, built alongside rather than after
+
+`tests/collisions.rs` and `tests/fixtures/distinct.py` — 22 callables chosen so
+every pair is close enough for a plausible erasure to collapse it. It cannot do
+what the Rust one does (there is no Python behavior derivation and so no
+receiver type to appeal to), so it also asserts the specific distinctions the
+other frontends have each paid for once: forwards vs backwards, keys vs values,
+map vs filter, counting vs summing, which exception, lazily vs gathered.
+
+It found one erasure on its first run, and it was the same one the Rust frontend
+had already paid for: a tuple literal reduced to `Construct("tuple")`, so `(a,
+b)` and `(b, a)` were one form. THE COLLISION ASSERTION DID NOT CATCH IT — the
+fixture held only one such callable. The size floor did, by reporting four nodes
+for a function that plainly says more. Both are kept for that reason.
+
+Empty collection literals still reduce to `Construct`, deliberately:
+`fuse_container_fills` recognizes that shape, and it is what lets an append loop
+be seen at all.
+
+[ ] Behavior derivation and library matching are NOT here, per the night's
+    scope. What they will need from this crate already exists: `LocatedForm`
+    carries a span and a depth for every statement at every depth, which is what
+    lets a match be reported at the line that carries it.
+[ ] `while` is the one real gap. 4,323 opaque nodes, all of them a loop whose
+    sequence the syntax does not name. TypeScript solved its own version by
+    recognizing the counter; Python's `while` is genuinely unbounded more often,
+    and guessing would turn every loop into the same traversal.
+
 ## Resolved-destination allocation (clone/to_owned by receiver type)
 
 State on 08-02: WORKING AND TESTED, NOTHING COMMITTED. Read the transfer

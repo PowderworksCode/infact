@@ -1464,6 +1464,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "infact-python-normalize"
+version = "0.0.0"
+dependencies = [
+ "entl-tree-sitter",
+ "infact-normalize",
+ "tree-sitter",
+]
+
+[[package]]
 name = "infact-rust-behaviors"
 version = "0.0.0"
 dependencies = [
