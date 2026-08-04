@@ -1,0 +1,17 @@
+[package]
+name = "infact-flow"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Label propagation over a graph, with the path that carried each label."
+
+[dependencies]
+ascent.workspace = true
+infact-core = { path = "../infact-core" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true

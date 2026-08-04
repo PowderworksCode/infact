@@ -6,6 +6,7 @@ members = [
     "crates/infact-catalog",
     "crates/infact-core",
     "crates/infact-duplication",
+    "crates/infact-flow",
     "crates/infact-fact-pack",
     "crates/infact-fact-builder",
     "crates/infact-fact-registry",

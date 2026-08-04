@@ -1,12 +1,11 @@
 //! Source-backed effect summaries for selected Rust standard-library modules.
 
 mod allocation;
-mod evidence;
+
 mod observed;
 mod path;
 
 use allocation::collect_allocating_macros;
-use evidence::{evidence_path, evidence_paths};
 pub use observed::{analyze_observed_effects, unexplained_destinations};
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,13 +14,15 @@ use std::sync::Arc;
 
 use entl_tree_sitter::{ParsedFile, ParserCatalog, ParserRuntime, parse_repository};
 use infact_core::{
-    CALL_EFFECT_CATALOG_SCHEMA, CallEffectCatalog, CallEffects, Derivation as FactDerivation,
-    Effect, EffectTrace, Fact, InputEvidence, SourceSpan,
+    CALL_EFFECT_CATALOG_SCHEMA, CallEdgeEvidence, CallEffectCatalog, CallEffectEvidence,
+    CallEffects, Derivation as FactDerivation, Effect, EffectTrace, Fact, InputEvidence,
+    SourceSpan,
 };
 use infact_fact_pack::{
     BuiltLayout, Compatibility, Compiler, Content, Derivation, FACT_PACK_SCHEMA, FactPackManifest,
     ManifestError, SourceInput, SourceKind, Subject, SubjectKind, build_oci_layout, sha256,
 };
+use infact_flow::{Flow, Graph, Seed, Witness};
 use sha2::{Digest, Sha256};
 use tree_sitter::Node;
 
@@ -84,7 +85,7 @@ pub struct CallAccounting {
     pub unknown: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepositoryEffectDiagnostic {
     pub path: PathBuf,
     pub line: u32,
@@ -211,21 +212,6 @@ pub fn analyze_repository_effects(
     seeds.sort();
     seeds.dedup();
 
-    let propagated = propagate_effects(&calls, &seeds);
-    let calls_by_caller = calls.iter().fold(
-        BTreeMap::<u64, Vec<&ResolvedCall>>::new(),
-        |mut by_caller, call| {
-            by_caller.entry(call.caller).or_default().push(call);
-            by_caller
-        },
-    );
-    let seeds_by_callable = seeds.iter().fold(
-        BTreeMap::<u64, Vec<&EffectSeed>>::new(),
-        |mut by_callable, seed| {
-            by_callable.entry(seed.callable).or_default().push(seed);
-            by_callable
-        },
-    );
     let callable_by_id = callables
         .iter()
         .map(|callable| (callable.id, callable))
@@ -235,28 +221,24 @@ pub fn analyze_repository_effects(
         .iter()
         .map(|callable| (callable.id, callable.path.clone()))
         .collect::<BTreeMap<_, _>>();
+    let graph = effect_graph(&calls, &seeds, &paths_by_id);
+    let trace = graph.trace();
 
     let mut effects = Vec::new();
     let mut effectful = BTreeSet::new();
-    for relation in propagated {
-        let effect = decode_effect(relation.effect);
-        let Some(callable) = callable_by_id.get(&relation.callable) else {
+    for relation in graph.propagate() {
+        let effect = decode_effect(relation.label);
+        let Some(callable) = callable_by_id.get(&relation.node) else {
             continue;
         };
         // A callable that does the thing twelve times has twelve traces. One
         // per site, so fixing what you were shown does not leave eleven behind.
-        let reached = evidence_paths(
-            callable.id,
-            effect,
-            &calls_by_caller,
-            &seeds_by_callable,
-            &paths_by_id,
-        );
+        let reached = trace.witnesses(callable.id, relation.label);
         if reached.is_empty() {
             continue;
         }
         effectful.insert(callable.id);
-        for evidence in reached {
+        for evidence in reached.into_iter().map(call_evidence) {
             let value = EffectTrace {
                 callable: callable.path.clone(),
                 callable_span: callable.span.clone(),
@@ -305,7 +287,12 @@ pub fn analyze_repository_effects(
             ),
         });
     }
-    diagnostics.sort();
+    diagnostics.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then(left.line.cmp(&right.line))
+            .then(left.message.cmp(&right.message))
+    });
     diagnostics.dedup();
     debug_assert_eq!(accounting.total, accounting.accounted());
 
@@ -396,21 +383,6 @@ pub fn derive_std_effects(
     seeds.sort();
     seeds.dedup();
 
-    let propagated = propagate_effects(&calls, &seeds);
-    let calls_by_caller = calls.iter().fold(
-        BTreeMap::<u64, Vec<&ResolvedCall>>::new(),
-        |mut by_caller, call| {
-            by_caller.entry(call.caller).or_default().push(call);
-            by_caller
-        },
-    );
-    let seeds_by_callable = seeds.iter().fold(
-        BTreeMap::<u64, Vec<&EffectSeed>>::new(),
-        |mut by_callable, seed| {
-            by_callable.entry(seed.callable).or_default().push(seed);
-            by_callable
-        },
-    );
     let callable_by_id = callables
         .iter()
         .map(|callable| (callable.id, callable))
@@ -420,17 +392,19 @@ pub fn derive_std_effects(
         .iter()
         .map(|callable| (callable.id, callable.path.clone()))
         .collect::<BTreeMap<_, _>>();
+    let graph = effect_graph(&calls, &seeds, &paths_by_id);
+    let trace = graph.trace();
 
     let mut summaries = BTreeMap::<String, Vec<Effect>>::new();
-    for relation in propagated {
-        let Some(callable) = callable_by_id.get(&relation.callable) else {
+    for relation in graph.propagate() {
+        let Some(callable) = callable_by_id.get(&relation.node) else {
             continue;
         };
         if callable.is_public {
             summaries
                 .entry(callable.path.clone())
                 .or_default()
-                .push(decode_effect(relation.effect));
+                .push(decode_effect(relation.label));
         }
     }
 
@@ -445,15 +419,8 @@ pub fn derive_std_effects(
                 .expect("summary originates from a callable");
             let evidence = effects
                 .iter()
-                .filter_map(|effect| {
-                    evidence_path(
-                        callable.id,
-                        *effect,
-                        &calls_by_caller,
-                        &seeds_by_callable,
-                        &paths_by_id,
-                    )
-                })
+                .filter_map(|effect| trace.witness(callable.id, encode_effect(*effect)))
+                .map(call_evidence)
                 .collect();
             CallEffects {
                 path,
@@ -1004,48 +971,55 @@ fn origin_effects(callable: &Callable, callee: &str) -> Vec<Effect> {
     effects.into_iter().collect()
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct EffectRelation {
-    callable: u64,
-    effect: u8,
-}
-
-ascent::ascent! {
-    struct EffectClosure;
-
-    /// `caller` contains a call to `callee`.
-    relation calls(u64, u64);
-    /// `callable` has `effect`, whether seeded or inherited from a callee.
-    relation has_effect(u64, u8);
-
-    // an effect reaches a caller through any call that reaches it
-    has_effect(caller, *effect) <-- calls(caller, callee), has_effect(callee, effect);
-}
-
-/// Every effect each callable has, following calls transitively.
+/// The call graph as a propagation graph.
 ///
-/// Seeds are the effects a callable has directly; the rule above closes them
-/// over the call graph. The closure is computed from scratch, which is all any
-/// caller has ever asked for -- each one builds the whole relation once from a
-/// complete call graph and drops it.
-fn propagate_effects(calls: &[ResolvedCall], seeds: &[EffectSeed]) -> BTreeSet<EffectRelation> {
-    let mut closure = EffectClosure {
-        calls: calls
-            .iter()
-            .map(|call| (call.caller, call.callee))
+/// An effect moves from a callee up into its caller, so the callee is what the
+/// caller draws the label *from*. Naming each node by its callable path is what
+/// makes a witness readable; a callable with no name here contributes edges but
+/// no route through them, which is why every caller passes a complete map.
+fn effect_graph(
+    calls: &[ResolvedCall],
+    seeds: &[EffectSeed],
+    names: &BTreeMap<u64, String>,
+) -> Graph {
+    let mut graph = Graph::new();
+    for (id, name) in names {
+        graph.name(*id, name.clone());
+    }
+    graph.extend_flows(calls.iter().map(|call| Flow {
+        into: call.caller,
+        from: call.callee,
+        span: call.span.clone(),
+    }));
+    graph.extend_seeds(seeds.iter().map(|seed| Seed {
+        node: seed.callable,
+        label: encode_effect(seed.effect),
+        origin: seed.origin.clone(),
+        span: seed.span.clone(),
+    }));
+    graph.settle();
+    graph
+}
+
+/// A witness, in the call vocabulary the fact schema is written in.
+///
+/// `infact-flow` speaks of a subject drawing a label from a source, because it
+/// also carries assignment graphs. Here every edge is a call, so the conversion
+/// is a rename and the serialized schema is untouched.
+fn call_evidence(witness: Witness) -> CallEffectEvidence {
+    CallEffectEvidence {
+        effect: decode_effect(witness.label),
+        origin: witness.origin,
+        path: witness
+            .path
+            .into_iter()
+            .map(|edge| CallEdgeEvidence {
+                caller: edge.subject,
+                callee: edge.source,
+                call: edge.span,
+            })
             .collect(),
-        has_effect: seeds
-            .iter()
-            .map(|seed| (seed.callable, encode_effect(seed.effect)))
-            .collect(),
-        ..EffectClosure::default()
-    };
-    closure.run();
-    closure
-        .has_effect
-        .into_iter()
-        .map(|(callable, effect)| EffectRelation { callable, effect })
-        .collect()
+    }
 }
 
 fn encode_effect(effect: Effect) -> u8 {
@@ -1269,11 +1243,20 @@ mod tests {
             origin: "fs_imp::read".to_owned(),
             span,
         }];
-        let effects = propagate_effects(&calls, &seeds);
-        assert!(effects.contains(&EffectRelation {
-            callable: 0,
-            effect: encode_effect(Effect::FileRead),
+        let names = (0..3)
+            .map(|id| (id, format!("callable{id}")))
+            .collect::<BTreeMap<_, _>>();
+        let graph = effect_graph(&calls, &seeds, &names);
+        assert!(graph.propagate().contains(&infact_flow::Labelled {
+            node: 0,
+            label: encode_effect(Effect::FileRead),
         }));
+        // the effect propagated two hops, so its witness names both of them
+        let witness = graph
+            .witness(0, encode_effect(Effect::FileRead))
+            .expect("a witness for a propagated effect");
+        assert_eq!(witness.origin, "fs_imp::read");
+        assert_eq!(witness.path.len(), 3);
     }
 
     #[test]
@@ -1388,36 +1371,5 @@ mod tests {
         let cached = cache.import_oci_layout(layout).unwrap();
         assert_eq!(cached.manifest, built.manifest);
         assert_eq!(cached.manifest_digest, built.layout.manifest_digest);
-    }
-}
-
-#[cfg(test)]
-mod ordering {
-    use super::*;
-
-    /// `sort()` replaced a hand-written `path, line, message` comparator. The
-    /// derive is only equivalent while the fields stay in that declaration
-    /// order, and nothing else would notice if one moved.
-    #[test]
-    fn diagnostics_order_by_path_then_line_then_message() {
-        let make = |path: &str, line: u32, message: &str| RepositoryEffectDiagnostic {
-            path: PathBuf::from(path),
-            line,
-            message: message.to_owned(),
-        };
-        let mut diagnostics = vec![
-            make("b.rs", 1, "a"),
-            make("a.rs", 9, "a"),
-            make("a.rs", 2, "z"),
-            make("a.rs", 2, "a"),
-        ];
-        let expected = vec![
-            make("a.rs", 2, "a"),
-            make("a.rs", 2, "z"),
-            make("a.rs", 9, "a"),
-            make("b.rs", 1, "a"),
-        ];
-        diagnostics.sort();
-        assert_eq!(diagnostics, expected);
     }
 }
