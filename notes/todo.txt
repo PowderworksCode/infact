@@ -1843,3 +1843,64 @@ not the total. Both are recorded above so a re-run can be compared.
     -- DONE 08-04 as tools/depcorpus.py. It had been reconstructed from scratch
     twice. It reports the repeat multiplier as well as the totals, because that
     is the number the "report every occurrence" change was gambling on.
+
+
+## One const closure costs a quarter of Rust recall — 08-04
+
+Re-measured after 1.96.1 -> 1.97.1 (the pin in 80f589a) and found the clippy
+score had fallen from 26/201 to 19/201. Same infact code both times. The whole
+loss is one expression in the standard library.
+
+### The measurement
+
+    library source                    behaviors   clippy recall
+    1.96.1                                  487         26/201
+    1.97.1                                  464         19/201
+    1.97.1, const closure patched out       490         26/201
+
+Same binary for all three rows; only the derived-from source differs. The
+missing seven are `manual_find` (1) and `manual_find_fixable` (6), and the
+reason is that `core::Iterator::find`, `find_map` and `position` are not in the
+1.97.1 catalog AT ALL. Not refused — never collected.
+
+### The cause
+
+1.97.1 rewrote `Iterator::count`:
+
+    // 1.96.1
+    const fn plus_one<T: [const] Destruct>(accum: usize, _elem: T) -> usize {
+        accum + 1
+    }
+    self.fold(0, plus_one)
+
+    // 1.97.1
+    self.fold(0, #[rustc_inherit_overflow_checks] const |accum, _elem| accum + 1)
+
+`const |..| ..` is a const closure. tree-sitter-rust 0.24.2 — what
+`parser-packs/rust` pins — has no rule for it, and its recovery does not stop at
+the expression. The ERROR node swallows the methods that follow, so they never
+appear as `function_item` and the decline-by-name path never sees them. Patching
+that one expression out and re-deriving returns 76 callables and 26 behaviors,
+`find` among them.
+
+`iterator.rs` is one file. It carries the single highest-value behavior this
+project has.
+
+### What this says about the harness
+
+Nothing was broken by anyone's code, no test failed, and no gate went red. A
+toolchain bump moved the number, and it would have gone unnoticed if the clippy
+scoreboard had not been re-run for an unrelated reason.
+
+[ ] A pack-vs-pack diff. Behaviors that DISAPPEARED between two derivations are
+    the signal; totals hide them, because 464 vs 487 reads like noise and
+    "`Iterator::find` is gone" does not. This is the cheapest possible guard and
+    it does not exist.
+[ ] Decide where the const-closure fix lives. The grammar is entl's
+    (`parser-packs/rust`, tree-sitter-rust 0.24.2) and const closures may not be
+    supported upstream at any version yet, since the feature is nightly-only.
+    Do NOT neutralise the syntax before parsing — that is the dialect-rewrite
+    erasure the note above rejects.
+[ ] Until it is fixed, a std pack derived on 1.97.1 is missing `Iterator::find`.
+    Any recall number quoted from one is 7 hits short. Say which toolchain a
+    pack came from when quoting it.
