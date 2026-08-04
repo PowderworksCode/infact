@@ -221,12 +221,7 @@ pub fn analyze_observed_effects(
     effects.sort();
     effects.dedup();
 
-    diagnostics.sort_by(|left, right| {
-        left.path
-            .cmp(&right.path)
-            .then(left.line.cmp(&right.line))
-            .then(left.message.cmp(&right.message))
-    });
+    diagnostics.sort();
     diagnostics.dedup();
 
     Ok(RepositoryEffectReport {

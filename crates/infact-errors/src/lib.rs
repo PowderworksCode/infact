@@ -42,7 +42,7 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ErrorDiagnostic {
     pub path: PathBuf,
     pub line: u32,
@@ -104,12 +104,7 @@ pub fn analyze_repository_errors(
             message: diagnostic.message,
         })
         .collect::<Vec<_>>();
-    diagnostics.sort_by(|left, right| {
-        left.path
-            .cmp(&right.path)
-            .then(left.line.cmp(&right.line))
-            .then(left.message.cmp(&right.message))
-    });
+    diagnostics.sort();
     diagnostics.dedup();
 
     Ok(RepositoryErrorReport {
@@ -734,5 +729,36 @@ fn discard_derivation(
             .into_iter()
             .filter_map(|path| inputs.get(&path).cloned())
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod ordering {
+    use super::*;
+
+    /// `sort()` replaced a hand-written `path, line, message` comparator. The
+    /// derive is only equivalent while the fields stay in that declaration
+    /// order, and nothing else would notice if one moved.
+    #[test]
+    fn diagnostics_order_by_path_then_line_then_message() {
+        let make = |path: &str, line: u32, message: &str| ErrorDiagnostic {
+            path: PathBuf::from(path),
+            line,
+            message: message.to_owned(),
+        };
+        let mut diagnostics = vec![
+            make("b.rs", 1, "a"),
+            make("a.rs", 9, "a"),
+            make("a.rs", 2, "z"),
+            make("a.rs", 2, "a"),
+        ];
+        let expected = vec![
+            make("a.rs", 2, "a"),
+            make("a.rs", 2, "z"),
+            make("a.rs", 9, "a"),
+            make("b.rs", 1, "a"),
+        ];
+        diagnostics.sort();
+        assert_eq!(diagnostics, expected);
     }
 }

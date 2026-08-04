@@ -84,7 +84,7 @@ pub struct CallAccounting {
     pub unknown: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RepositoryEffectDiagnostic {
     pub path: PathBuf,
     pub line: u32,
@@ -305,12 +305,7 @@ pub fn analyze_repository_effects(
             ),
         });
     }
-    diagnostics.sort_by(|left, right| {
-        left.path
-            .cmp(&right.path)
-            .then(left.line.cmp(&right.line))
-            .then(left.message.cmp(&right.message))
-    });
+    diagnostics.sort();
     diagnostics.dedup();
     debug_assert_eq!(accounting.total, accounting.accounted());
 
@@ -1393,5 +1388,36 @@ mod tests {
         let cached = cache.import_oci_layout(layout).unwrap();
         assert_eq!(cached.manifest, built.manifest);
         assert_eq!(cached.manifest_digest, built.layout.manifest_digest);
+    }
+}
+
+#[cfg(test)]
+mod ordering {
+    use super::*;
+
+    /// `sort()` replaced a hand-written `path, line, message` comparator. The
+    /// derive is only equivalent while the fields stay in that declaration
+    /// order, and nothing else would notice if one moved.
+    #[test]
+    fn diagnostics_order_by_path_then_line_then_message() {
+        let make = |path: &str, line: u32, message: &str| RepositoryEffectDiagnostic {
+            path: PathBuf::from(path),
+            line,
+            message: message.to_owned(),
+        };
+        let mut diagnostics = vec![
+            make("b.rs", 1, "a"),
+            make("a.rs", 9, "a"),
+            make("a.rs", 2, "z"),
+            make("a.rs", 2, "a"),
+        ];
+        let expected = vec![
+            make("a.rs", 2, "a"),
+            make("a.rs", 2, "z"),
+            make("a.rs", 9, "a"),
+            make("b.rs", 1, "a"),
+        ];
+        diagnostics.sort();
+        assert_eq!(diagnostics, expected);
     }
 }

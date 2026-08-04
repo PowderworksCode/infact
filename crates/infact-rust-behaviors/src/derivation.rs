@@ -16,7 +16,7 @@ use infact_core::{
 use infact_normalize::MAXIMUM_FORM_DEPTH;
 use tree_sitter::Node;
 
-use crate::{DERIVED_LIBRARY_BEHAVIOR_SCHEMA, Error, Result, source_sha256, span_of};
+use crate::{DERIVED_LIBRARY_BEHAVIOR_SCHEMA, Error, Result, node_text, source_sha256, span_of};
 
 /// How many delegating wrappers to follow before giving up.
 const MAX_DELEGATION_DEPTH: usize = 4;
@@ -30,10 +30,6 @@ struct LibraryFunction<'a> {
     container: Option<String>,
     /// Whether every inline module enclosing it is public.
     reachable: bool,
-}
-
-fn node_text<'a>(node: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
-    std::str::from_utf8(source.get(node.byte_range())?).ok() // straitjacket-allow:error-discard — a node whose bytes are not UTF-8 has no text
 }
 
 fn collect_functions<'a>(
