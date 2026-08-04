@@ -83,13 +83,29 @@ fn main() {
     // (file, container, field) -> observed field
     let mut observed = BTreeMap::new();
     let mut parsed_files = 0usize;
+    let mut skipped = 0usize;
     for file in &files {
         let path = root.join(file);
-        let Ok(source) = std::fs::read(&path) else {
-            continue;
+        // A file that cannot be read or parsed is skipped, not fatal: the
+        // classification names files from a checkout that may not be this one.
+        // But it is NAMED. Silently skipping shows up as a rule with no support,
+        // which reads like the rule never fires rather than like its evidence
+        // never arrived.
+        let source = match std::fs::read(&path) {
+            Ok(source) => source,
+            Err(error) => {
+                eprintln!("skipped {}: {error}", path.display());
+                skipped += 1;
+                continue;
+            }
         };
-        let Ok(tree) = parser.parse(&path, Arc::<[u8]>::from(source)) else {
-            continue;
+        let tree = match parser.parse(&path, Arc::<[u8]>::from(source)) {
+            Ok(tree) => tree,
+            Err(error) => {
+                eprintln!("skipped {}: {error}", path.display());
+                skipped += 1;
+                continue;
+            }
         };
         parsed_files += 1;
         for field in fields(&tree) {
@@ -141,6 +157,7 @@ fn main() {
 
     println!("files named by the classification : {}", files.len());
     println!("files parsed                      : {parsed_files}");
+    println!("files skipped, unread or unparsed : {skipped}");
     println!("rows in the classification        : {}", rows.len());
     println!(
         "rows matched to an observed field : {matched} ({:.1}%)",
