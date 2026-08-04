@@ -1119,21 +1119,41 @@ TWO GAPS THE FIXTURE FOUND, both language-neutral:
     convention: Cargo's `tests/ benches/ examples/` against npm's
     `node_modules/ dist/ __tests__/` and `*.test.ts`.
 
-[ ] `infact-rust-behaviors` adopts `infact-behaviors`
-    The walk now exists twice: `Library::derive` in the neutral crate and
-    `derive_from` in derivation.rs, written to be the same walk on purpose so
-    the second can be deleted. Two behavioural details have to survive the
-    swap and are easy to lose:
-      - `max_by_key` returns the LAST maximum, so candidate ORDER decides ties
-        in `principal_method`. The neutral crate takes callables in the order
-        `library_functions` produced them for exactly this reason.
-      - a callable with no body must refuse as "the implementation has no body"
-        and not as "no implementation was found". They are different tallies
-        and item 4 below is built on one of them.
-    THE PROOF IS THE ONLY THING THAT MATTERS HERE: re-derive std and itertools
-    and diff byte for byte, then re-run collisions.rs and the clippy scoreboard.
-    A baseline for that diff is already recorded: 464 behaviors for std
-    (core 190 + alloc 119 + std 155) and 130 for itertools.
+[x] `infact-rust-behaviors` adopts `infact-behaviors`   -- DONE 08-03
+    derivation.rs 440 -> 262 lines; the walk, `principal_method`,
+    `delegation_target`, `constructed_type`, `resolve_self`, `leaf_name`,
+    `container_name` and `PRINCIPAL_METHODS` are all gone from it. What is left
+    is Rust: what a `function_item` is, what `pub` means, what `mod` hides,
+    which directories Cargo gives a fixed meaning, and turning the chain the
+    walk followed into evidence with spans and digests.
+
+    PROVED BEHAVIOR-NEUTRAL, which is the only claim worth making here:
+
+      std pack        464 behaviors, ALL 464 FILES BYTE-IDENTICAL
+      itertools pack  130 behaviors, BYTE-IDENTICAL
+      skip tallies    identical to the digit (core 927/551, alloc 470/67,
+                      std 836/714) -- which is the stronger check, because a
+                      refusal classified differently would move a tally while
+                      leaving every derived behavior untouched
+      collisions      9 same-container, 12 cross-container -- unchanged
+      clippy          26/201, 36/36 on-target -- unchanged
+      ts scoreboard   25/155, 4/252 -- unchanged
+
+    TWO DETAILS THAT HAD TO SURVIVE THE SWAP, recorded because both are silent
+    if lost and neither is covered by a test that existed before:
+      - `max_by_key` returns the LAST maximum, so which of two equally-ranked
+        methods wins is decided by the ORDER candidates arrive in. The neutral
+        crate is handed callables in `library_functions` order for exactly this
+        reason, and the byte-identical std pack is what says it held.
+      - a callable with no body refuses as "the implementation has no body",
+        NOT as "no implementation was found". They are different tallies and
+        item 4 below is built on one of them. Pre-normalizing every function
+        made this easy to collapse into a single `Option<Form>` with one
+        meaning; `Refusal` keeps them apart.
+
+    ONE THING GOT FASTER FOR FREE: every function is now normalized once, up
+    front. `principal_method` used to normalize each candidate on every call,
+    so a type consulted from several construction sites paid repeatedly.
 
 [ ] Span-precise type join
     Two of the four remaining false positives are ones the checker CAN answer —

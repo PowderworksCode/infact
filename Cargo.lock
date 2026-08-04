@@ -1470,6 +1470,7 @@ dependencies = [
  "entl-codebase",
  "entl-tree-sitter",
  "heck",
+ "infact-behaviors",
  "infact-core",
  "infact-fact-pack",
  "infact-normalize",
