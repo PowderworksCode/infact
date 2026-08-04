@@ -1324,6 +1324,24 @@ neutralised without moving a byte; `#if` is not that.
     collisions      9 -> 10 same-container, 12 cross — see below
     ts scoreboard   25/155, 4/252 — unchanged
 
+RE-MEASURED 08-04 after the toolchain pin landed (80f589a, 1.96.1 -> 1.97.1)
+and after #13/#17/#18 merged. Every absolute above moved, because 1.97.1 ships
+a DIFFERENT library source; the delta did not:
+
+    behaviors    main 438 -> branch 464   (+26, was +24 on 1.96.1)
+                 core 159 -> 174, alloc 120 -> 122, std 159 -> 168
+    collisions   main  8 -> branch 9 same-container, 4 cross
+                 the one added is std::{begin_panic, panic_any}, the genuine
+                 delegation named below, not a new erasure
+    ts scoreboard 25/155, 4/252 — still unchanged, now also across entl's new
+                 typescript callables.scm and discards.scm
+
+Quote the DELTA, not the absolute. A std-pack count is a fact about a rustup
+toolchain as much as about this code, and the toolchain moved under it once
+already. `rust-src` is not in the minimal profile and was missing after the
+machine was resized: `rustup component add rust-src` before re-deriving, or the
+derivation reports the library root as simply not there.
+
 THE CHECK THAT MATTERS MOST: of the 458 behaviors present before and after,
 **ZERO changed their derived program and ZERO changed their implementation
 chain.** The only difference in those files is `catalog_sha256`, which must
