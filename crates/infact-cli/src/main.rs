@@ -941,7 +941,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!("  unread: {path}");
                 }
                 return Err(format!(
-                    "{} of the library's files could not be parsed, so anything they define is missing from this pack; \
+                    "{} holes in what could be read, so anything they cover is missing from this pack; \
                      add a rewrite in entl-tree-sitter's dialect module, or pass --allow-unread to accept the gap",
                     derived.unparsed.len()
                 )
