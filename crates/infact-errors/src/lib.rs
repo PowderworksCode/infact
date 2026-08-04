@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use entl_tree_sitter::{
-    ErrorHandlingManifest, LoadedParser, ParsedFile, ParserCatalog, parse_repository,
+    ErrorHandlingManifest, LoadedParser, ParsedFile, ParserCatalog, Propagation, parse_repository,
 };
 use infact_core::{
     CallEdgeEvidence, Certainty, Containment, Derivation, DiscardForm, ErrorDiscard, Fact,
@@ -315,8 +315,18 @@ fn attributed_region(item: Node<'_>) -> Option<Region> {
 
 /// Whether a callable can report a failure, read from what the pack declares.
 fn containment_of(declared: Option<&str>, types: &ErrorHandlingManifest) -> Containment {
+    // A return type the pack does not recognize means different things in
+    // different languages. Where failure is declared, it means the failure has
+    // nowhere to go. Where failure is unchecked, it means the signature had
+    // nothing to say and the callable could still have left the failure alone;
+    // calling that infallible would claim the error was trapped when not
+    // catching it was available the whole time.
+    let unrecognized = match types.propagation {
+        Propagation::Declared => Containment::Infallible,
+        Propagation::Unchecked => Containment::Fallible,
+    };
     let Some(declared) = declared else {
-        return Containment::Infallible;
+        return unrecognized;
     };
     let leading = declared.split('<').next().unwrap_or(declared);
     if types
@@ -332,7 +342,7 @@ fn containment_of(declared: Option<&str>, types: &ErrorHandlingManifest) -> Cont
     {
         Containment::Optional
     } else {
-        Containment::Infallible
+        unrecognized
     }
 }
 
