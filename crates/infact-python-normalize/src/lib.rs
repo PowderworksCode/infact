@@ -117,6 +117,19 @@ fn named_children<'a>(node: Node<'a>) -> Vec<Node<'a>> {
     node.named_children(&mut cursor).collect()
 }
 
+/// Whether a name is spelled the way Python spells a module-level constant.
+///
+/// `MAX_SIZE` and `_DEFAULT` qualify; `Transport` and `x` do not. A single
+/// upper-case letter is excluded because `T` is overwhelmingly a type variable
+/// rather than a constant, and a type variable is not behavior.
+fn is_screaming_case(name: &str) -> bool {
+    name.len() > 1
+        && name.chars().all(|character| {
+            character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+        })
+        && name.chars().any(|character| character.is_ascii_uppercase())
+}
+
 /// Children that carry code, which is every named child but a comment.
 fn code_children<'a>(node: Node<'a>) -> Vec<Node<'a>> {
     named_children(node)
@@ -654,7 +667,19 @@ impl<'a> Normalizer<'a> {
                 Some(inner) => self.expression(inner),
                 None => Form::Literal,
             },
-            "identifier" => self.roles.resolve(self.text(node)),
+            "identifier" => {
+                let name = self.text(node);
+                // A name in screaming case that nothing here binds is a named
+                // constant, and which constant it is *is* behavior. The
+                // TypeScript frontend paid for this once: resolving both to a
+                // hole made `ITEM_KIND_KEY` and `ITEM_KIND_VALUE` one thing, and
+                // with them `keys` and `values`. Python spells constants the
+                // same way and inherits the same erasure.
+                if is_screaming_case(name) && !self.roles.is_value(name) {
+                    return Form::Path(name.to_owned());
+                }
+                self.roles.resolve(name)
+            }
             "integer" | "float" => Form::Number(self.text(node).to_owned()),
             "true" | "false" => Form::Constant(self.text(node).to_owned()),
             // `None` is the absence a caller has to handle, and that is exactly
@@ -998,7 +1023,27 @@ impl<'a> Normalizer<'a> {
             };
         }
 
-        let callee = self.expression(callee);
+        // Calling a function defined elsewhere is not the same as calling one
+        // the caller supplied. `helper(x)` names something a reader can go and
+        // look at, and two delegations to different helpers are two behaviors.
+        //
+        // `infact-ts-normalize` does this at the same point, and Python needs it
+        // more than TypeScript does: a class is constructed by naming it, so
+        // `_UnixReadPipeTransport(self, pipe, protocol, waiter, extra)` and
+        // `_ProactorReadPipeTransport(...)` differ in nothing but the name, and
+        // reduced to the same six-hole form until this existed. Measured over
+        // the installed corpus, 94.9% of calls had a hole for a callee.
+        //
+        // The name is kept bare rather than qualified by module. Two packages
+        // that both define `Regex` do collide under this, which is the same
+        // trade the TypeScript frontend made; qualifying would need to resolve
+        // imports across files, and that is a different observation.
+        let callee = match callee.kind() {
+            "identifier" if !self.roles.is_value(self.text(callee)) => {
+                Form::Path(self.text(callee).to_owned())
+            }
+            _ => self.expression(callee),
+        };
         Form::Call {
             callee: Box::new(callee),
             arguments: arguments

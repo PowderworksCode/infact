@@ -1,5 +1,124 @@
 infact — todo
 
+## Called names resolve, and 94.9% of calls stopped being holes
+
+Landed 08-04, after `infact-python-normalize`. Two rules, both taken from
+`infact-ts-normalize` rather than invented:
+
+  1. An identifier in callee position that is not a value bound here becomes
+     `Form::Path(name)` instead of a free hole.
+  2. A name in SCREAMING_CASE that nothing here binds becomes `Form::Path` too.
+     Which constant was passed is behavior; the TypeScript frontend records
+     what resolving both to a hole cost it, 1,390 wrong findings.
+
+### Why, and the number that said so
+
+`--example ambiguity` is new and answers the question `coverage` cannot:
+whether what the normalizer DID read distinguishes anything. Over the installed
+Python — 5,630 files, 93,317 functions:
+
+                                        before        after
+    calls whose callee is a hole    97,158 (94.9%)  3,026 (3.0%)
+    calls resolving to a name                    0   94,132 (91.9%)
+    distinct forms                          67,908   68,163
+    callables sharing a form with
+      a textually different one       2,532 (3.46%)  2,077 (2.84%)
+
+The motivating case is `asyncio`, which writes six pipe-transport factories
+whose bodies differ in nothing but the class constructed:
+
+    return _UnixReadPipeTransport(self, pipe, protocol, waiter, extra)
+    return _ProactorReadPipeTransport(self, pipe, protocol, waiter, extra)
+
+Both were `(call f0 f1 f2 f3 f4 f5)`. Python constructs by naming a class, so
+this hit far harder here than in TypeScript.
+
+### Two things the numbers say that the change alone does not
+
+AMBIGUITY FELL FAR LESS THAN CALLEE RESOLUTION DID: 94.9% -> 3.0% of callees,
+but only 3.46% -> 2.84% of callables. Resolving names both SPLITS and MERGES.
+It splits two constructors apart; it also merges forms that were only ever
+distinguished by free-variable NUMBERING, since `super` is now a stable name
+rather than an index that shifted with how many other holes a body had. Net
+distinct forms rose by 255. The widest remaining group is 84 callables sharing
+`(method __init__ (call (path super)) f0 f1 f2)`, and that is correct — an
+`__init__` that forwards to `super` really is the same behavior everywhere.
+
+THE FIXTURE DID NOT FIND THIS; THE CORPUS DID. `tests/collisions.rs` passed
+throughout, because a fixture only holds erasures someone thought of. That is
+now written into the test's own doc comment, and the pair is in `distinct.py`.
+
+### The bare name is not qualified by module
+
+`Path("Regex")` is the same form in two packages that each define `Regex`.
+Qualifying needs import resolution ACROSS files, which is a different
+observation and belongs in entl if it is ever wanted. TypeScript made the same
+trade. Measured cost of not doing it: it is inside the remaining 2.84%.
+
+[ ] Opacity is untouched by this, and was verified rather than assumed:
+    0.102% of form nodes before and after on the identical corpus. The 0.086%
+    quoted below is a DIFFERENT corpus and the two must not be compared.
+
+## ty (Astral) was evaluated for Python types, and is not ready
+
+Checked 08-04 against ty 0.0.66, because the obvious next question after
+resolving names is resolving RECEIVERS: `x.append(...)` needs to know `x` is a
+list, and no amount of syntax gets there. This is the tier that `error-discard`,
+`library-opportunity` and behavior derivation all wait on.
+
+WHAT IS GOOD, and it is genuinely good:
+
+  - SPEED KILLS THE OBJECTION. The whole CPython stdlib, 574 files, checks in
+    0.59s. 445 files carrying 45,780 type queries: 4.9s. The argument that a
+    type checker means hundreds of thousands of LSP round trips is simply
+    wrong for ty; it is one batch pass.
+  - typeshed is bundled, so stdlib types need no environment at all. That is
+    the subset that could be pinned the way a grammar is pinned.
+
+WHAT BLOCKS IT:
+
+  - THERE IS NO TYPE OUTPUT. `--output-format` offers full, concise, gitlab,
+    github, junit — all diagnostics, none types. The only way to get a type out
+    is `reveal_type()`, which is ty's own TEST mechanism: you rewrite the source
+    to inject calls and parse the inferred type back out of diagnostic text.
+    That is a research harness, not an input to a policy gate.
+  - THE LIBRARY CRATE IS NOT A LIBRARY. `ty_python_semantic` on crates.io is
+    0.0.7 while the CLI is 0.0.66. It says of itself "an internal component
+    crate of Ruff", has no docs of its own, and carries no semver contract.
+    (`ty_plugin_sdk` looks like the answer and is NOT Astral's — its repository
+    is regularkevvv/ruff-extended. Do not take that dependency.)
+  - ONE PANIC ENDS THE RUN. A salsa `known_class_to_instance` cycle killed one
+    file and the other 431 came back `cancelled because of propagated panic`.
+    This is the same all-or-nothing shape as the tree-sitter trap and as
+    entl's own `parse_repository`, and it is the failure mode we care about
+    most: a gate that reports nothing because one file was odd.
+
+WHAT IT WOULD ACTUALLY BUY, measured by injecting `reveal_type` at every
+method-call receiver in real code:
+
+                        stdlib (45,116)   third-party (33,046)
+    <module ...>              22.3%             25.0%    already free from
+                                                         the name resolution
+                                                         above
+    Unknown                   36.5%             32.3%    ty adds nothing
+    partly Unknown             9.3%              4.7%
+    CONCRETE, non-module      31.8%             37.9%    <-- the marginal gain
+
+So about one receiver in three, and that is generous: 512 of the stdlib wins
+are `Never`, which usually means ty decided the code was unreachable.
+
+A CORRECTION WORTH KEEPING: the first reading of this said ty panics on stock
+CPython. It does not. The harness had copied the stdlib into the project root,
+so ty resolved `import encodings` to `ast.unparse`d copies and type-checked a
+fake stdlib against typeshed's stubs of itself. Pristine CPython is clean. The
+panic is real but needs a pathological project to provoke.
+
+[ ] Revisit when BOTH land: a machine-readable type output, and
+    `ty_python_semantic` at version parity with the CLI. Version parity is the
+    cheap readiness signal to watch — today it is 0.0.7 against 0.0.66.
+    Until then Python receiver types are not available on terms this fleet can
+    depend on, and nothing downstream should be designed assuming they are.
+
 ## infact-python-normalize exists, and it found two bugs in the shared core
 
 Landed 08-04. A frontend onto `infact-normalize`, same shape as the TypeScript

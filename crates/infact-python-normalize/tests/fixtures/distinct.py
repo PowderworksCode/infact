@@ -140,3 +140,11 @@ def running_totals(xs):
         total += x
         out.append(total)
     return out
+
+
+def make_read_transport(self, pipe, protocol, waiter, extra):
+    return ReadPipeTransport(self, pipe, protocol, waiter, extra)
+
+
+def make_write_transport(self, pipe, protocol, waiter, extra):
+    return WritePipeTransport(self, pipe, protocol, waiter, extra)

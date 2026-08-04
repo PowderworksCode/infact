@@ -15,6 +15,14 @@
 //! chosen so that every pair is close enough for a plausible erasure to
 //! collapse it, and each distinction is one a consumer would report on.
 //!
+//! Its limit is worth stating, because the corpus later demonstrated it: a
+//! fixture only holds erasures someone thought of. The widest erasure in the
+//! Python frontend — every called name resolving to a hole, so two calls to
+//! different constructors were one form — was not in this file until the
+//! `ambiguity` example measured it over the installed corpus and found 94.9%
+//! of calls affected. It is here now, and the lesson is that this test and
+//! that example answer different questions.
+//!
 //! It found one erasure the first time it ran, and it was the same erasure the
 //! Rust frontend had already paid for once: a tuple literal reduced to a bare
 //! `Construct("tuple")`, discarding the values it held, so `(a, b)` and
@@ -174,4 +182,9 @@ fn the_distinctions_other_frontends_lost_are_held_here() {
     assert_ne!(form("running_totals"), form("mapped"));
     // Stopping early is behavior.
     assert_ne!(form("take_while_positive"), form("filtered"));
+    // Which class is being constructed. This pair is here because the CORPUS
+    // reported it and this fixture did not contain it: `asyncio` writes six
+    // pipe-transport factories differing in nothing but the constructor's
+    // name, and while a called name resolved to a hole they were one form.
+    assert_ne!(form("make_read_transport"), form("make_write_transport"));
 }

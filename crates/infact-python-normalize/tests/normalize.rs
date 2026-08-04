@@ -721,3 +721,112 @@ fn mutually_recursive_local_functions_do_not_run_forever() {
     );
     assert!(form.size() > 0);
 }
+
+// -- Rule 12: a name that is called ------------------------------------------
+
+/// Two delegations to different helpers are two behaviors.
+///
+/// This is the erasure the corpus reported rather than the fixture: measured
+/// over the installed Python, 94.9% of calls had a hole for a callee, and
+/// `asyncio` writes six pipe-transport factories whose bodies differ in
+/// nothing but the class being constructed. Every one of them was one form.
+#[test]
+fn two_delegations_to_different_helpers_are_two_behaviors() {
+    let read = form(
+        "def f(self, pipe, protocol, waiter, extra):
+    return _UnixReadPipeTransport(self, pipe, protocol, waiter, extra)
+",
+        "f",
+    );
+    let write = form(
+        "def f(self, pipe, protocol, waiter, extra):
+    return _UnixWritePipeTransport(self, pipe, protocol, waiter, extra)
+",
+        "f",
+    );
+    assert_ne!(
+        read, write,
+        "constructing a read transport is not constructing a write one"
+    );
+}
+
+/// A name the caller supplied is still a hole, however it is spelled.
+///
+/// This is the guard on the rule above rather than a separate rule. `apply(g,
+/// x)` calls whatever it was handed, and two callers may hand it anything, so
+/// the name `g` says nothing and renaming it must change nothing. Resolving
+/// every called identifier to a path would have broken exactly this.
+#[test]
+fn a_parameter_that_is_called_is_still_a_hole() {
+    let applied = form(
+        "def f(g, x):
+    return g(x)
+",
+        "f",
+    );
+    let renamed = form(
+        "def f(h, x):
+    return h(x)
+",
+        "f",
+    );
+    assert_eq!(
+        applied, renamed,
+        "which name a parameter was given is not behavior"
+    );
+
+    let named = form(
+        "def f(x):
+    return helper(x)
+",
+        "f",
+    );
+    assert_ne!(
+        applied, named,
+        "calling what you were handed is not calling something defined elsewhere"
+    );
+}
+
+/// Which constant was passed is behavior.
+///
+/// `infact-ts-normalize` carries the same rule and records what it cost: with
+/// both constants resolved to a hole, `keys` and `values` were one behavior
+/// 1,390 times over. Python spells constants the same way.
+#[test]
+fn a_named_constant_is_not_a_hole() {
+    let read = form(
+        "def f(path):
+    return open_file(path, MODE_READ)
+",
+        "f",
+    );
+    let write = form(
+        "def f(path):
+    return open_file(path, MODE_WRITE)
+",
+        "f",
+    );
+    assert_ne!(read, write, "the mode is the behavior");
+}
+
+/// A single upper-case letter is a type variable, not a constant.
+///
+/// `T` and `K` appear as `TypeVar` names throughout typed Python, and treating
+/// them as named constants would make two identically-shaped generic helpers
+/// differ over nothing a consumer could report.
+#[test]
+fn a_single_letter_name_is_not_a_named_constant() {
+    let left = form(
+        "def f(xs):
+    return cast(T, xs)
+",
+        "f",
+    );
+    let right = form(
+        "def f(xs):
+    return cast(K, xs)
+",
+        "f",
+    );
+    assert_eq!(left, right, "a type variable is not behavior");
+}
