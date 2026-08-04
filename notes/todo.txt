@@ -1566,5 +1566,7 @@ The scan script is not in tools/ — it is thirty lines around
 `infact behaviors <crate>` and the number that matters is the top-API share,
 not the total. Both are recorded above so a re-run can be compared.
 
-[ ] Put the dependency-corpus scan in tools/ beside the other two harnesses.
-    It has now been reconstructed from scratch twice.
+[x] Put the dependency-corpus scan in tools/ beside the other two harnesses.
+    -- DONE 08-04 as tools/depcorpus.py. It had been reconstructed from scratch
+    twice. It reports the repeat multiplier as well as the totals, because that
+    is the number the "report every occurrence" change was gambling on.
