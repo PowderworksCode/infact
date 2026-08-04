@@ -165,3 +165,57 @@ Same layout as above:
 
     INFACT_MEASURE       defaults to <repo>/../measure
     INFACT_PARSER_PATH   defaults to <repo>/../entl/parser-packs
+
+## python-callee-census.py
+
+Classifies every bare-name call in a corpus by what it would take to resolve
+the name: builtin, import, module-level definition, local binding, or nothing.
+
+This is the measurement that decided Python resolves called names from syntax
+rather than from a type checker. **99.1%** of 128,137 calls across 5,058
+third-party files need no type inference at all, and the stdlib agrees
+independently at 99.0%. The remaining 0.9% is mostly star-imports and gettext
+installing `_` into builtins — real, and not worth a subprocess.
+
+It also counts attribute calls, which are the *other* question. Those need
+receiver types and syntax cannot answer them; see `ty-receiver-coverage.py`.
+
+    python3 tools/python-callee-census.py /usr/lib/python3/dist-packages
+
+## python-while-census.py
+
+Classifies `while` loops by their condition and by whether the body mutates
+what the condition reads.
+
+Run because the normalizer held every `while` opaque on the stated ground that
+"a while walks something unnamed", which had never been measured. It is wrong
+about the largest category: **30.3% are `while True`**, which walks nothing.
+
+The trap is in the script's own docstring and is worth reading before quoting
+any number from it. Its "counter compared and rebound" category is loose — it
+counts a rebind anywhere, including inside a branch, and loops that index
+nothing — and reads 11.6%. The population a traversal rule can actually act on
+is **3.7%**. The loose number was quoted into a doc comment before being
+tightened. A category counted loosely is never the category a rule can act on.
+
+    python3 tools/python-while-census.py /usr/lib/python3.12 /usr/lib/python3/dist-packages
+
+## ty-receiver-coverage.py
+
+Measures how much of a corpus Astral's `ty` can actually type, by injecting
+`reveal_type()` at every method-call receiver and reading the inferred types
+back out of the diagnostics. `reveal_type` is ty's own test mechanism; there is
+no type output otherwise.
+
+Recorded against **ty 0.0.66**: about **one receiver in three** comes back
+concrete, and that is generous — 512 of the stdlib wins are `Never`. The full
+table and the three things blocking a dependency on ty are in `notes/todo.txt`.
+
+Nest the corpus under `OUT_DIR/corpus/`. A project root that recreates stdlib
+package names makes ty resolve `import encodings` to the copies and type-check
+a fake stdlib against typeshed's stubs of itself, which provokes a salsa cycle
+— and that panic cancels every other file in the run. It was misread once as ty
+panicking on stock CPython. It does not.
+
+    python3 tools/ty-receiver-coverage.py /usr/lib/python3.12 /tmp/revealed/corpus 60
+    (cd /tmp/revealed && ty check --output-format=concise --python /usr .)
