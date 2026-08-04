@@ -1,5 +1,39 @@
 infact — todo
 
+## What the forms can now be asked, and the funnel that matters
+
+`--example duplicates` is new and only became worth writing once callees
+resolved. It reports one operation implemented in two distributions, which is
+the signal `library-opportunity` is built on. Over the installed site-packages,
+79,386 functions:
+
+    forms shared across directories   1791
+      once vendored copies are one     207
+      and the names differ               5
+
+READ THE FUNNEL, NOT THE HEADLINE. Most cross-package matches are VENDORING —
+`pip/_vendor/pygments` against `pygments` — and report only that pip vendors
+things. Most of the rest is one library reusing its own helper under one name.
+
+Of the five, two kinds, worth different amounts:
+
+  - A COPY. `mitmproxy`'s `rle_append_beginning_modify` is `urwid`'s
+    `rle_prepend_modify` byte for byte but for the name, in a library mitmproxy
+    already depends on. Real, but `infact-duplication` normalizes identifiers,
+    so exact-clone finds this too given both trees. Claiming otherwise was a
+    mistake made once here and corrected by reading the two sources.
+  - AN INDEPENDENT IMPLEMENTATION. `ruamel.yaml`'s `construct_yaml_pairs` and
+    `PyYAML`'s `construct_yaml_omap` share a form while differing in names,
+    literals, formatting and error messages. Nothing token-based pairs them.
+    They meet because what only raises is not behavior, so the difference
+    between their two error paths is correctly discarded.
+
+Only the second kind is beyond duplication analysis, so it is what the list is
+for. That pair is now `two_libraries_that_implement_one_operation_meet` in
+`tests/normalize.rs` — the first test in the crate whose inputs neither of us
+wrote, and the only guard on forms failing to MERGE. `tests/collisions.rs`
+guards the opposite direction and cannot see this one.
+
 ## Called names resolve, and 94.9% of calls stopped being holes
 
 Landed 08-04, after `infact-python-normalize`. Two rules, both taken from

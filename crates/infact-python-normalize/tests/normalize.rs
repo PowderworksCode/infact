@@ -830,3 +830,56 @@ fn a_single_letter_name_is_not_a_named_constant() {
     );
     assert_eq!(left, right, "a type variable is not behavior");
 }
+
+/// Two libraries implementing one operation meet, though they share no text.
+///
+/// This pair is taken from the installed corpus rather than written for the
+/// test: `ruamel.yaml`'s `construct_yaml_pairs` and `PyYAML`'s
+/// `construct_yaml_omap` share a canonical form while differing in names,
+/// string literals, formatting and error messages. Nothing token-based pairs
+/// them, and they meet here because what only raises is not behavior.
+///
+/// It is the direction `tests/collisions.rs` cannot check. That file guards
+/// against forms MERGING when they should not; this guards the reverse, on
+/// code neither of us wrote.
+#[test]
+fn two_libraries_that_implement_one_operation_meet() {
+    let ruamel = form(
+        "def construct_yaml_pairs(self, node):
+    pairs = []
+    yield pairs
+    if not isinstance(node, SequenceNode):
+        raise ConstructorError(
+            'while constructing pairs',
+            node.start_mark,
+            _F('expected a sequence, but found {node_id!s}', node_id=node.id),
+            node.start_mark,
+        )
+    for subnode in node.value:
+        key_node, value_node = subnode.value[0]
+        key = self.construct_object(key_node)
+        value = self.construct_object(value_node)
+        pairs.append((key, value))
+",
+        "construct_yaml_pairs",
+    );
+    let pyyaml = form(
+        "def construct_yaml_omap(self, node):
+    omap = []
+    yield omap
+    if not isinstance(node, SequenceNode):
+        raise ConstructorError(\"while constructing an ordered map\", node.start_mark,
+                \"expected a sequence, but found %s\" % node.id, node.start_mark)
+    for subnode in node.value:
+        key_node, value_node = subnode.value[0]
+        key = self.construct_object(key_node)
+        value = self.construct_object(value_node)
+        omap.append((key, value))
+",
+        "construct_yaml_omap",
+    );
+    assert_eq!(
+        ruamel, pyyaml,
+        "these build the same pairs from the same nodes and differ only in what they raise"
+    );
+}
