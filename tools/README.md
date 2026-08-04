@@ -255,3 +255,8 @@ panicking on stock CPython. It does not.
 
     python3 tools/ty-receiver-coverage.py /usr/lib/python3.12 /tmp/revealed/corpus 60
     (cd /tmp/revealed && ty check --output-format=concise --python /usr .)
+
+## discard-golden
+
+Freezes the error-discard analyzer output so a refactor can be shown to change
+nothing, and runs the whole-catalog scan a consumer sees. See its README.
