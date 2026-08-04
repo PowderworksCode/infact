@@ -1,5 +1,278 @@
 infact — todo
 
+## A counted `while` is a traversal, and the reason it was opaque was wrong
+
+Landed 08-04. `while i < len(xs): v = xs[i]; ..; i += 1` now becomes the same
+`Traverse` as `for v in xs`, and `while i < n: ..; i += 1` the same as
+`for i in range(n)`. `infact-ts-normalize` calls recognizing an index walk "the
+single most important thing this module does".
+
+### The stated reason did not survive a census
+
+The code said "a `while` walks something the syntax does not name". Over 2,513
+`while` loops in the installed corpus:
+
+     761  30.3%  while True / while 1      <- walks nothing at all
+     467  18.6%  other comparison
+     292  11.6%  counter compared and rebound
+     282  11.2%  compound condition
+     168   6.7%  advances a cursor
+     137   5.5%  calls something each time
+     131   5.2%  until a flag is set
+      99   3.9%  drains a container
+      75   3.0%  reads an attribute
+      58   2.3%  spins on a flag
+      30   1.2%  walrus: read until exhausted
+
+The single largest category walks nothing, so the stated reason was wrong about
+the biggest slice of what it was covering.
+
+### And then 11.6% was wrong too, in the other direction
+
+That 11.6% was quoted here and written into a doc comment before it was
+checked. It came from a loose classifier: condition is a comparison and the
+counter is rebound ANYWHERE, including inside a branch, including loops that
+index nothing. Tightened to what a traversal actually requires:
+
+    307  condition is a bounded comparison
+     94    ...advanced by one at the TOP LEVEL of the body
+     53      ...and indexes a sequence with it
+     41      ...indexes nothing: a walk over a range
+
+So the addressable population is 94 of 2,513 — 3.7%, not 11.6%. The rule takes
+89 of them, and `while` opacity went 2,631 -> 2,542. Third time this session
+the reasoning has been directionally right and numerically wrong before the
+corpus corrected it; the pattern is that a category counted loosely is not the
+category a rule can act on.
+
+### Why it is worth having anyway
+
+Not for the 0.102% -> 0.099% opacity, which is noise. For the equivalence: a
+counted `while` and a `for` over the same sequence are now one form, so a
+consumer matching either spelling finds both. That is the same reason the
+append-loop-equals-comprehension rule matters, and it cannot be read off an
+opacity number.
+
+An advance inside a branch is deliberately declined — it does not visit every
+element, and giving it a traversal's shape would claim it did. Counting
+backwards over a range is declined for the same kind of reason: `range(n - 1,
+-1, -1)` is not a spelling anyone writes, so there is no equivalence to claim.
+
+### A latent bug this turned up in the block pipeline
+
+Dead bindings are now dropped BEFORE fusing as well as after. A counted walk
+leaves its counter behind — `i = 0` with nothing left to read it — and that
+dead step sat BETWEEN the empty container and the loop filling it, which hid an
+ordinary append loop from `fuse_container_fills`. Any dead statement in that
+position would have done the same; the counted loop is just what produced one.
+
+## Imported names are qualified, and the ceiling was 23% but the take was 2.6%
+
+Landed 08-04. `from pyparsing import Regex` makes `Regex` mean
+`pyparsing.Regex` in that file, so two packages importing different things
+under one spelling stop being one form. The import statement names its own
+module, so this needs no filesystem and no other file.
+
+### Measured before building, and the prediction was still too high
+
+The question was whether qualification is worth anything, given it can only
+help a form that contains a path naming something Python does not define
+globally. Of 775 ambiguous forms:
+
+    containing ANY non-builtin path    177 groups / 442 callables   (the ceiling)
+    inside one distribution            718
+    spanning distributions              57
+      ...with a non-builtin path        11
+
+So at most 23% of the ambiguity, and that was an upper bound. What it actually
+bought:
+
+                                     before        after
+    ambiguous forms                     775          750
+    callables inside one       2,077 (2.84%)  2,022 (2.76%)
+    distinct forms                   68,163       68,265
+
+55 callables. 2.6% of the ambiguity against a 23% ceiling, because containing a
+non-builtin path is not the same as the members RESOLVING to different modules:
+most such paths are names defined in the file that uses them, and those stay
+bare. Same shape of error as the `lazy import` prediction — the reasoning was
+directionally right and the size was wrong, and the corpus is what said so.
+
+### What it cost, checked rather than assumed
+
+Cross-package matching is the capability qualification was most likely to
+break, since two implementations of one operation call different modules by
+construction:
+
+    forms shared across directories   1,791 -> 1,716
+      once vendored copies are one      207 ->   191
+      and the names differ                5 ->     5
+
+The five that matter are unchanged. `two_libraries_that_implement_one_operation_meet`
+still passes, because the ruamel/PyYAML pair carries no qualifiable path at all
+— what differs between them lives inside raises, which are dropped.
+
+### Declined: qualifying names the file defines itself
+
+That needs the package layout on disk — walking up while `__init__.py` exists —
+which would make the normalizer read directories and make its output depend on
+where a file sits rather than what it says. For 55 callables it is not worth
+it. Reconsider only if a consumer produces a WRONG finding traceable to a bare
+local name, which is a different and better trigger than a percentage.
+
+## What the forms can now be asked, and the funnel that matters
+
+`--example duplicates` is new and only became worth writing once callees
+resolved. It reports one operation implemented in two distributions, which is
+the signal `library-opportunity` is built on. Over the installed site-packages,
+79,386 functions:
+
+    forms shared across directories   1791
+      once vendored copies are one     207
+      and the names differ               5
+
+READ THE FUNNEL, NOT THE HEADLINE. Most cross-package matches are VENDORING —
+`pip/_vendor/pygments` against `pygments` — and report only that pip vendors
+things. Most of the rest is one library reusing its own helper under one name.
+
+Of the five, two kinds, worth different amounts:
+
+  - A COPY. `mitmproxy`'s `rle_append_beginning_modify` is `urwid`'s
+    `rle_prepend_modify` byte for byte but for the name, in a library mitmproxy
+    already depends on. Real, but `infact-duplication` normalizes identifiers,
+    so exact-clone finds this too given both trees. Claiming otherwise was a
+    mistake made once here and corrected by reading the two sources.
+  - AN INDEPENDENT IMPLEMENTATION. `ruamel.yaml`'s `construct_yaml_pairs` and
+    `PyYAML`'s `construct_yaml_omap` share a form while differing in names,
+    literals, formatting and error messages. Nothing token-based pairs them.
+    They meet because what only raises is not behavior, so the difference
+    between their two error paths is correctly discarded.
+
+Only the second kind is beyond duplication analysis, so it is what the list is
+for. That pair is now `two_libraries_that_implement_one_operation_meet` in
+`tests/normalize.rs` — the first test in the crate whose inputs neither of us
+wrote, and the only guard on forms failing to MERGE. `tests/collisions.rs`
+guards the opposite direction and cannot see this one.
+
+## Called names resolve, and 94.9% of calls stopped being holes
+
+Landed 08-04, after `infact-python-normalize`. Two rules, both taken from
+`infact-ts-normalize` rather than invented:
+
+  1. An identifier in callee position that is not a value bound here becomes
+     `Form::Path(name)` instead of a free hole.
+  2. A name in SCREAMING_CASE that nothing here binds becomes `Form::Path` too.
+     Which constant was passed is behavior; the TypeScript frontend records
+     what resolving both to a hole cost it, 1,390 wrong findings.
+
+### Why, and the number that said so
+
+`--example ambiguity` is new and answers the question `coverage` cannot:
+whether what the normalizer DID read distinguishes anything. Over the installed
+Python — 5,630 files, 93,317 functions:
+
+                                        before        after
+    calls whose callee is a hole    97,158 (94.9%)  3,026 (3.0%)
+    calls resolving to a name                    0   94,132 (91.9%)
+    distinct forms                          67,908   68,163
+    callables sharing a form with
+      a textually different one       2,532 (3.46%)  2,077 (2.84%)
+
+The motivating case is `asyncio`, which writes six pipe-transport factories
+whose bodies differ in nothing but the class constructed:
+
+    return _UnixReadPipeTransport(self, pipe, protocol, waiter, extra)
+    return _ProactorReadPipeTransport(self, pipe, protocol, waiter, extra)
+
+Both were `(call f0 f1 f2 f3 f4 f5)`. Python constructs by naming a class, so
+this hit far harder here than in TypeScript.
+
+### Two things the numbers say that the change alone does not
+
+AMBIGUITY FELL FAR LESS THAN CALLEE RESOLUTION DID: 94.9% -> 3.0% of callees,
+but only 3.46% -> 2.84% of callables. Resolving names both SPLITS and MERGES.
+It splits two constructors apart; it also merges forms that were only ever
+distinguished by free-variable NUMBERING, since `super` is now a stable name
+rather than an index that shifted with how many other holes a body had. Net
+distinct forms rose by 255. The widest remaining group is 84 callables sharing
+`(method __init__ (call (path super)) f0 f1 f2)`, and that is correct — an
+`__init__` that forwards to `super` really is the same behavior everywhere.
+
+THE FIXTURE DID NOT FIND THIS; THE CORPUS DID. `tests/collisions.rs` passed
+throughout, because a fixture only holds erasures someone thought of. That is
+now written into the test's own doc comment, and the pair is in `distinct.py`.
+
+### The bare name is not qualified by module
+
+`Path("Regex")` is the same form in two packages that each define `Regex`.
+Qualifying needs import resolution ACROSS files, which is a different
+observation and belongs in entl if it is ever wanted. TypeScript made the same
+trade. Measured cost of not doing it: it is inside the remaining 2.84%.
+
+[ ] Opacity is untouched by this, and was verified rather than assumed:
+    0.102% of form nodes before and after on the identical corpus. The 0.086%
+    quoted below is a DIFFERENT corpus and the two must not be compared.
+
+## ty (Astral) was evaluated for Python types, and is not ready
+
+Checked 08-04 against ty 0.0.66, because the obvious next question after
+resolving names is resolving RECEIVERS: `x.append(...)` needs to know `x` is a
+list, and no amount of syntax gets there. This is the tier that `error-discard`,
+`library-opportunity` and behavior derivation all wait on.
+
+WHAT IS GOOD, and it is genuinely good:
+
+  - SPEED KILLS THE OBJECTION. The whole CPython stdlib, 574 files, checks in
+    0.59s. 445 files carrying 45,780 type queries: 4.9s. The argument that a
+    type checker means hundreds of thousands of LSP round trips is simply
+    wrong for ty; it is one batch pass.
+  - typeshed is bundled, so stdlib types need no environment at all. That is
+    the subset that could be pinned the way a grammar is pinned.
+
+WHAT BLOCKS IT:
+
+  - THERE IS NO TYPE OUTPUT. `--output-format` offers full, concise, gitlab,
+    github, junit — all diagnostics, none types. The only way to get a type out
+    is `reveal_type()`, which is ty's own TEST mechanism: you rewrite the source
+    to inject calls and parse the inferred type back out of diagnostic text.
+    That is a research harness, not an input to a policy gate.
+  - THE LIBRARY CRATE IS NOT A LIBRARY. `ty_python_semantic` on crates.io is
+    0.0.7 while the CLI is 0.0.66. It says of itself "an internal component
+    crate of Ruff", has no docs of its own, and carries no semver contract.
+    (`ty_plugin_sdk` looks like the answer and is NOT Astral's — its repository
+    is regularkevvv/ruff-extended. Do not take that dependency.)
+  - ONE PANIC ENDS THE RUN. A salsa `known_class_to_instance` cycle killed one
+    file and the other 431 came back `cancelled because of propagated panic`.
+    This is the same all-or-nothing shape as the tree-sitter trap and as
+    entl's own `parse_repository`, and it is the failure mode we care about
+    most: a gate that reports nothing because one file was odd.
+
+WHAT IT WOULD ACTUALLY BUY, measured by injecting `reveal_type` at every
+method-call receiver in real code:
+
+                        stdlib (45,116)   third-party (33,046)
+    <module ...>              22.3%             25.0%    already free from
+                                                         the name resolution
+                                                         above
+    Unknown                   36.5%             32.3%    ty adds nothing
+    partly Unknown             9.3%              4.7%
+    CONCRETE, non-module      31.8%             37.9%    <-- the marginal gain
+
+So about one receiver in three, and that is generous: 512 of the stdlib wins
+are `Never`, which usually means ty decided the code was unreachable.
+
+A CORRECTION WORTH KEEPING: the first reading of this said ty panics on stock
+CPython. It does not. The harness had copied the stdlib into the project root,
+so ty resolved `import encodings` to `ast.unparse`d copies and type-checked a
+fake stdlib against typeshed's stubs of itself. Pristine CPython is clean. The
+panic is real but needs a pathological project to provoke.
+
+[ ] Revisit when BOTH land: a machine-readable type output, and
+    `ty_python_semantic` at version parity with the CLI. Version parity is the
+    cheap readiness signal to watch — today it is 0.0.7 against 0.0.66.
+    Until then Python receiver types are not available on terms this fleet can
+    depend on, and nothing downstream should be designed assuming they are.
+
 ## infact-python-normalize exists, and it found two bugs in the shared core
 
 Landed 08-04. A frontend onto `infact-normalize`, same shape as the TypeScript

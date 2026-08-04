@@ -721,3 +721,384 @@ fn mutually_recursive_local_functions_do_not_run_forever() {
     );
     assert!(form.size() > 0);
 }
+
+// -- Rule 12: a name that is called ------------------------------------------
+
+/// Two delegations to different helpers are two behaviors.
+///
+/// This is the erasure the corpus reported rather than the fixture: measured
+/// over the installed Python, 94.9% of calls had a hole for a callee, and
+/// `asyncio` writes six pipe-transport factories whose bodies differ in
+/// nothing but the class being constructed. Every one of them was one form.
+#[test]
+fn two_delegations_to_different_helpers_are_two_behaviors() {
+    let read = form(
+        "def f(self, pipe, protocol, waiter, extra):
+    return _UnixReadPipeTransport(self, pipe, protocol, waiter, extra)
+",
+        "f",
+    );
+    let write = form(
+        "def f(self, pipe, protocol, waiter, extra):
+    return _UnixWritePipeTransport(self, pipe, protocol, waiter, extra)
+",
+        "f",
+    );
+    assert_ne!(
+        read, write,
+        "constructing a read transport is not constructing a write one"
+    );
+}
+
+/// A name the caller supplied is still a hole, however it is spelled.
+///
+/// This is the guard on the rule above rather than a separate rule. `apply(g,
+/// x)` calls whatever it was handed, and two callers may hand it anything, so
+/// the name `g` says nothing and renaming it must change nothing. Resolving
+/// every called identifier to a path would have broken exactly this.
+#[test]
+fn a_parameter_that_is_called_is_still_a_hole() {
+    let applied = form(
+        "def f(g, x):
+    return g(x)
+",
+        "f",
+    );
+    let renamed = form(
+        "def f(h, x):
+    return h(x)
+",
+        "f",
+    );
+    assert_eq!(
+        applied, renamed,
+        "which name a parameter was given is not behavior"
+    );
+
+    let named = form(
+        "def f(x):
+    return helper(x)
+",
+        "f",
+    );
+    assert_ne!(
+        applied, named,
+        "calling what you were handed is not calling something defined elsewhere"
+    );
+}
+
+/// Which constant was passed is behavior.
+///
+/// `infact-ts-normalize` carries the same rule and records what it cost: with
+/// both constants resolved to a hole, `keys` and `values` were one behavior
+/// 1,390 times over. Python spells constants the same way.
+#[test]
+fn a_named_constant_is_not_a_hole() {
+    let read = form(
+        "def f(path):
+    return open_file(path, MODE_READ)
+",
+        "f",
+    );
+    let write = form(
+        "def f(path):
+    return open_file(path, MODE_WRITE)
+",
+        "f",
+    );
+    assert_ne!(read, write, "the mode is the behavior");
+}
+
+/// A single upper-case letter is a type variable, not a constant.
+///
+/// `T` and `K` appear as `TypeVar` names throughout typed Python, and treating
+/// them as named constants would make two identically-shaped generic helpers
+/// differ over nothing a consumer could report.
+#[test]
+fn a_single_letter_name_is_not_a_named_constant() {
+    let left = form(
+        "def f(xs):
+    return cast(T, xs)
+",
+        "f",
+    );
+    let right = form(
+        "def f(xs):
+    return cast(K, xs)
+",
+        "f",
+    );
+    assert_eq!(left, right, "a type variable is not behavior");
+}
+
+/// Two libraries implementing one operation meet, though they share no text.
+///
+/// This pair is taken from the installed corpus rather than written for the
+/// test: `ruamel.yaml`'s `construct_yaml_pairs` and `PyYAML`'s
+/// `construct_yaml_omap` share a canonical form while differing in names,
+/// string literals, formatting and error messages. Nothing token-based pairs
+/// them, and they meet here because what only raises is not behavior.
+///
+/// It is the direction `tests/collisions.rs` cannot check. That file guards
+/// against forms MERGING when they should not; this guards the reverse, on
+/// code neither of us wrote.
+#[test]
+fn two_libraries_that_implement_one_operation_meet() {
+    let ruamel = form(
+        "def construct_yaml_pairs(self, node):
+    pairs = []
+    yield pairs
+    if not isinstance(node, SequenceNode):
+        raise ConstructorError(
+            'while constructing pairs',
+            node.start_mark,
+            _F('expected a sequence, but found {node_id!s}', node_id=node.id),
+            node.start_mark,
+        )
+    for subnode in node.value:
+        key_node, value_node = subnode.value[0]
+        key = self.construct_object(key_node)
+        value = self.construct_object(value_node)
+        pairs.append((key, value))
+",
+        "construct_yaml_pairs",
+    );
+    let pyyaml = form(
+        "def construct_yaml_omap(self, node):
+    omap = []
+    yield omap
+    if not isinstance(node, SequenceNode):
+        raise ConstructorError(\"while constructing an ordered map\", node.start_mark,
+                \"expected a sequence, but found %s\" % node.id, node.start_mark)
+    for subnode in node.value:
+        key_node, value_node = subnode.value[0]
+        key = self.construct_object(key_node)
+        value = self.construct_object(value_node)
+        omap.append((key, value))
+",
+        "construct_yaml_omap",
+    );
+    assert_eq!(
+        ruamel, pyyaml,
+        "these build the same pairs from the same nodes and differ only in what they raise"
+    );
+}
+
+/// Two names that are spelled alike and mean different things are not one form.
+///
+/// `from re import Regex` and `from pyparsing import Regex` are different
+/// operations wearing one name. The import statement says which module was
+/// read, so this needs no filesystem and nothing outside the file.
+#[test]
+fn one_name_imported_from_two_modules_is_two_things() {
+    let standard = form(
+        "from re import Regex
+
+def f(pattern, text):
+    return Regex(pattern, text, 0)
+",
+        "f",
+    );
+    let third_party = form(
+        "from pyparsing import Regex
+
+def f(pattern, text):
+    return Regex(pattern, text, 0)
+",
+        "f",
+    );
+    assert_ne!(
+        standard, third_party,
+        "these call different things that share a spelling"
+    );
+}
+
+/// An alias is not behavior; what it points at is.
+#[test]
+fn importing_under_another_name_changes_nothing() {
+    let plain = form(
+        "from json.decoder import JSONDecoder
+
+def f(text):
+    return JSONDecoder(text, None)
+",
+        "f",
+    );
+    let aliased = form(
+        "from json.decoder import JSONDecoder as Decoder
+
+def f(text):
+    return Decoder(text, None)
+",
+        "f",
+    );
+    assert_eq!(
+        plain, aliased,
+        "renaming an import at the door does not change what is called"
+    );
+}
+
+/// A name the file did not import stays bare.
+///
+/// Qualifying a locally defined class would need the package layout on disk,
+/// and measuring said the whole of qualification was worth 55 callables out of
+/// 2,077 — nowhere near enough to make the normalizer read directories.
+#[test]
+fn a_name_the_file_did_not_import_is_left_unqualified() {
+    let left = form(
+        "class Helper:
+    pass
+
+def f(x):
+    return Helper(x, x, x)
+",
+        "f",
+    );
+    let right = form(
+        "def f(x):
+    return Helper(x, x, x)
+",
+        "f",
+    );
+    assert_eq!(
+        left, right,
+        "a name defined here and a name from nowhere are both just the name"
+    );
+}
+
+// -- Rule 13: an index walk is a traversal ------------------------------------
+
+/// The rule this exists for: a counted `while` and a `for` are one walk.
+///
+/// `infact-ts-normalize` calls recognizing an index walk "the single most
+/// important thing this module does". Python needs it for the same reason,
+/// and until now every `while` was one opaque form regardless of what it did.
+#[test]
+fn a_counted_while_and_a_for_are_the_same_walk() {
+    let counted = form(
+        "def f(xs):
+    out = []
+    i = 0
+    while i < len(xs):
+        v = xs[i]
+        out.append(g(v))
+        i += 1
+    return out
+",
+        "f",
+    );
+    let walked = form(
+        "def f(xs):
+    out = []
+    for v in xs:
+        out.append(g(v))
+    return out
+",
+        "f",
+    );
+    assert_eq!(
+        counted, walked,
+        "counting to the end of a sequence is walking it"
+    );
+}
+
+/// Counting down is not counting up.
+#[test]
+fn a_backwards_index_walk_is_not_a_forwards_one() {
+    let forwards = form(
+        "def f(xs):
+    i = 0
+    while i < len(xs):
+        if p(xs[i]):
+            return xs[i]
+        i += 1
+",
+        "f",
+    );
+    let backwards = form(
+        "def f(xs):
+    i = len(xs) - 1
+    while i >= 0:
+        if p(xs[i]):
+            return xs[i]
+        i -= 1
+",
+        "f",
+    );
+    assert_ne!(
+        forwards, backwards,
+        "finding the first match is not finding the last"
+    );
+}
+
+/// A loop that advances its counter only sometimes is not a traversal.
+///
+/// `while i < n: if p(xs[i]): i += 1` does not visit every element, and giving
+/// it a traversal's shape would claim it did. This is the guard that keeps the
+/// rule above from swallowing every counted loop.
+#[test]
+fn a_conditional_advance_is_not_a_walk() {
+    let form = form(
+        "def f(xs):
+    i = 0
+    while i < len(xs):
+        if p(xs[i]):
+            i += 1
+    return i
+",
+        "f",
+    );
+    assert!(
+        format!("{form}").contains("while"),
+        "this must stay opaque, got {form}"
+    );
+}
+
+/// A `while` that walks nothing stays opaque, and says what it is.
+///
+/// 30.3% of `while` loops in the installed corpus are `while True`, which
+/// leaves through a `break` rather than reaching the end of anything. The
+/// census behind that number is in `notes/todo.txt`.
+#[test]
+fn an_unbounded_loop_is_still_held_opaque() {
+    let form = form(
+        "def f(source):
+    while True:
+        chunk = source.read()
+        if not chunk:
+            break
+        handle(chunk)
+",
+        "f",
+    );
+    assert!(
+        format!("{form}").contains("while"),
+        "an unbounded loop names no sequence, got {form}"
+    );
+}
+
+/// A counted loop that indexes nothing is a walk over a range.
+#[test]
+fn a_counted_while_and_a_range_for_are_the_same_walk() {
+    let counted = form(
+        "def f(n):
+    total = 0
+    i = 0
+    while i < n:
+        total += g(i)
+        i += 1
+    return total
+",
+        "f",
+    );
+    let ranged = form(
+        "def f(n):
+    total = 0
+    for i in range(n):
+        total += g(i)
+    return total
+",
+        "f",
+    );
+    assert_eq!(counted, ranged, "counting to n is walking range(n)");
+}

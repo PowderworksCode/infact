@@ -33,6 +33,8 @@
 
 mod cleanup;
 
+use std::collections::BTreeMap;
+
 use cleanup::{drop_unused_bindings, fuse_container_fills, inline_aliases, push_flattened, valued};
 use entl_tree_sitter::ParsedFile;
 use infact_normalize::{Arm, Direction, Form, Pattern, Roles};
@@ -117,6 +119,19 @@ fn named_children<'a>(node: Node<'a>) -> Vec<Node<'a>> {
     node.named_children(&mut cursor).collect()
 }
 
+/// Whether a name is spelled the way Python spells a module-level constant.
+///
+/// `MAX_SIZE` and `_DEFAULT` qualify; `Transport` and `x` do not. A single
+/// upper-case letter is excluded because `T` is overwhelmingly a type variable
+/// rather than a constant, and a type variable is not behavior.
+fn is_screaming_case(name: &str) -> bool {
+    name.len() > 1
+        && name.chars().all(|character| {
+            character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+        })
+        && name.chars().any(|character| character.is_ascii_uppercase())
+}
+
 /// Children that carry code, which is every named child but a comment.
 fn code_children<'a>(node: Node<'a>) -> Vec<Node<'a>> {
     named_children(node)
@@ -125,21 +140,115 @@ fn code_children<'a>(node: Node<'a>) -> Vec<Node<'a>> {
         .collect()
 }
 
+/// The names a file imported, and the module each names.
+///
+/// `from json.decoder import JSONDecoder` makes `JSONDecoder` mean
+/// `json.decoder.JSONDecoder` in this file and nowhere else, so two packages
+/// that each import a different `Regex` stop being one form. The statement
+/// says which module it read, so this needs no filesystem and no other file.
+///
+/// Only imports are qualified. A class defined in the file it is used in stays
+/// bare, because naming its module would need the package layout on disk, and
+/// measuring said the whole of qualification is worth at most 23% of the
+/// remaining ambiguity — not enough to make the normalizer read directories.
+type Imports = BTreeMap<String, String>;
+
+fn imports_of(root: Node<'_>, source: &[u8]) -> Imports {
+    let mut imports = Imports::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "import_from_statement" => {
+                let module = node
+                    .child_by_field_name("module_name")
+                    .map(|module| text(module, source).to_owned())
+                    .unwrap_or_default();
+                let mut cursor = node.walk();
+                for imported in node.children_by_field_name("name", &mut cursor) {
+                    let (origin, local) = alias(imported, source);
+                    imports.insert(local, format!("{module}.{origin}"));
+                }
+            }
+            "import_statement" => {
+                let mut cursor = node.walk();
+                for imported in node.children_by_field_name("name", &mut cursor) {
+                    let (origin, local) = alias(imported, source);
+                    // `import a.b.c` binds `a`; `import a.b as c` binds `c`.
+                    match imported.kind() {
+                        "aliased_import" => imports.insert(local, origin),
+                        _ => {
+                            let head = origin.split('.').next().unwrap_or(&origin).to_owned();
+                            imports.insert(head.clone(), head)
+                        }
+                    };
+                }
+            }
+            _ => {}
+        }
+        for child in named_children(node) {
+            stack.push(child);
+        }
+    }
+    imports
+}
+
+/// What an import names, and what this file calls it.
+fn alias(node: Node<'_>, source: &[u8]) -> (String, String) {
+    match node.kind() {
+        "aliased_import" => {
+            let origin = node
+                .child_by_field_name("name")
+                .map(|name| text(name, source).to_owned())
+                .unwrap_or_default();
+            let local = node
+                .child_by_field_name("alias")
+                .map(|name| text(name, source).to_owned())
+                .unwrap_or_else(|| origin.clone());
+            (origin, local)
+        }
+        _ => {
+            let name = text(node, source).to_owned();
+            (name.clone(), name)
+        }
+    }
+}
+
+/// The tree a node belongs to.
+fn root_of(node: Node<'_>) -> Node<'_> {
+    let mut current = node;
+    while let Some(parent) = current.parent() {
+        current = parent;
+    }
+    current
+}
+
 struct Normalizer<'a> {
     source: &'a [u8],
+    imports: &'a Imports,
     roles: Roles,
     located: Vec<LocatedForm>,
     depth: u32,
 }
 
 impl<'a> Normalizer<'a> {
-    fn new(source: &'a [u8]) -> Self {
+    fn new(source: &'a [u8], imports: &'a Imports) -> Self {
         Self {
             source,
+            imports,
             roles: Roles::new(),
             located: Vec::new(),
             depth: 0,
         }
+    }
+
+    /// What a name means outside this body, qualified when the file says so.
+    fn path(&self, name: &str) -> Form {
+        Form::Path(
+            self.imports
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| name.to_owned()),
+        )
     }
 
     fn text(&self, node: Node<'_>) -> &'a str {
@@ -161,7 +270,13 @@ impl<'a> Normalizer<'a> {
                 push_flattened(&mut steps, step, StatementSpan::of(child));
             }
         }
-        let steps = drop_unused_bindings(fuse_container_fills(inline_aliases(steps)));
+        // Dead bindings are dropped BEFORE fusing as well as after. A counted
+        // walk leaves its counter behind — `i = 0` with nothing left to read it
+        // — and a dead step sitting between the empty container and the loop
+        // that fills it would hide an ordinary append loop from the fusion.
+        let steps = drop_unused_bindings(fuse_container_fills(drop_unused_bindings(
+            inline_aliases(steps),
+        )));
         self.depth -= 1;
         let (forms, spans): (Vec<_>, Vec<_>) = steps.into_iter().unzip();
         let form = match forms.len() {
@@ -376,10 +491,129 @@ impl<'a> Normalizer<'a> {
         (self.expression(node), Direction::Forward)
     }
 
+    /// An index walk is a traversal, however the loop is spelled.
+    ///
+    /// `while i < len(xs): v = xs[i]; ..; i += 1` visits each element of `xs`
+    /// in turn, which is what `for v in xs` says. `infact-ts-normalize` calls
+    /// recognizing this "the single most important thing this module does",
+    /// and Python needs it for the same reason: the two spellings are the same
+    /// operation and a consumer that saw two forms would report neither.
+    ///
+    /// The addressable population is smaller than it first looks. Of 2,513
+    /// `while` loops in the installed corpus, 307 test a bounded comparison,
+    /// only 94 advance the counter by one at the top level of the body — an
+    /// advance inside a branch does not visit every element — and of those 53
+    /// index a sequence with it. The other 41 are handled by `counted_range`.
+    fn while_index_walk(&mut self, node: Node<'_>) -> Option<Form> {
+        let condition = node.child_by_field_name("condition")?;
+        let body = node.child_by_field_name("body")?;
+        let (counter, direction, advance) = loop_counter(condition, body, self.source)?;
+        let Some(indexed) = find_indexed(body, &counter, self.source) else {
+            return self.counted_range(condition, body, &counter, direction, advance);
+        };
+
+        // Order matters: the sequence and the counter have to be read with the
+        // roles the code outside the loop gave them, before the item shadows
+        // anything. Resolving the counter after binding would hand back the
+        // item and replace every access with itself.
+        let sequence = self.expression(indexed.sequence);
+        let counter_form = self.roles.resolve(&counter);
+        let Form::Local(item) = self.roles.bind(&indexed.binding) else {
+            return None;
+        };
+
+        let skipped = [
+            Some(advance.id()),
+            indexed.declaration.map(|node| node.id()),
+        ];
+        let walked = self.walk_body(body, &skipped);
+        let walked = replace_element_access(&walked, &sequence, &counter_form, &Form::Local(item));
+        Some(Form::Traverse {
+            sequence: Box::new(sequence),
+            item: Box::new(Pattern::Binding(item)),
+            body: Box::new(walked),
+            direction,
+        })
+    }
+
+    /// A counted loop that indexes nothing is a walk over a range.
+    ///
+    /// `while i < n: total += i; i += 1` visits every number below `n`, which
+    /// is what `for i in range(n)` says. Measured over the installed corpus
+    /// there are 41 of these against 53 that index a sequence, so declining
+    /// them would leave nearly half the addressable loops on the floor.
+    ///
+    /// Only forwards. Counting down has no one spelling to meet — `range(n - 1,
+    /// -1, -1)` is not what anyone writes — so claiming an equivalence there
+    /// would be inventing one.
+    fn counted_range(
+        &mut self,
+        condition: Node<'_>,
+        body: Node<'_>,
+        counter: &str,
+        direction: Direction,
+        advance: Node<'_>,
+    ) -> Option<Form> {
+        if direction != Direction::Forward {
+            return None;
+        }
+        let bound = code_children(condition).get(1).copied()?;
+        let sequence = Form::Call {
+            callee: Box::new(Form::Path("range".to_owned())),
+            arguments: vec![self.expression(bound)],
+        };
+        let Form::Local(item) = self.roles.bind(counter) else {
+            return None;
+        };
+        let walked = self.walk_body(body, &[Some(advance.id())]);
+        Some(Form::Traverse {
+            sequence: Box::new(sequence),
+            item: Box::new(Pattern::Binding(item)),
+            body: Box::new(walked),
+            direction,
+        })
+    }
+
+    /// A loop body, without the statements the traversal has already accounted
+    /// for: the counter's advance, and the assignment that named the element.
+    fn walk_body(&mut self, body: Node<'_>, skipped: &[Option<usize>]) -> Form {
+        let mut steps = Vec::new();
+        self.depth += 1;
+        for child in code_children(body) {
+            if skipped.contains(&Some(child.id())) {
+                continue;
+            }
+            if let Some(step) = self.statement(child) {
+                push_flattened(&mut steps, step, StatementSpan::of(child));
+            }
+        }
+        // Dead bindings are dropped BEFORE fusing as well as after. A counted
+        // walk leaves its counter behind — `i = 0` with nothing left to read it
+        // — and a dead step sitting between the empty container and the loop
+        // that fills it would hide an ordinary append loop from the fusion.
+        let steps = drop_unused_bindings(fuse_container_fills(drop_unused_bindings(
+            inline_aliases(steps),
+        )));
+        self.depth -= 1;
+        let forms: Vec<_> = steps.into_iter().map(|(form, _)| form).collect();
+        match forms.len() {
+            0 => Form::Sequence(Vec::new()),
+            1 => forms.into_iter().next().unwrap_or(Form::Literal),
+            _ => Form::Sequence(forms),
+        }
+    }
+
     fn while_statement(&mut self, node: Node<'_>) -> Form {
-        // A `while` walks something the syntax does not name. Held opaque
-        // rather than guessed at, so the gap stays visible instead of turning
-        // every loop into the same traversal.
+        if let Some(walk) = self.while_index_walk(node) {
+            return walk;
+        }
+        // What is left is not one thing, and none of it is "a walk over
+        // something unnamed" — that was the stated reason here and the corpus
+        // disagreed. Of 2,513 `while` loops, 30.3% are `while True`, which
+        // walks nothing and leaves through a `break`; 18.6% test a comparison
+        // that names no sequence; the rest spin on flags, drain containers or
+        // advance cursors. Held opaque, with the condition and body kept as
+        // parts so two different loops are not one form.
         let condition = node
             .child_by_field_name("condition")
             .map_or(Form::Literal, |condition| self.expression(condition));
@@ -654,7 +888,19 @@ impl<'a> Normalizer<'a> {
                 Some(inner) => self.expression(inner),
                 None => Form::Literal,
             },
-            "identifier" => self.roles.resolve(self.text(node)),
+            "identifier" => {
+                let name = self.text(node);
+                // A name in screaming case that nothing here binds is a named
+                // constant, and which constant it is *is* behavior. The
+                // TypeScript frontend paid for this once: resolving both to a
+                // hole made `ITEM_KIND_KEY` and `ITEM_KIND_VALUE` one thing, and
+                // with them `keys` and `values`. Python spells constants the
+                // same way and inherits the same erasure.
+                if is_screaming_case(name) && !self.roles.is_value(name) {
+                    return self.path(name);
+                }
+                self.roles.resolve(name)
+            }
             "integer" | "float" => Form::Number(self.text(node).to_owned()),
             "true" | "false" => Form::Constant(self.text(node).to_owned()),
             // `None` is the absence a caller has to handle, and that is exactly
@@ -998,7 +1244,25 @@ impl<'a> Normalizer<'a> {
             };
         }
 
-        let callee = self.expression(callee);
+        // Calling a function defined elsewhere is not the same as calling one
+        // the caller supplied. `helper(x)` names something a reader can go and
+        // look at, and two delegations to different helpers are two behaviors.
+        //
+        // `infact-ts-normalize` does this at the same point, and Python needs it
+        // more than TypeScript does: a class is constructed by naming it, so
+        // `_UnixReadPipeTransport(self, pipe, protocol, waiter, extra)` and
+        // `_ProactorReadPipeTransport(...)` differ in nothing but the name, and
+        // reduced to the same six-hole form until this existed. Measured over
+        // the installed corpus, 94.9% of calls had a hole for a callee.
+        //
+        // The name is kept bare rather than qualified by module. Two packages
+        // that both define `Regex` do collide under this, which is the same
+        // trade the TypeScript frontend made; qualifying would need to resolve
+        // imports across files, and that is a different observation.
+        let callee = match callee.kind() {
+            "identifier" if !self.roles.is_value(self.text(callee)) => self.path(self.text(callee)),
+            _ => self.expression(callee),
+        };
         Form::Call {
             callee: Box::new(callee),
             arguments: arguments
@@ -1229,7 +1493,8 @@ fn declare_parameters(function: Node<'_>, source: &[u8], normalizer: &mut Normal
 }
 
 pub fn normalize_function(function: Node<'_>, source: &[u8]) -> Form {
-    let mut normalizer = Normalizer::new(source);
+    let imports = imports_of(root_of(function), source);
+    let mut normalizer = Normalizer::new(source, &imports);
     declare_parameters(function, source, &mut normalizer);
     match function.child_by_field_name("body") {
         Some(body) if body.kind() == "block" => valued(normalizer.block(body)),
@@ -1243,7 +1508,21 @@ pub fn normalize_function_located(
     function: Node<'_>,
     source: &[u8],
 ) -> (Form, Vec<StatementSpan>, Vec<LocatedForm>) {
-    let mut normalizer = Normalizer::new(source);
+    {
+        let imports = imports_of(root_of(function), source);
+        located_with(function, source, &imports)
+    }
+}
+
+/// The body of `normalize_function_located`, with the file's imports supplied.
+///
+/// `normalize_file` reads a file's imports once rather than once per function.
+fn located_with<'a>(
+    function: Node<'_>,
+    source: &'a [u8],
+    imports: &'a Imports,
+) -> (Form, Vec<StatementSpan>, Vec<LocatedForm>) {
+    let mut normalizer = Normalizer::new(source, imports);
     declare_parameters(function, source, &mut normalizer);
     let (form, spans) = match function.child_by_field_name("body") {
         Some(body) if body.kind() == "block" => {
@@ -1258,7 +1537,8 @@ pub fn normalize_function_located(
 
 /// Normalize a bare body, with no parameters in scope.
 pub fn normalize_body(body: Node<'_>, source: &[u8]) -> Form {
-    let mut normalizer = Normalizer::new(source);
+    let imports = imports_of(root_of(body), source);
+    let mut normalizer = Normalizer::new(source, &imports);
     normalizer.block(body)
 }
 
@@ -1270,7 +1550,8 @@ pub fn normalize_body(body: Node<'_>, source: &[u8]) -> Form {
 /// one failure mode worth going out of the way to avoid.
 pub fn normalize_module(file: &ParsedFile) -> Form {
     let root = file.tree.root_node();
-    let mut normalizer = Normalizer::new(&file.source);
+    let imports = imports_of(root, &file.source);
+    let mut normalizer = Normalizer::new(&file.source, &imports);
     valued(normalizer.block(root))
 }
 
@@ -1293,12 +1574,13 @@ fn collect_functions<'a>(node: Node<'a>, output: &mut Vec<Node<'a>>) {
 pub fn normalize_file(file: &ParsedFile) -> Vec<NormalizedFunction> {
     let mut nodes = Vec::new();
     collect_functions(file.tree.root_node(), &mut nodes);
+    let imports = imports_of(file.tree.root_node(), &file.source);
     nodes
         .into_iter()
         .filter_map(|node| {
             let name = node.child_by_field_name("name")?;
             node.child_by_field_name("body")?;
-            let located = normalize_function_located(node, &file.source);
+            let located = located_with(node, &file.source, &imports);
             // A decorated function is written `@d` then `def f(): ..`, and the
             // decorators are part of what a reader would be pointed at.
             let outer = node
@@ -1318,4 +1600,155 @@ pub fn normalize_file(file: &ParsedFile) -> Vec<NormalizedFunction> {
             })
         })
         .collect()
+}
+
+/// An element access found in a loop body, and what names it.
+struct Indexed<'a> {
+    sequence: Node<'a>,
+    binding: String,
+    /// The assignment that gave the element a name, when there is one.
+    declaration: Option<Node<'a>>,
+}
+
+/// The counter a `while` bounds and advances, and which way it runs.
+///
+/// All three have to agree or this is some other loop that happens to compare
+/// a number: the condition bounds the name, the body advances it, and the two
+/// point the same way. Counting up under `<` walks forwards; counting down
+/// under `>` or `>=` walks backwards, which is the difference between finding
+/// the first match and the last.
+fn loop_counter<'a>(
+    condition: Node<'_>,
+    body: Node<'a>,
+    source: &[u8],
+) -> Option<(String, Direction, Node<'a>)> {
+    if condition.kind() != "comparison_operator" {
+        return None;
+    }
+    let children = code_children(condition);
+    let [left, right] = children.as_slice() else {
+        return None;
+    };
+    if left.kind() != "identifier" {
+        return None;
+    }
+    // A bound that is itself the counter would make the loop's end depend on
+    // where it already is, which is not a walk over a sequence.
+    let counter = text(*left, source).to_owned();
+    if text(*right, source)
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .any(|word| word == counter)
+    {
+        return None;
+    }
+    let operator = condition
+        .child(1)
+        .map(|node| text(node, source))
+        .unwrap_or_default();
+    let advance = find_advance(body, &counter, source)?;
+    let step = text(inner(advance).child_by_field_name("operator")?, source);
+    let direction = match (operator, step) {
+        ("<" | "<=", "+=") => Direction::Forward,
+        (">" | ">=", "-=") => Direction::Backward,
+        _ => return None,
+    };
+    Some((counter, direction, advance))
+}
+
+/// The expression a statement wraps, since `i += 1` arrives inside an
+/// `expression_statement` and the fields live on the assignment.
+fn inner(node: Node<'_>) -> Node<'_> {
+    code_children(node).first().copied().unwrap_or(node)
+}
+
+/// The statement that advances the counter by one.
+///
+/// Returns the STATEMENT rather than the assignment inside it, because the
+/// caller drops it from the body by identity and the body is a list of
+/// statements.
+///
+/// Only a top-level statement of the loop body counts. An advance buried in a
+/// branch runs some of the time, and a traversal that visits every element
+/// would be the wrong shape for it.
+fn find_advance<'a>(body: Node<'a>, counter: &str, source: &[u8]) -> Option<Node<'a>> {
+    code_children(body).into_iter().find(|child| {
+        let statement = inner(*child);
+        statement.kind() == "augmented_assignment"
+            && statement
+                .child_by_field_name("left")
+                .is_some_and(|left| text(left, source) == counter)
+            && statement
+                .child_by_field_name("right")
+                .is_some_and(|right| text(right, source).trim() == "1")
+    })
+}
+
+/// The sequence a loop body indexes with `counter`, and the name it binds.
+///
+/// A body normally names the element first — `v = xs[i]` — and then works with
+/// the name. When it does not, the access itself is the element and a name is
+/// supplied, because a traversal has to bind one.
+fn find_indexed<'a>(body: Node<'a>, counter: &str, source: &[u8]) -> Option<Indexed<'a>> {
+    fn walk<'a>(node: Node<'a>, counter: &str, source: &[u8], found: &mut Option<Node<'a>>) {
+        if found.is_some() {
+            return;
+        }
+        if node.kind() == "subscript"
+            && node
+                .child_by_field_name("subscript")
+                .is_some_and(|index| text(index, source) == counter)
+        {
+            *found = Some(node);
+            return;
+        }
+        for child in named_children(node) {
+            walk(child, counter, source, found);
+        }
+    }
+    let mut found = None;
+    walk(body, counter, source, &mut found);
+    let access = found?;
+    let sequence = access.child_by_field_name("value")?;
+
+    let mut declaration = None;
+    let mut binding = None;
+    for child in code_children(body) {
+        let statement = inner(child);
+        if statement.kind() != "assignment" {
+            continue;
+        }
+        if statement
+            .child_by_field_name("right")
+            .is_some_and(|right| right.id() == access.id())
+            && let Some(name) = statement.child_by_field_name("left")
+            && name.kind() == "identifier"
+        {
+            binding = Some(text(name, source).to_owned());
+            declaration = Some(child);
+        }
+    }
+    Some(Indexed {
+        sequence,
+        binding: binding.unwrap_or_else(|| format!("__item_{counter}")),
+        declaration,
+    })
+}
+
+/// Replace `xs[i]` with the item the traversal binds.
+///
+/// Without this the body still reads the sequence by index and no `for` loop
+/// over the same sequence could ever match it.
+fn replace_element_access(form: &Form, sequence: &Form, counter: &Form, item: &Form) -> Form {
+    if let Form::Method {
+        name,
+        receiver,
+        arguments,
+    } = form
+        && name == "index"
+        && receiver.as_ref() == sequence
+        && arguments.as_slice() == std::slice::from_ref(counter)
+    {
+        return item.clone();
+    }
+    form.map_children(&|child| replace_element_access(child, sequence, counter, item))
 }
