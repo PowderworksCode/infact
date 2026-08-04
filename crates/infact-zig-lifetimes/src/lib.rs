@@ -63,6 +63,8 @@
 use entl_zig_observe::{ContainerField, Span};
 
 mod evidence;
+pub mod flow;
+pub mod origin;
 
 pub use evidence::{EVIDENCE_RULES, EvidenceRule, FieldEvidence, classify_with_evidence};
 

@@ -1448,6 +1448,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "infact-flow"
+version = "0.0.0"
+dependencies = [
+ "ascent",
+ "infact-core",
+]
+
+[[package]]
 name = "infact-normalize"
 version = "0.0.0"
 dependencies = [
@@ -1483,6 +1491,7 @@ dependencies = [
  "entl-tree-sitter",
  "infact-core",
  "infact-fact-pack",
+ "infact-flow",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
@@ -1514,6 +1523,8 @@ version = "0.0.0"
 dependencies = [
  "entl-tree-sitter",
  "entl-zig-observe",
+ "infact-core",
+ "infact-flow",
 ]
 
 [[package]]

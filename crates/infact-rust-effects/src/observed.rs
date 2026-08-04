@@ -21,7 +21,7 @@ use infact_core::{
 use crate::allocation::allocating_destination;
 use crate::{
     CallAccounting, EffectSeed, RepositoryEffectDiagnostic, RepositoryEffectReport, ResolvedCall,
-    Result, decode_effect, evidence_path, external_effects, propagate_effects,
+    Result, call_evidence, decode_effect, effect_graph, external_effects,
 };
 
 /// A callable as the observations describe it.
@@ -175,35 +175,23 @@ pub fn analyze_observed_effects(
     seeds.sort();
     seeds.dedup();
 
-    let propagated = propagate_effects(&calls, &seeds);
-    let calls_by_caller = calls.iter().fold(
-        BTreeMap::<u64, Vec<&ResolvedCall>>::new(),
-        |mut by_caller, call| {
-            by_caller.entry(call.caller).or_default().push(call);
-            by_caller
-        },
-    );
-    let seeds_by_callable = seeds.iter().fold(
-        BTreeMap::<u64, Vec<&EffectSeed>>::new(),
-        |mut by_callable, seed| {
-            by_callable.entry(seed.callable).or_default().push(seed);
-            by_callable
-        },
-    );
+    let names = by_id
+        .iter()
+        .map(|(id, callable)| (*id, callable.definition.id.as_str().to_owned()))
+        .collect::<BTreeMap<_, _>>();
+    let graph = effect_graph(&calls, &seeds, &names);
+    let trace = graph.trace();
 
     let mut effects = Vec::new();
-    for relation in propagated {
-        let effect = decode_effect(relation.effect);
-        let Some(callable) = by_id.get(&relation.callable) else {
+    for relation in graph.propagate() {
+        let effect = decode_effect(relation.label);
+        let Some(callable) = by_id.get(&relation.node) else {
             continue;
         };
-        let Some(evidence) = observed_evidence(
-            callable.id,
-            effect,
-            &calls_by_caller,
-            &seeds_by_callable,
-            &by_id,
-        ) else {
+        let Some(evidence) = trace
+            .witness(callable.id, relation.label)
+            .map(call_evidence)
+        else {
             continue;
         };
         let value = EffectTrace {
@@ -255,21 +243,6 @@ fn external_effect<'a>(
     external
         .get_key_value(&crate::path::without_turbofish(target.as_str()))
         .map(|(declared, effects)| (declared.as_str(), effects.as_slice()))
-}
-
-/// Reuses the syntax path's evidence search over the observed graph.
-fn observed_evidence(
-    start: u64,
-    effect: Effect,
-    calls: &BTreeMap<u64, Vec<&ResolvedCall>>,
-    seeds: &BTreeMap<u64, Vec<&EffectSeed>>,
-    callables: &BTreeMap<u64, &ObservedCallable<'_>>,
-) -> Option<infact_core::CallEffectEvidence> {
-    let named = callables
-        .iter()
-        .map(|(id, callable)| (*id, callable.definition.id.as_str().to_owned()))
-        .collect::<BTreeMap<_, _>>();
-    evidence_path(start, effect, calls, seeds, &named)
 }
 
 fn derivation(observations: &SemanticObservations) -> FactDerivation {

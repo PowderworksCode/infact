@@ -9,6 +9,8 @@ description = "Derives Zig pointer-field ownership from observed container field
 
 [dependencies]
 entl-zig-observe = { path = "../../../entl/crates/entl-zig-observe" }
+infact-core = { path = "../infact-core" }
+infact-flow = { path = "../infact-flow" }
 
 [dev-dependencies]
 entl-tree-sitter.workspace = true
