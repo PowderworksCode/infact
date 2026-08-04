@@ -1381,3 +1381,35 @@ because that crate deliberately depends on nothing but `infact-normalize`.
 [ ] Move `parse_library` into entl as `parse_repository_recovering`, additive,
     leaving `parse_repository` alone for consumers who want a file with an error
     to be no file at all.
+
+
+## A behavior is language-neutral; a MATCH is not — 08-04
+
+`FactPackSet::load` flattened every pack's behaviors into one list and handed
+that list to `infact-rust-behaviors`. Which pack a behavior came from — and so
+which language it was derived from — was dropped at load.
+
+That was harmless while only Rust packs existed and stops being harmless the
+moment a TypeScript pack does. A `Form` names no language, which is the entire
+point of it: a search derived from JavaScript matches a Rust function of the
+same shape perfectly well. The finding would name an ECMAScript builtin at a
+Rust call site, and nothing in the output would say anything was wrong. Same
+failure class as every entry in the collision section — a distinction erased
+somewhere upstream, invisible where it lands.
+
+`FactPackSet` now keeps each behavior with `manifest.subject.language`, and each
+frontend is offered only its own. Asserted by
+`behaviors_are_only_offered_to_the_language_they_came_from`, which uses the
+itertools pack rather than the core one on purpose: core is the EFFECTS pack and
+carries no library behaviors at all, so the test would have passed by finding
+nothing on either side. The test says so in a comment, because that is exactly
+the shape of a test that measures nothing.
+
+TypeScript is now wired into `analyze_repository` beside Rust, so a repository
+scan reports TypeScript reuse through the ordinary path rather than only through
+`tools/ts-scoreboard`. It parses the repository a second time and is skipped
+entirely when no pack describes TypeScript.
+
+[ ] The two frontends parse the repository once each. One walk feeding both
+    would halve that, and needs `parse_repository` to hand back files grouped by
+    language rather than each analyzer filtering the whole set.

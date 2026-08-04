@@ -1340,6 +1340,7 @@ dependencies = [
  "infact-fact-pack",
  "infact-rust-behaviors",
  "infact-rust-effects",
+ "infact-ts-behaviors",
  "serde",
  "serde_json",
  "tempfile",
