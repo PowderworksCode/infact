@@ -1519,6 +1519,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "infact-rust-lower"
+version = "0.0.0"
+dependencies = [
+ "entl-tree-sitter",
+ "tree-sitter",
+]
+
+[[package]]
 name = "infact-rust-normalize"
 version = "0.0.0"
 dependencies = [

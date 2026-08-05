@@ -1,4 +1,22 @@
-# Can a `Form` be turned back into code? Phase 0, measured
+# Lowering: what `Form` cannot do, and what does it instead
+
+Two parts, in the order they were done.
+
+**Part one** measures whether a `Form` can be turned back into code. It cannot:
+**4 of 120** functions survive the round trip, and the reason is structural
+rather than fixable.
+
+**Part two** is `infact-rust-lower`, which does it on a tree built for the job.
+The whole workspace — **1,179 bodies across 116 files** — is lifted, printed
+back, and rebuilt with **269 tests passing and nothing failing**, at **99.63%
+structural coverage**. Run it with `tools/roundtrip-workspace.sh`.
+
+The conclusion of part one is what part two is built on, so the two are not in
+tension: lowering works exactly when it stops being asked of `Form`.
+
+---
+
+# Part one — Can a `Form` be turned back into code?
 
 Answer: **no, and the reason is structural rather than fixable.** 4 of 120 real
 functions survive a Rust → `Form` → Rust round trip, and the four that survive
@@ -219,3 +237,119 @@ LOWER_ONLY=<fn> cargo run --example lower -p infact-rust-normalize -- <src> --sp
   guess it makes is counted. It could be improved at the margins — reinstating
   `&` by type inference, say — but not past E0599 and E0531, which are 72 of the
   100 failures and are missing information rather than missing effort.
+
+---
+
+# Part two — `infact-rust-lower`, and it works
+
+Part one concluded that lowering does not belong on `Form`. This is where it
+went instead, and the result is a Rust → tree → Rust round trip that holds over
+the whole workspace.
+
+## The numbers
+
+| | |
+|---|---:|
+| files | 116 |
+| function bodies lifted and reprinted | 1,179 |
+| workspace tests passing afterwards | **269** |
+| workspace tests failing afterwards | **0** |
+| structural coverage | **99.63%** |
+| lines differing from the original after `rustfmt` | 283 of ~48,000 |
+
+`tools/roundtrip-workspace.sh` copies the workspace, rewrites every function
+body from the lifted tree, and runs the suite against the result. It reprints
+`infact-rust-lower`'s own source too, so the crate round-trips itself.
+
+## The one design decision that made it work
+
+Every node the lift does not understand becomes `Expr::Verbatim`, holding the
+source text exactly. Printing it emits what was there.
+
+This is the opposite of `Form::Opaque`, which keeps a node's *kind* and its
+*normalized children* and throws the text away — right for matching, fatal for
+emission, and the largest single node kind at 18.4% in part one.
+
+The consequence is that **the round trip is correct from the first day**, and
+coverage becomes a number that improves rather than a gate to clear before
+anything runs. Fidelity is checked by building; coverage says how much of the
+tree a rewrite could actually reach. Two numbers, and only one of them is
+allowed to be below 100%.
+
+The corollary is a rule for the lift: **a rule that is unsure must decline.**
+Verbatim text can never print a different program. A wrong structure always
+can.
+
+## What it keeps that `Form` discards
+
+Each of these is a measured cause of failure in part one:
+
+- `&x` versus `&mut x` versus `x` — three programs, not one
+- `.iter()`, `.clone()`, `.into()` — not noise
+- `HashMap::with_capacity(8)` — the constructor and its argument
+- `let mut` — mutability
+- `Self::Binding` — the path qualifier, not just the leaf
+- `Ok(n) | Err(n)` — an or-pattern binds names
+- arm order, and guards
+- macro tokens, exactly as written
+- identifiers
+
+## Four bugs, and what they have in common
+
+Every one printed something that looked right and was a different program.
+None was visible without building the output. All four are now tests in
+`crates/infact-rust-lower/tests/roundtrip.rs`.
+
+1. **`_` is anonymous in the grammar.** Asking for the named children of a
+   `tuple_struct_pattern` drops it, so `Some(_)` printed as `Some()`. This is
+   the same trap recorded in `todo.txt` for `(k, _)` versus `(_, v)`, which
+   made `BTreeMap::keys` and `::values` one behavior. It is worth writing down
+   that this grammar detail has now caused a bug in two separate crates, years
+   apart in the codebase's own history.
+2. **`|_|` is the same trap in closure parameters**, where losing it makes the
+   closure take no arguments.
+3. **`let mut x` puts the `mut` beside the pattern**, not around it, so the
+   binding never carries it. The result compiles until something borrows.
+4. **The grammar's `return_type` field is the type without its arrow**, so
+   `|x: u32| -> u32` printed as `|x: u32| u32` and read as chained comparison.
+
+A fifth was not a compile error at all: **trailing comments were being moved to
+their own line.** `// straitjacket-allow:` is scoped to its line, so relocating
+it silently changes which statement it covers. `Stmt::Comment` now records
+whether a comment followed code.
+
+## What is still held as text, and it is not much
+
+204 patterns and 120 expressions of 40,502 nodes:
+
+- `match` with a comment between its arms — declined on purpose, because there
+  is nowhere in `Arm` to hang it and dropping it would delete an explanation
+- typed closure parameters, `|character: char|` — `Pat` has no annotation field
+- a few struct literals with unusual field forms
+
+Types, generics, attributes and `where` clauses are held as text **by design**,
+not as a gap. They are carried through transformations rather than rewritten by
+them.
+
+## What this does and does not settle
+
+It settles that a faithful lift-and-print of Rust works, and that infact can
+own one. That is the foundation a mechanical translator needs and did not have.
+
+It does not by itself settle Zig → Rust. What part two provides is the *target*
+side — somewhere to emit Rust from, with borrows and constructors and
+mutability intact, which `Form` could not offer. The source side still needs a
+Zig lift that does not exist, and the cost argument at the end of part one is
+unchanged by any of this: `baozi/PORTING.md` already has signatures ported by
+other means, and `COST.md` puts tokens at 0.11% of what the real port cost.
+
+The honest way to put it: **the piece that was impossible is now merely
+unbuilt.**
+
+## Reproducing
+
+```
+tools/roundtrip-workspace.sh                        # the whole claim, one command
+cargo run --example roundtrip -p infact-rust-lower -- crates
+cargo test -p infact-rust-lower                     # the contract
+```
