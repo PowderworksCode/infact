@@ -10,6 +10,7 @@ members = [
     "crates/infact-fact-pack",
     "crates/infact-fact-builder",
     "crates/infact-fact-registry",
+    "crates/infact-c-normalize",
     "crates/infact-normalize",
     "crates/infact-python-normalize",
     "crates/infact-rust-normalize",
