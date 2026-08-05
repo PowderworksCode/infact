@@ -1572,6 +1572,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "infact-zig-lower"
+version = "0.0.0"
+dependencies = [
+ "entl-tree-sitter",
+ "infact-rust-lower",
+ "tree-sitter",
+]
+
+[[package]]
 name = "instant"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
