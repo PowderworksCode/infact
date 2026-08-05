@@ -42,7 +42,15 @@ fn main() {
     for path in paths {
         let Ok(source) = std::fs::read(&path) else { continue };
         let Ok(tree) = parser.parse(&path, Arc::<[u8]>::from(source)) else { continue };
-        let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+        // The UNIT PATH -- the path below the corpus root without `.zig` --
+        // because a bare stem collides: Bun has 1,292 files and 1,233 distinct
+        // stems, so 59 of them would share a key with another file.
+        let stem = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .with_extension("")
+            .to_string_lossy()
+            .replace('\\', "/");
         let file_assignments = assignments(&tree);
         let file_calls = method_calls(&tree);
         for field in fields(&tree) {
