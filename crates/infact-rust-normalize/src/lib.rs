@@ -87,6 +87,15 @@ pub struct NormalizedFunction {
     pub start_line: u32,
     pub end_line: u32,
     pub form: Form,
+    /// Where the body's braces are, so what the form was lifted from can be
+    /// replaced by something lowered back out of it.
+    pub body_start_byte: u64,
+    pub body_end_byte: u64,
+    /// What each role in `form` was called in the source.
+    ///
+    /// Beside the form rather than in it: the form must not carry it or two
+    /// implementations that behave alike would stop comparing.
+    pub names: Vec<(Form, String)>,
     /// Where each top-level statement of the body is, in the same order as the
     /// steps of `form` when `form` is a sequence. This is what lets a match be
     /// reported against statements rather than the whole function.
@@ -946,6 +955,15 @@ fn statement_spans(body: Node<'_>) -> Vec<StatementSpan> {
 /// call looks alike, and a function the reader could go and look at cannot be
 /// told apart from an argument the caller supplied.
 pub fn normalize_function(function: Node<'_>, source: &[u8]) -> Form {
+    normalize_function_named(function, source).0
+}
+
+/// Normalize one function, keeping what each role was called.
+///
+/// The names are returned separately rather than placed in the form. A form
+/// that carried them would no longer compare two implementations that differ
+/// only in what their authors named things, which is the whole point of it.
+pub fn normalize_function_named(function: Node<'_>, source: &[u8]) -> (Form, Vec<(Form, String)>) {
     let mut normalizer = Normalizer::new(source);
     if let Some(parameters) = function.child_by_field_name("parameters") {
         let mut names = Vec::new();
@@ -955,10 +973,12 @@ pub fn normalize_function(function: Node<'_>, source: &[u8]) -> Form {
         }
     }
     normalizer.roles.declare("self");
-    match function.child_by_field_name("body") {
+    let form = match function.child_by_field_name("body") {
         Some(body) => normalizer.block(body),
         None => Form::Sequence(Vec::new()),
-    }
+    };
+    let names = normalizer.roles.ledger().to_vec();
+    (form, names)
 }
 
 /// Normalize a bare body, with no parameters in scope.
@@ -985,14 +1005,18 @@ pub fn normalize_file(file: &ParsedFile) -> Vec<NormalizedFunction> {
         .filter_map(|node| {
             let name = node.child_by_field_name("name")?;
             // a signature with no body declares behavior rather than describing it
-            node.child_by_field_name("body")?;
+            let body = node.child_by_field_name("body")?;
+            let (form, names) = normalize_function_named(node, &file.source);
             Some(NormalizedFunction {
+                body_start_byte: body.start_byte() as u64,
+                body_end_byte: body.end_byte() as u64,
+                names,
                 name: text(name, &file.source).to_owned(),
                 start_byte: node.start_byte() as u64,
                 end_byte: node.end_byte() as u64,
                 start_line: u32::try_from(node.start_position().row + 1).unwrap_or(u32::MAX),
                 end_line: u32::try_from(node.end_position().row + 1).unwrap_or(u32::MAX),
-                form: normalize_function(node, &file.source),
+                form,
                 statements: node
                     .child_by_field_name("body")
                     .map(statement_spans)

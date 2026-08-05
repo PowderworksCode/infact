@@ -12,6 +12,7 @@ members = [
     "crates/infact-fact-registry",
     "crates/infact-normalize",
     "crates/infact-python-normalize",
+    "crates/infact-rust-lower",
     "crates/infact-rust-normalize",
     "crates/infact-ts-normalize",
     "crates/infact-ts-behaviors",
