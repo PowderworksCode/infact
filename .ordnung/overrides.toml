@@ -1,0 +1,5 @@
+# Test fixtures are inputs to tests, not source this repository ships. They are
+# TypeScript and JavaScript by extension, which made them look like projects
+# owing CI tasks, a type layer, and a fleet-managed Biome config — none of which
+# they want, and the Biome config would have changed what the fixtures exercise.
+ignore = ["**/tests/fixtures/**"]
