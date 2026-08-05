@@ -6,22 +6,23 @@
 //! emit an owning class), then the assignment-evidence rules for what the
 //! first tier declined. The `evidence` column records which rule fired and its
 //! basis, so a wrong row is checkable rather than merely wrong.
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use entl_tree_sitter::{LoadedParser, ParserPack, ParserRuntime};
 use entl_zig_observe::{assignments, fields, method_calls};
-use infact_zig_lifetimes::{FieldEvidence, OwnershipClass, classify, classify_with_evidence};
+use infact_zig_lifetimes::{FieldEvidence, classify, classify_with_evidence};
 
 fn main() {
     let mut args = std::env::args().skip(1);
     let root = PathBuf::from(args.next().expect("zig src root"));
     let pack = PathBuf::from(args.next().expect("parser pack dir"));
     let parser: LoadedParser = ParserRuntime::new()
-        .unwrap()
-        .load(Arc::new(ParserPack::load(pack).unwrap()))
-        .unwrap();
+        .and_then(|rt| ParserPack::load(pack).and_then(|p| rt.load(Arc::new(p))))
+        .unwrap_or_else(|e| {
+            eprintln!("cannot load the parser pack: {e}");
+            std::process::exit(1)
+        });
 
     let mut paths = Vec::new();
     let mut stack = vec![root.clone()];
@@ -80,7 +81,7 @@ fn main() {
                 )
             });
             let Some(c) = hit else { continue };
-            let class: OwnershipClass = c.class.into();
+            let class = c.class;
             // Confidence tiers follow cowbird's convention by measured precision.
             // measured_precision is a percentage (90.3), not a fraction.
             let conf = if c.measured_precision >= 85.0 {
@@ -100,5 +101,4 @@ fn main() {
             );
         }
     }
-    let _ = BTreeMap::<u8, u8>::new(); // keep clippy quiet about unused import if pruned
 }
