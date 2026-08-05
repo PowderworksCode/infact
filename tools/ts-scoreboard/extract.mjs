@@ -47,8 +47,13 @@ function loadTypeScript() {
     for (const candidate of candidates) {
       try {
         return require(candidate);
-      } catch {
-        tried.push(`${candidate} from ${base}`);
+      } catch (error) {
+        // Keep the cause, not just the fact. A missing module and a module that
+        // is present and broken both land here, and reporting only "tried
+        // these" turns the second into the first: the message says no compiler
+        // was found when one was found and would not load.
+        const why = error?.code === "MODULE_NOT_FOUND" ? "not found" : error;
+        tried.push(`${candidate} from ${base}: ${why}`);
       }
     }
   }
