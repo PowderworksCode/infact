@@ -1085,6 +1085,15 @@ pub struct Roles {
     roles: Vec<(String, Form)>,
     /// Names that hold values supplied from outside the body.
     values: Vec<String>,
+    /// Every role assigned, with the identifier it was assigned to.
+    ///
+    /// Nothing in matching may consult this: which identifier an author chose
+    /// is not behavior, and a form that carried it would stop comparing. It is
+    /// kept beside the form, not in it, so that a consumer which needs the
+    /// names — anything emitting code rather than comparing it — can ask.
+    /// Shadowing appends rather than replaces, because a role that was
+    /// displaced still names what it named.
+    ledger: Vec<(Form, String)>,
     locals: u32,
     frees: u32,
 }
@@ -1100,7 +1109,13 @@ impl Roles {
         self.locals += 1;
         self.roles.retain(|(existing, _)| existing != name);
         self.roles.push((name.to_owned(), form.clone()));
+        self.ledger.push((form.clone(), name.to_owned()));
         form
+    }
+
+    /// What each role was called in the source it was lifted from.
+    pub fn ledger(&self) -> &[(Form, String)] {
+        &self.ledger
     }
 
     /// Introduce a binding the source did not name.
@@ -1150,6 +1165,7 @@ impl Roles {
         let form = Form::Free(self.frees);
         self.frees += 1;
         self.roles.push((name.to_owned(), form.clone()));
+        self.ledger.push((form.clone(), name.to_owned()));
         form
     }
 }
