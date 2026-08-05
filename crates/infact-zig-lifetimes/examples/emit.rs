@@ -26,7 +26,9 @@ fn main() {
     let mut paths = Vec::new();
     let mut stack = vec![root.clone()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in entries.flatten() {
             let p = e.path();
             if p.is_dir() {
@@ -40,8 +42,12 @@ fn main() {
 
     println!("stem\tstruct\tfield\tclass\tconfidence\tevidence\tplatform");
     for path in paths {
-        let Ok(source) = std::fs::read(&path) else { continue };
-        let Ok(tree) = parser.parse(&path, Arc::<[u8]>::from(source)) else { continue };
+        let Ok(source) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(tree) = parser.parse(&path, Arc::<[u8]>::from(source)) else {
+            continue;
+        };
         // The UNIT PATH -- the path below the corpus root without `.zig` --
         // because a bare stem collides: Bun has 1,292 files and 1,233 distinct
         // stems, so 59 of them would share a key with another file.
@@ -67,7 +73,10 @@ fn main() {
                     .collect();
                 classify_with_evidence(
                     &field,
-                    FieldEvidence { assignments: &assigns, calls: &calls },
+                    FieldEvidence {
+                        assignments: &assigns,
+                        calls: &calls,
+                    },
                 )
             });
             let Some(c) = hit else { continue };
