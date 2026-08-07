@@ -1,0 +1,19 @@
+[package]
+name = "infact-zig-lower"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A faithful Zig syntax tree, and what of it translates to Rust."
+
+[dependencies]
+entl-tree-sitter.workspace = true
+infact-rust-lower = { path = "../infact-rust-lower" }
+tree-sitter.workspace = true
+
+[dev-dependencies]
+entl-tree-sitter.workspace = true
+
+[lints]
+workspace = true

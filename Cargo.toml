@@ -19,6 +19,7 @@ members = [
     "crates/infact-ts-behaviors",
     "crates/infact-rust-effects",
     "crates/infact-zig-lifetimes",
+    "crates/infact-zig-lower",
     "crates/infact-errors",
     "crates/infact-rust-behaviors",
     "crates/infact-cli",
