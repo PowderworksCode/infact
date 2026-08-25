@@ -748,3 +748,77 @@ fn a_lower_triangle_that_reaches_below_the_start_is_refused() {
     );
     assert!(!form.contains("(pairwise"), "{form}");
 }
+
+/// A loop reading each element and its neighbour is a walk over adjacent pairs.
+#[test]
+fn a_neighbour_loop_is_an_adjacent_pairwise_walk() {
+    let form = behavior_of(
+        "fn f(values: &[i32]) -> bool {
+             for i in 0..values.len() - 1 {
+                 if values[i] > values[i + 1] { return false; }
+             }
+             true
+         }",
+        "f",
+    );
+    assert!(form.contains("(pairwise-adjacent"), "{form}");
+}
+
+/// Reading a neighbour two along is not a walk over adjacent pairs.
+#[test]
+fn a_loop_reading_two_along_is_not_adjacent() {
+    let form = behavior_of(
+        "fn f(values: &[i32]) -> bool {
+             for i in 0..values.len() - 2 {
+                 if values[i] > values[i + 2] { return false; }
+             }
+             true
+         }",
+        "f",
+    );
+    assert!(!form.contains("(pairwise"), "{form}");
+}
+
+/// A loop that runs to the end reads past it, so it is a different walk.
+///
+/// `for i in 0..v.len()` with `v[i + 1]` panics on the last step; treating it
+/// as the `windows(2)` walk would report a working API for code that does not
+/// work.
+#[test]
+fn a_neighbour_loop_that_runs_to_the_end_is_not_adjacent() {
+    let form = behavior_of(
+        "fn f(values: &[i32]) -> bool {
+             for i in 0..values.len() {
+                 if values[i] > values[i + 1] { return false; }
+             }
+             true
+         }",
+        "f",
+    );
+    assert!(!form.contains("(pairwise"), "{form}");
+}
+
+/// Adjacent pairs are not the same walk as every pair.
+///
+/// The same test means something much weaker over neighbours than over all
+/// pairs, so the two must not reduce to one form.
+#[test]
+fn adjacent_pairs_differ_from_every_pair() {
+    let adjacent = behavior_of(
+        "fn f(values: &[i32]) -> bool {
+             for i in 0..values.len() - 1 { if values[i] > values[i + 1] { return false; } }
+             true
+         }",
+        "f",
+    );
+    let every = behavior_of(
+        "fn f(values: &[i32]) -> bool {
+             for i in 0..values.len() {
+                 for j in i + 1..values.len() { if values[i] > values[j] { return false; } }
+             }
+             true
+         }",
+        "f",
+    );
+    assert_ne!(adjacent, every);
+}

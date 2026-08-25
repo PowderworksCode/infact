@@ -175,6 +175,7 @@ impl Form {
             .or_else(|| rebuilt.as_canonical_arithmetic())
             .or_else(|| rebuilt.as_element_traversal())
             .or_else(|| rebuilt.as_pairwise())
+            .or_else(|| rebuilt.as_adjacent_pairwise())
             .or_else(|| rebuilt.as_recovered_escape())
             .or_else(|| rebuilt.as_unfolded(fuel))
             .unwrap_or(rebuilt)
@@ -477,6 +478,51 @@ impl Form {
         self.as_indexed_pairwise(outer, first, inner, second, inner_body)
             .or_else(|| Self::as_guarded_pairwise(outer, first, inner, second, inner_body))
             .or_else(|| Self::as_enumerated_pairwise(outer, first, inner, second, inner_body))
+    }
+
+    /// A single loop reading each element and the one after it.
+    ///
+    /// `for i in 0..v.len() - 1 { .. v[i] .. v[i + 1] .. }` is the `windows(2)`
+    /// walk written out, and unlike the other two coverages it is one loop
+    /// rather than two. The bound has to stop one short, because that is what
+    /// keeps `v[i + 1]` inside the sequence; a loop that ran to the end would
+    /// be a different walk, and in Rust a panicking one.
+    ///
+    /// The second element needs a name the body is not already using, since the
+    /// code has only one index where the form has two elements.
+    fn as_adjacent_pairwise(&self) -> Option<Self> {
+        let Self::Traverse {
+            sequence,
+            item,
+            body,
+            direction: Direction::Forward,
+        } = self
+        else {
+            return None;
+        };
+        let Pattern::Binding(index) = item.as_ref() else {
+            return None;
+        };
+        let (start, end) = counting_span(sequence)?;
+        if *start != Self::Number("0".to_owned()) {
+            return None;
+        }
+        // `0..n - 1` reads positions up to `n`, because the last step reads its
+        // neighbour. That is the extent, and it is why this cannot reuse the
+        // bound as written.
+        let extent = one_more_than(end)?;
+        let source = body.sole_indexed_sequence(&[*index])?;
+        if !body.adjacent_only(source, *index) || body.writes_indexed(source) {
+            return None;
+        }
+        let successor = self.highest_binding().map_or(0, |highest| highest + 1);
+        Some(Self::Pairwise {
+            sequence: Box::new(walked_sequence(start, &extent, source)),
+            left: item.clone(),
+            right: Box::new(Pattern::Binding(successor)),
+            body: Box::new(body.with_adjacent_elements(source, *index, successor)),
+            coverage: Coverage::Adjacent,
+        })
     }
 
     /// The square spelling: two loops over the whole range, minus the diagonal.
@@ -1018,6 +1064,24 @@ fn excludes_the_diagonal(form: &Form, left: u32, right: u32) -> bool {
 fn names_both_positions(first: &Form, second: &Form, left: u32, right: u32) -> bool {
     (*first == Form::Local(left) && *second == Form::Local(right))
         || (*first == Form::Local(right) && *second == Form::Local(left))
+}
+
+/// The bound a loop would have had if it did not stop one short.
+///
+/// `n - 1` reads up to `n`. A length that is already a call — `v.len() - 1` —
+/// gives back `v.len()`, which is what makes the extent the whole sequence
+/// rather than a slice of it.
+fn one_more_than(form: &Form) -> Option<Form> {
+    match form {
+        Form::Binary {
+            operator,
+            left,
+            right,
+        } if operator == "-" && **right == Form::Number("1".to_owned()) => {
+            Some(left.as_ref().clone())
+        }
+        _ => None,
+    }
 }
 
 /// Whether a form is one less than another.

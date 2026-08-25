@@ -1,0 +1,46 @@
+{
+  "path": "slice::is_sorted",
+  "container": {
+    "type": {
+      "path": "slice"
+    }
+  },
+  "signature": {
+    "inputs": [
+      {
+        "name": "self",
+        "ty": {
+          "reference": {
+            "mutable": false,
+            "inner": {
+              "generic": {
+                "name": "Self"
+              }
+            }
+          }
+        }
+      }
+    ],
+    "output": {
+      "primitive": {
+        "name": "bool"
+      }
+    },
+    "requirements": [
+      {
+        "subject": {
+          "generic": {
+            "name": "T"
+          }
+        },
+        "bounds": [
+          {
+            "trait": {
+              "path": "PartialOrd"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

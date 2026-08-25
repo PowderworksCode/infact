@@ -784,10 +784,24 @@ fn collect_idiom_matches(
     let context = idioms::Context {
         can_allocate: !function.is_const,
     };
-    let Ok(walked) = idioms::all_different(candidate, context) else {
+    for idiom in idioms::Idiom::ALL {
+        collect_one_idiom(*idiom, file, function, candidate, context, catalogs, output)?;
+    }
+    Ok(())
+}
+
+fn collect_one_idiom(
+    idiom: idioms::Idiom,
+    file: &ParsedFile,
+    function: &infact_rust_normalize::NormalizedFunction,
+    candidate: &Form,
+    context: idioms::Context,
+    catalogs: &[ExternalCatalog],
+    output: &mut BTreeSet<Fact<LibraryBehaviorMatch>>,
+) -> Result<()> {
+    let Ok(walked) = idioms::recognize(idiom, candidate, context) else {
         return Ok(());
     };
-    let idiom = idioms::Idiom::AllDifferent;
     let (package, path) = idiom.callable_path();
     // The callable has to be present AND still answer the question the idiom
     // decides. A catalog is generated data and a path is not a promise: the
