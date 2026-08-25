@@ -15,13 +15,14 @@ mod renaming;
 mod simplify;
 
 use matching::Bindings;
+pub use matching::Resolved;
 use renaming::Renaming;
 
 use std::fmt::{self, Display, Formatter};
 
 use serde::{Deserialize, Serialize};
 
-pub const NORMALIZED_FORM_SCHEMA: u32 = 1;
+pub const NORMALIZED_FORM_SCHEMA: u32 = 2;
 
 /// The deepest a form may nest and still describe an operation.
 ///
@@ -215,16 +216,22 @@ pub enum Form {
     /// special case: it is a normalization that lets a written-out loop compare
     /// against a library API that exists.
     ///
-    /// Only the distinct-pairs walk reduces to this. Walking adjacent pairs is
-    /// `windows(2)` and a different coverage; walking every ordered pair
-    /// including an element with itself is a third. Both stay two traversals
-    /// until something needs them, because a coverage field with one inhabitant
-    /// says nothing and a wrong one would claim a walk the code does not make.
+    /// Walking adjacent pairs is `windows(2)` and is not this: it is a third
+    /// coverage, and it stays two traversals until something needs it.
     Pairwise {
         sequence: Box<Form>,
         left: Box<Pattern>,
         right: Box<Pattern>,
         body: Box<Form>,
+        /// Which of the pairs the walk actually reaches.
+        ///
+        /// Written out, the two are a triangular nested loop and a square one
+        /// with the diagonal guarded away, and both are common. They reach the
+        /// same pairs and differ in how often, which is behavior: a decision
+        /// that does not care how many times it sees a pair gets the same
+        /// answer from either, and a count gets double. Recording it is what
+        /// lets a reader of the form tell which they have.
+        coverage: Coverage,
     },
     /// Producing a new sequence by transforming each element.
     Transform {
@@ -338,6 +345,25 @@ pub enum Form {
         kind: String,
         parts: Vec<Form>,
     },
+}
+
+/// How often a pairwise walk reaches each pair.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum Coverage {
+    /// Each unordered pair once: `for i in 0..n { for j in i + 1..n { .. } }`,
+    /// which is what `itertools::tuple_combinations` offers.
+    #[default]
+    Once,
+    /// Each unordered pair both ways round, and no element with itself.
+    ///
+    /// A square nested loop over one sequence with an `i != j` guard. Every
+    /// pair is visited twice, in both orders, so this says strictly less than
+    /// [`Coverage::Once`] about anything order- or count-sensitive and exactly
+    /// as much about anything that is neither.
+    BothWays,
 }
 
 /// Which way a walk runs.
@@ -558,11 +584,13 @@ impl Form {
                 left,
                 right,
                 body,
+                coverage,
             } => Self::Pairwise {
                 sequence: apply(sequence),
                 left: left.clone(),
                 right: right.clone(),
                 body: apply(body),
+                coverage: *coverage,
             },
             Self::Transform {
                 sequence,
@@ -754,6 +782,34 @@ impl Form {
     pub fn canonical(&self) -> Self {
         let mut renaming = Renaming::default();
         renaming.form(self)
+    }
+
+    /// Every place `pattern` matches, with what its roles stood for.
+    ///
+    /// The companion to [`Form::contains`], which answers whether a pattern is
+    /// here and discards what it found. A recognizer that has to say something
+    /// about a *part* of what matched — this hole must not mention that name —
+    /// needs the parts, and working them out by walking the subject again is
+    /// how a matcher comes to be reimplemented beside itself.
+    ///
+    /// Matches at nodes, not at runs of statements: a pattern spread over
+    /// several steps has no single node to have matched, so [`Form::locate_all`]
+    /// is what places those.
+    #[must_use]
+    pub fn resolve_all(&self, pattern: &Self) -> Vec<Resolved> {
+        let mut found = Vec::new();
+        self.resolve_into(pattern, &mut found);
+        found
+    }
+
+    fn resolve_into(&self, pattern: &Self, found: &mut Vec<Resolved>) {
+        let mut bindings = Bindings::default();
+        if bindings.form(self, pattern) {
+            found.push(bindings.resolved());
+        }
+        for child in self.children() {
+            child.resolve_into(pattern, found);
+        }
     }
 
     /// Whether this form contains `pattern` anywhere within it.
@@ -1025,6 +1081,52 @@ impl Form {
             && self.is_comparable()
     }
 
+    /// The one sequence a body indexes at every named position.
+    ///
+    /// A loop bound is often a variable rather than the sequence's own length —
+    /// `for i in 0..n` far more often than `for i in 0..v.len()` — so the span
+    /// does not always say what is being walked. The body does: whatever it
+    /// reads at those positions is the sequence, and it has to be exactly one
+    /// of them, or the loop is walking positions into two things at once and is
+    /// not a walk over either.
+    fn sole_indexed_sequence(&self, positions: &[u32]) -> Option<&Self> {
+        let mut sequence = None;
+        let mut seen = Vec::new();
+        self.collect_indexed(positions, &mut sequence, &mut seen)?;
+        positions
+            .iter()
+            .all(|position| seen.contains(position))
+            .then_some(sequence)?
+    }
+
+    /// Gather the sequence indexed at each position, failing on disagreement.
+    fn collect_indexed<'a>(
+        &'a self,
+        positions: &[u32],
+        sequence: &mut Option<&'a Self>,
+        seen: &mut Vec<u32>,
+    ) -> Option<()> {
+        if let Self::Index {
+            sequence: indexed,
+            position,
+        } = self
+            && let Self::Local(index) = position.as_ref()
+            && positions.contains(index)
+        {
+            if sequence.is_some_and(|found| found != indexed.as_ref()) {
+                return None;
+            }
+            *sequence = Some(indexed.as_ref());
+            if !seen.contains(index) {
+                seen.push(*index);
+            }
+        }
+        for child in self.children() {
+            child.collect_indexed(positions, sequence, seen)?;
+        }
+        Some(())
+    }
+
     /// Whether a body reads a sequence only by indexing it at named positions.
     ///
     /// This is the licence to forget the index. `for i in 0..v.len()` visits
@@ -1182,7 +1284,14 @@ impl Display for Form {
                 left,
                 right,
                 body,
-            } => write!(formatter, "(pairwise {sequence} {left} {right} {body})"),
+                coverage,
+            } => {
+                let kind = match coverage {
+                    Coverage::Once => "pairwise",
+                    Coverage::BothWays => "pairwise-both-ways",
+                };
+                write!(formatter, "({kind} {sequence} {left} {right} {body})")
+            }
             Self::Accumulate {
                 sequence,
                 initial,
@@ -1379,6 +1488,44 @@ mod tests {
             }),
             direction: Direction::Forward,
         }
+    }
+
+    fn pairwise(coverage: Coverage) -> Form {
+        Form::Pairwise {
+            sequence: Box::new(Form::Free(0)),
+            left: Box::new(Pattern::Binding(0)),
+            right: Box::new(Pattern::Binding(1)),
+            body: Box::new(Form::Binary {
+                operator: "==".to_owned(),
+                left: Box::new(Form::Local(0)),
+                right: Box::new(Form::Local(1)),
+            }),
+            coverage,
+        }
+    }
+
+    /// A walk over pairs takes part in matching like every other form.
+    ///
+    /// Adding a variant without teaching the unifier about it does not fail to
+    /// compile: the fallthrough answers `false`, so the form silently matches
+    /// nothing and every behavior written over it goes quiet.
+    #[test]
+    fn a_walk_over_pairs_matches_itself() {
+        assert!(pairwise(Coverage::Once).contains(&pairwise(Coverage::Once)));
+        assert!(
+            Form::Sequence(vec![Form::Literal, pairwise(Coverage::Once)])
+                .contains(&pairwise(Coverage::Once))
+        );
+    }
+
+    /// Seeing each pair once is not seeing it both ways round.
+    ///
+    /// The two reach the same pairs and differ in how often, which is behavior
+    /// for anything that counts.
+    #[test]
+    fn the_two_coverages_do_not_match_each_other() {
+        assert!(!pairwise(Coverage::Once).contains(&pairwise(Coverage::BothWays)));
+        assert!(!pairwise(Coverage::BothWays).contains(&pairwise(Coverage::Once)));
     }
 
     /// Code that does a thing four times has four findings.

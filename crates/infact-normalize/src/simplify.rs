@@ -22,7 +22,7 @@
 
 use std::cell::Cell;
 
-use crate::{Direction, Form, Pattern};
+use crate::{Coverage, Direction, Form, Pattern};
 
 /// How many times to sweep before giving up.
 ///
@@ -423,14 +423,16 @@ impl Form {
         let Pattern::Binding(index) = item.as_ref() else {
             return None;
         };
-        let source = whole_index_span(sequence)?;
-        if !body.indexed_only(source, &[*index]) || body.writes_indexed(source) {
+        let (start, end) = counting_span(sequence)?;
+        let positions = [*index];
+        let source = body.sole_indexed_sequence(&positions)?;
+        if !body.indexed_only(source, &positions) || body.writes_indexed(source) {
             return None;
         }
         Some(Self::Traverse {
-            sequence: Box::new(source.clone()),
+            sequence: Box::new(walked_sequence(start, end, source)),
             item: item.clone(),
-            body: Box::new(body.with_indexed_elements(source, &[*index])),
+            body: Box::new(body.with_indexed_elements(source, &positions)),
             direction: *direction,
         })
     }
@@ -473,7 +475,50 @@ impl Form {
             return None;
         };
         self.as_indexed_pairwise(outer, first, inner, second, inner_body)
+            .or_else(|| Self::as_guarded_pairwise(outer, first, inner, second, inner_body))
             .or_else(|| Self::as_enumerated_pairwise(outer, first, inner, second, inner_body))
+    }
+
+    /// The square spelling: two loops over the whole range, minus the diagonal.
+    ///
+    /// `for i in 0..n { for j in 0..n { if i != j { .. } } }` reaches each pair
+    /// twice rather than once, which is why it is [`Coverage::BothWays`] rather
+    /// than the same thing as a triangular loop.
+    ///
+    /// The guard has to be consumed rather than left in the body, and that is
+    /// the whole difficulty: it is the one place the positions are compared to
+    /// each other instead of used to index, so a body that still contained it
+    /// could never satisfy the test that the positions are only ever indices.
+    /// Removing it is sound precisely because what it excludes — an element
+    /// paired with itself — is what the resulting form already excludes.
+    fn as_guarded_pairwise(
+        outer: &Self,
+        first: &Pattern,
+        inner: &Self,
+        second: &Pattern,
+        body: &Self,
+    ) -> Option<Self> {
+        let (Pattern::Binding(left), Pattern::Binding(right)) = (first, second) else {
+            return None;
+        };
+        // Both loops must walk the same positions, or the square is not square.
+        let (start, end) = counting_span(outer)?;
+        if counting_span(inner)? != (start, end) {
+            return None;
+        }
+        let body = without_diagonal_guard(body, *left, *right)?;
+        let positions = [*left, *right];
+        let source = body.sole_indexed_sequence(&positions)?;
+        if !body.indexed_only(source, &positions) || body.writes_indexed(source) {
+            return None;
+        }
+        Some(Self::Pairwise {
+            sequence: Box::new(walked_sequence(start, end, source)),
+            left: Box::new(first.clone()),
+            right: Box::new(second.clone()),
+            body: Box::new(body.with_indexed_elements(source, &positions)),
+            coverage: Coverage::BothWays,
+        })
     }
 
     /// The index spelling: two spans over one sequence's positions.
@@ -485,22 +530,22 @@ impl Form {
         second: &Pattern,
         body: &Self,
     ) -> Option<Self> {
-        let source = whole_index_span(outer)?;
         let (Pattern::Binding(left), Pattern::Binding(right)) = (first, second) else {
             return None;
         };
-        if !covers_each_pair_once(inner, *left, source) {
-            return None;
-        }
+        let (start, end) = counting_span(outer)?;
+        let end = pairwise_extent(start, end, inner, *left)?;
         let positions = [*left, *right];
+        let source = body.sole_indexed_sequence(&positions)?;
         if !body.indexed_only(source, &positions) || body.writes_indexed(source) {
             return None;
         }
         Some(Self::Pairwise {
-            sequence: Box::new(source.clone()),
+            sequence: Box::new(walked_sequence(start, end, source)),
             left: Box::new(first.clone()),
             right: Box::new(second.clone()),
             body: Box::new(body.with_indexed_elements(source, &positions)),
+            coverage: Coverage::Once,
         })
     }
 
@@ -532,6 +577,7 @@ impl Form {
             left: Box::new(element.clone()),
             right: Box::new(second.clone()),
             body: Box::new(body.clone()),
+            coverage: Coverage::Once,
         })
     }
 
@@ -809,12 +855,11 @@ fn unfoldable(bindings: &[(u32, Form)]) -> Vec<(u32, Form)> {
     }
 }
 
-/// The sequence whose whole index range a span walks.
+/// The two ends of a span a loop counts through.
 ///
-/// `0..v.len()` reaches every position of `v` and nothing else. An inclusive
-/// bound reaches one position past the end, which is a different walk and in
-/// Rust a panicking one, so it is not this.
-fn whole_index_span(form: &Form) -> Option<&Form> {
+/// An inclusive bound reaches one position past the end, which is a different
+/// walk and in Rust a panicking one, so it is not this.
+fn counting_span(form: &Form) -> Option<(&Form, &Form)> {
     let Form::Span {
         start,
         end,
@@ -823,43 +868,164 @@ fn whole_index_span(form: &Form) -> Option<&Form> {
     else {
         return None;
     };
-    if *inclusive || **start != Form::Number("0".to_owned()) {
-        return None;
-    }
-    let Form::Method {
-        name,
-        receiver,
-        arguments,
-    } = end.as_ref()
-    else {
-        return None;
-    };
-    (name == "len" && arguments.is_empty()).then(|| receiver.as_ref())
+    (!*inclusive).then(|| (start.as_ref(), end.as_ref()))
 }
 
-/// Whether an inner span visits each pair of a sequence exactly once.
+/// The sequence a loop counting to `bound` actually walks.
 ///
-/// Two spans do it, and they are the two triangles of the index square:
-/// `i + 1 .. len` takes every position after the outer one, and `0 .. i` every
-/// position before it. Either way each unordered pair is reached once. A table
-/// rather than arithmetic — a bound this cannot read is a bound this refuses.
-fn covers_each_pair_once(span: &Form, outer: u32, sequence: &Form) -> bool {
-    let Form::Span {
-        start,
-        end,
-        inclusive: false,
-    } = span
-    else {
-        return false;
-    };
-    let above = is_successor_of(start, outer)
-        && matches!(whole_index_span(&Form::Span {
-            start: Box::new(Form::Number("0".to_owned())),
-            end: end.clone(),
+/// `0..v.len()` walks `v` itself. Anything else walks a part of it: `0..n` is
+/// the slice `v[..n]` and `1..n` is `v[1..n]` — and that is the form the
+/// frontend already produces for those slices written out, so a loop over a
+/// range and a slice of the same extent agree. Recording it this way is what
+/// keeps the form honest: a walk bounded by something other than the length
+/// does not cover the sequence, and saying it did would recommend an API over
+/// elements that were never read.
+///
+/// Measured, this is most of the corpus rather than an edge: across CodeNet's
+/// Rust submissions, pairwise loops bound by a bare variable outnumber those
+/// bound by `len()` six to one.
+fn walked_sequence(start: &Form, end: &Form, sequence: &Form) -> Form {
+    let from_the_beginning = *start == Form::Number("0".to_owned());
+    let to_the_end = matches!(end, Form::Method { name, receiver, arguments }
+        if name == "len" && arguments.is_empty() && receiver.as_ref() == sequence);
+    if from_the_beginning && to_the_end {
+        return sequence.clone();
+    }
+    Form::Index {
+        sequence: Box::new(sequence.clone()),
+        position: Box::new(Form::Span {
+            start: Box::new(start.clone()),
+            end: Box::new(end.clone()),
             inclusive: false,
-        }), Some(walked) if walked == sequence);
-    let below = **start == Form::Number("0".to_owned()) && **end == Form::Local(outer);
-    above || below
+        }),
+    }
+}
+
+/// How far a pair of nested spans reads, when they reach each pair once.
+///
+/// Two inner spans do it, and they are the two triangles of the index square:
+/// `i + 1 .. bound` takes every position after the outer one, and `0 .. i`
+/// every position before it. Either way each unordered pair is reached once.
+///
+/// The upper triangle admits an outer loop that stops one short. `0..n - 1`
+/// with `i + 1..n` reaches exactly the pairs `0..n` with `i + 1..n` does,
+/// because the last position has nothing above it to pair with — and it is
+/// what a third of the checks measured in the corpus were written as. The
+/// extent is then the inner bound rather than the outer, because the inner
+/// bound is the one that says how far the sequence is actually read.
+///
+/// A table rather than arithmetic: a bound this cannot read is one it refuses.
+fn pairwise_extent<'a>(
+    outer_start: &Form,
+    outer_end: &'a Form,
+    inner: &'a Form,
+    outer: u32,
+) -> Option<&'a Form> {
+    let (inner_start, inner_end) = counting_span(inner)?;
+    if is_successor_of(inner_start, outer) {
+        let matches_outer = inner_end == outer_end || is_predecessor_of(outer_end, inner_end);
+        return matches_outer.then_some(inner_end);
+    }
+    // The lower triangle allows no such slack: an outer loop that stopped one
+    // short would never pair the last position with anything. Its inner loop
+    // must also start where the outer one did, or the pairs below that point
+    // go unvisited.
+    (inner_start == outer_start && *inner_end == Form::Local(outer)).then_some(outer_end)
+}
+
+/// A square loop's body with its `i != j` guard taken out.
+///
+/// Three spellings, and the corpus writes all three: the guard as a conjunct of
+/// the test that follows it, the guard as the whole body wrapping the work, and
+/// the guard as an early `continue`. Returns `None` when there is no guard at
+/// all — an unguarded square loop pairs elements with themselves, so every
+/// element equals something and the walk decides nothing.
+fn without_diagonal_guard(body: &Form, left: u32, right: u32) -> Option<Form> {
+    match body {
+        // `if i != j && a[i] == a[j] { .. }`
+        Form::Branch {
+            condition,
+            consequence,
+            alternative,
+        } => {
+            if let Form::Binary {
+                operator,
+                left: first,
+                right: second,
+            } = condition.as_ref()
+                && operator == "&&"
+            {
+                let remaining = if excludes_the_diagonal(first, left, right) {
+                    second
+                } else if excludes_the_diagonal(second, left, right) {
+                    first
+                } else {
+                    return None;
+                };
+                return Some(Form::Branch {
+                    condition: remaining.clone(),
+                    consequence: consequence.clone(),
+                    alternative: alternative.clone(),
+                });
+            }
+            // `if i != j { .. }` wrapping the work, with nothing to do when the
+            // positions are equal.
+            (excludes_the_diagonal(condition, left, right) && alternative.is_none())
+                .then(|| consequence.as_ref().clone())
+        }
+        // `if i == j { continue; }` before the work.
+        Form::Sequence(steps) => {
+            let (guard, rest) = steps.split_first()?;
+            let Form::Branch {
+                condition,
+                consequence,
+                alternative: None,
+            } = guard
+            else {
+                return None;
+            };
+            if !matches!(consequence.as_ref(), Form::Opaque { kind, .. } if kind == "continue_expression")
+            {
+                return None;
+            }
+            let Form::Binary {
+                operator,
+                left: first,
+                right: second,
+            } = condition.as_ref()
+            else {
+                return None;
+            };
+            if operator != "==" || !names_both_positions(first, second, left, right) {
+                return None;
+            }
+            match rest {
+                [only] => Some(only.clone()),
+                _ => Some(Form::Sequence(rest.to_vec())),
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Whether a test is exactly `i != j` over the two loop positions.
+fn excludes_the_diagonal(form: &Form, left: u32, right: u32) -> bool {
+    matches!(form, Form::Binary { operator, left: first, right: second }
+        if operator == "!=" && names_both_positions(first, second, left, right))
+}
+
+/// Whether two forms are the two loop positions, either way round.
+fn names_both_positions(first: &Form, second: &Form, left: u32, right: u32) -> bool {
+    (*first == Form::Local(left) && *second == Form::Local(right))
+        || (*first == Form::Local(right) && *second == Form::Local(left))
+}
+
+/// Whether a form is one less than another.
+fn is_predecessor_of(form: &Form, of: &Form) -> bool {
+    matches!(form, Form::Binary { operator, left, right }
+        if operator == "-"
+            && left.as_ref() == of
+            && **right == Form::Number("1".to_owned()))
 }
 
 /// Whether a form is one more than a named position.

@@ -100,6 +100,13 @@ pub struct NormalizedFunction {
     /// steps of `form` when `form` is a sequence. This is what lets a match be
     /// reported against statements rather than the whole function.
     pub statements: Vec<StatementSpan>,
+    /// Whether the body runs at compile time, where there is no allocator.
+    ///
+    /// Not part of the form: what a function computes is the same whether or
+    /// not it is `const`. It is recorded beside it because a recommendation to
+    /// reach for a collection is wrong here however right the match is, and a
+    /// reader should not be shown a finding they must then reject.
+    pub is_const: bool,
 }
 
 /// The source extent of one statement.
@@ -1064,6 +1071,17 @@ pub fn normalize_body(body: Node<'_>, source: &[u8]) -> Form {
     normalizer.block(body)
 }
 
+/// Whether a function is declared `const`.
+///
+/// The modifier is an anonymous token before the `fn`, so it is read off the
+/// children rather than a field.
+fn is_const_function(node: Node<'_>, source: &[u8]) -> bool {
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .take_while(|child| child.kind() != "fn")
+        .any(|child| !child.is_named() && text(child, source) == "const")
+}
+
 fn collect_functions<'a>(node: Node<'a>, output: &mut Vec<Node<'a>>) {
     if node.kind() == "function_item" {
         output.push(node);
@@ -1098,6 +1116,7 @@ pub fn normalize_file(file: &ParsedFile) -> Vec<NormalizedFunction> {
                     .child_by_field_name("body")
                     .map(statement_spans)
                     .unwrap_or_default(),
+                is_const: is_const_function(node, &file.source),
             })
         })
         .collect()

@@ -433,13 +433,16 @@ fn the_lower_triangle_is_also_a_pairwise_walk() {
     assert!(form.contains("(pairwise"), "{form}");
 }
 
-/// A nested loop over the whole sequence twice is not a walk over pairs.
+/// A guarded square loop over `len()` is a walk over pairs, both ways round.
 ///
-/// It visits each ordered pair and an element with itself, and the `i != j`
-/// that usually accompanies it is written over indices this rewrite would
-/// forget. Refusing is the honest outcome.
+/// This used to be refused on the grounds that the `i != j` is written over
+/// indices the rewrite forgets. That was the wrong conclusion from a right
+/// observation: the guard has to be CONSUMED rather than carried, and removing
+/// it is sound because what it excludes is what the resulting form excludes
+/// anyway. Measured against CodeNet submissions to problems that are about
+/// distinctness, this spelling is a fifth of the hand-rolled ones.
 #[test]
-fn a_full_nested_loop_is_not_a_pairwise_walk() {
+fn a_guarded_square_loop_over_a_length_is_a_pairwise_walk() {
     let form = behavior_of(
         "fn f(values: &[i32]) -> bool {
              for i in 0..values.len() {
@@ -451,7 +454,7 @@ fn a_full_nested_loop_is_not_a_pairwise_walk() {
          }",
         "f",
     );
-    assert!(!form.contains("(pairwise"), "{form}");
+    assert!(form.contains("(pairwise-both-ways"), "{form}");
 }
 
 /// A nested loop that touches the sequence itself is not a walk over pairs.
@@ -485,4 +488,263 @@ fn a_subtraction_chain_has_one_spelling() {
         "f",
     );
     assert_eq!(first, second);
+}
+
+/// A loop bounded by a variable walks a prefix, and the form says so.
+///
+/// Measured on CodeNet, pairwise loops bound by a bare variable outnumber those
+/// bound by `len()` six to one, so this is the common case rather than an edge.
+/// The prefix is recorded because `0..n` does not reach past `n`, and claiming
+/// it covered the sequence would recommend an API over elements never read.
+#[test]
+fn a_loop_bounded_by_a_variable_walks_a_prefix() {
+    let bounded = behavior_of(
+        "fn f(values: &[i32], n: usize) -> bool {
+             for i in 0..n {
+                 for j in i + 1..n {
+                     if values[i] == values[j] { return false; }
+                 }
+             }
+             true
+         }",
+        "f",
+    );
+    assert!(bounded.contains("(pairwise (index"), "{bounded}");
+    let whole = behavior_of(
+        "fn f(values: &[i32]) -> bool {
+             for i in 0..values.len() {
+                 for j in i + 1..values.len() {
+                     if values[i] == values[j] { return false; }
+                 }
+             }
+             true
+         }",
+        "f",
+    );
+    assert!(whole.contains("(pairwise f"), "{whole}");
+    assert_ne!(bounded, whole);
+}
+
+/// Two loops bounded by different things are not a walk over pairs.
+#[test]
+fn loops_with_disagreeing_bounds_are_not_a_pairwise_walk() {
+    let form = behavior_of(
+        "fn f(values: &[i32], n: usize, m: usize) -> bool {
+             for i in 0..n {
+                 for j in i + 1..m {
+                     if values[i] == values[j] { return false; }
+                 }
+             }
+             true
+         }",
+        "f",
+    );
+    assert!(!form.contains("(pairwise"), "{form}");
+}
+
+/// Indexing two different sequences is a walk over neither.
+#[test]
+fn indexing_two_sequences_is_not_a_pairwise_walk() {
+    let form = behavior_of(
+        "fn f(left: &[i32], right: &[i32], n: usize) -> bool {
+             for i in 0..n {
+                 for j in i + 1..n {
+                     if left[i] == right[j] { return false; }
+                 }
+             }
+             true
+         }",
+        "f",
+    );
+    assert!(!form.contains("(pairwise"), "{form}");
+}
+
+/// An outer loop that stops one short reaches the same pairs.
+///
+/// `0..n - 1` with `i + 1..n` pairs everything `0..n` would: the last position
+/// has nothing above it. A third of the checks measured in CodeNet are written
+/// this way.
+#[test]
+fn an_outer_loop_that_stops_one_short_is_still_a_pairwise_walk() {
+    let form = behavior_of(
+        "fn f(values: &[i32], n: usize) -> bool {
+             for i in 0..n - 1 {
+                 for j in i + 1..n {
+                     if values[i] == values[j] { return false; }
+                 }
+             }
+             true
+         }",
+        "f",
+    );
+    assert!(form.contains("(pairwise"), "{form}");
+    // The extent is how far the sequence is read, which is the inner bound.
+    let whole = behavior_of(
+        "fn f(values: &[i32], n: usize) -> bool {
+             for i in 0..n {
+                 for j in i + 1..n {
+                     if values[i] == values[j] { return false; }
+                 }
+             }
+             true
+         }",
+        "f",
+    );
+    assert_eq!(form, whole);
+}
+
+/// A lower-triangle inner loop gets no such slack.
+///
+/// `0..n - 1` with `0..i` never pairs the last position with anything, so it is
+/// not a walk over the pairs of `n` elements.
+#[test]
+fn a_short_outer_loop_with_a_lower_triangle_walks_a_shorter_prefix() {
+    let short = behavior_of(
+        "fn f(values: &[i32], n: usize) -> bool {
+             for i in 0..n - 1 {
+                 for j in 0..i {
+                     if values[i] == values[j] { return false; }
+                 }
+             }
+             true
+         }",
+        "f",
+    );
+    let whole = behavior_of(
+        "fn f(values: &[i32], n: usize) -> bool {
+             for i in 0..n {
+                 for j in 0..i {
+                     if values[i] == values[j] { return false; }
+                 }
+             }
+             true
+         }",
+        "f",
+    );
+    assert_ne!(short, whole);
+}
+
+/// A square loop with the diagonal guarded away is a walk over pairs.
+///
+/// It reaches each pair both ways round rather than once, which the form
+/// records, because a decision that does not care gets the same answer and a
+/// count gets double.
+#[test]
+fn a_guarded_square_loop_is_a_pairwise_walk() {
+    for guard in [
+        "if i != j && values[i] == values[j] { return false; }",
+        "if i != j { if values[i] == values[j] { return false; } }",
+        "if i == j { continue; } if values[i] == values[j] { return false; }",
+    ] {
+        let form = behavior_of(
+            &format!(
+                "fn f(values: &[i32], n: usize) -> bool {{
+                     for i in 0..n {{ for j in 0..n {{ {guard} }} }}
+                     true
+                 }}"
+            ),
+            "f",
+        );
+        assert!(form.contains("(pairwise-both-ways"), "{guard}: {form}");
+    }
+}
+
+/// An unguarded square loop pairs elements with themselves and decides nothing.
+#[test]
+fn an_unguarded_square_loop_is_not_a_pairwise_walk() {
+    let form = behavior_of(
+        "fn f(values: &[i32], n: usize) -> bool {
+             for i in 0..n { for j in 0..n { if values[i] == values[j] { return false; } } }
+             true
+         }",
+        "f",
+    );
+    assert!(!form.contains("(pairwise"), "{form}");
+}
+
+/// Visiting each pair twice is not the same form as visiting it once.
+#[test]
+fn the_two_coverages_are_different_forms() {
+    let square = behavior_of(
+        "fn f(values: &[i32], n: usize) -> bool {
+             for i in 0..n { for j in 0..n { if i != j && values[i] == values[j] { return false; } } }
+             true
+         }",
+        "f",
+    );
+    let triangle = behavior_of(
+        "fn f(values: &[i32], n: usize) -> bool {
+             for i in 0..n { for j in i + 1..n { if values[i] == values[j] { return false; } } }
+             true
+         }",
+        "f",
+    );
+    assert_ne!(square, triangle);
+}
+
+/// A square loop guarded on something other than the diagonal is not this.
+#[test]
+fn a_square_loop_guarded_on_something_else_is_not_a_pairwise_walk() {
+    let form = behavior_of(
+        "fn f(values: &[i32], n: usize) -> bool {
+             for i in 0..n { for j in 0..n { if i < j && values[i] == values[j] { return false; } } }
+             true
+         }",
+        "f",
+    );
+    assert!(!form.contains("(pairwise"), "{form}");
+}
+
+/// A loop over an interior range walks that slice, not the whole sequence.
+///
+/// `1..k` reads neither the first element nor anything from `k` on, so the
+/// extent is `v[1..k]` — the same form the frontend gives that slice written
+/// out. A prefix and an interior range are the same case and neither is the
+/// whole sequence.
+#[test]
+fn a_loop_over_an_interior_range_walks_a_slice() {
+    let interior = behavior_of(
+        "fn f(values: &[i32], k: usize) -> bool {
+             for i in 1..k {
+                 for j in i + 1..k {
+                     if values[i] == values[j] { return false; }
+                 }
+             }
+             true
+         }",
+        "f",
+    );
+    assert!(interior.contains("(pairwise (index"), "{interior}");
+    let whole = behavior_of(
+        "fn f(values: &[i32]) -> bool {
+             for i in 0..values.len() {
+                 for j in i + 1..values.len() {
+                     if values[i] == values[j] { return false; }
+                 }
+             }
+             true
+         }",
+        "f",
+    );
+    assert_ne!(interior, whole);
+}
+
+/// A lower-triangle inner loop must start where the outer one did.
+///
+/// `for i in 1..k { for j in 0..i }` reaches pairs involving position 0, which
+/// the outer loop never visits, so the walk is not over the slice `1..k`.
+#[test]
+fn a_lower_triangle_that_reaches_below_the_start_is_refused() {
+    let form = behavior_of(
+        "fn f(values: &[i32], k: usize) -> bool {
+             for i in 1..k {
+                 for j in 0..i {
+                     if values[i] == values[j] { return false; }
+                 }
+             }
+             true
+         }",
+        "f",
+    );
+    assert!(!form.contains("(pairwise"), "{form}");
 }
