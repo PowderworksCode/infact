@@ -54,6 +54,12 @@ jobs:
       - uses: PowderworksCode/cratebank/action@v0.1.1
         with:
           args: --workspace
+          # This job checks out into a subdirectory and sets a
+          # `working-directory` default for it. A composite action's steps do
+          # not inherit that default, so it has to be said again here --
+          # without it the action looks for a `Cargo.toml` at the workspace
+          # root and finds nothing.
+          working-directory: infact
           org-id: powderworks
           strict: "true"
 
