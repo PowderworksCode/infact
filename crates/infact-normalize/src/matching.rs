@@ -444,6 +444,32 @@ impl Bindings {
                         || self.fused_body(subject_body, pattern_body))
             }
             (
+                Form::Pairwise {
+                    sequence: subject_sequence,
+                    left: subject_left,
+                    right: subject_right,
+                    body: subject_body,
+                    coverage: subject_coverage,
+                },
+                Form::Pairwise {
+                    sequence: pattern_sequence,
+                    left: pattern_left,
+                    right: pattern_right,
+                    body: pattern_body,
+                    coverage: pattern_coverage,
+                },
+            ) => {
+                // Seeing each pair once and seeing it both ways round are
+                // different walks, and a pattern that counts would get double
+                // from the wrong one.
+                subject_coverage == pattern_coverage
+                    && self.form(subject_sequence, pattern_sequence)
+                    && self.pattern(subject_left, pattern_left)
+                    && self.pattern(subject_right, pattern_right)
+                    && (self.form(subject_body, pattern_body)
+                        || self.fused_body(subject_body, pattern_body))
+            }
+            (
                 Form::Accumulate {
                     sequence: subject_sequence,
                     initial: subject_initial,

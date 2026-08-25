@@ -1461,6 +1461,44 @@ mod tests {
         }
     }
 
+    fn pairwise(coverage: Coverage) -> Form {
+        Form::Pairwise {
+            sequence: Box::new(Form::Free(0)),
+            left: Box::new(Pattern::Binding(0)),
+            right: Box::new(Pattern::Binding(1)),
+            body: Box::new(Form::Binary {
+                operator: "==".to_owned(),
+                left: Box::new(Form::Local(0)),
+                right: Box::new(Form::Local(1)),
+            }),
+            coverage,
+        }
+    }
+
+    /// A walk over pairs takes part in matching like every other form.
+    ///
+    /// Adding a variant without teaching the unifier about it does not fail to
+    /// compile: the fallthrough answers `false`, so the form silently matches
+    /// nothing and every behavior written over it goes quiet.
+    #[test]
+    fn a_walk_over_pairs_matches_itself() {
+        assert!(pairwise(Coverage::Once).contains(&pairwise(Coverage::Once)));
+        assert!(
+            Form::Sequence(vec![Form::Literal, pairwise(Coverage::Once)])
+                .contains(&pairwise(Coverage::Once))
+        );
+    }
+
+    /// Seeing each pair once is not seeing it both ways round.
+    ///
+    /// The two reach the same pairs and differ in how often, which is behavior
+    /// for anything that counts.
+    #[test]
+    fn the_two_coverages_do_not_match_each_other() {
+        assert!(!pairwise(Coverage::Once).contains(&pairwise(Coverage::BothWays)));
+        assert!(!pairwise(Coverage::BothWays).contains(&pairwise(Coverage::Once)));
+    }
+
     /// Code that does a thing four times has four findings.
     ///
     /// Reporting only the first meant a reader who fixed what they were shown
