@@ -591,6 +591,19 @@ impl<'a> Normalizer<'a> {
             // written inside. Spelling that out here is what lets one law reach
             // both.
             "while_expression" => {
+                // `while let P = e { b }` is `loop { match e { P => b, _ =>
+                // break } }`, which is not an analogy but the desugaring the
+                // language performs. Written out it needs no vocabulary of its
+                // own, and — the point — the name the pattern binds becomes a
+                // binding. Left as a condition it was normalized as an
+                // EXPRESSION, so `x` came out a free variable: a hole matching
+                // anything rather than a name the body uses.
+                if let Some(condition) = node.child_by_field_name("condition")
+                    && condition.kind() == "let_condition"
+                    && let Some(repeated) = self.repeat_from_let(node, condition)
+                {
+                    return repeated;
+                }
                 let condition = node
                     .child_by_field_name("condition")
                     .map_or(Form::Literal, |child| self.expression(child));
@@ -791,6 +804,40 @@ impl<'a> Normalizer<'a> {
                 },
             ],
         ))
+    }
+
+    /// `while let` as the loop around a decision that it is.
+    ///
+    /// Returns `None` when the pattern names no alternative — `while let (a, b)
+    /// = p` destructures rather than deciding, and it would never end.
+    fn repeat_from_let(&mut self, node: Node<'a>, condition: Node<'a>) -> Option<Form> {
+        let scrutinee = self.expression(condition.child_by_field_name("value")?);
+        let bound = self.bind_pattern(condition.child_by_field_name("pattern")?);
+        if !matches!(bound, Pattern::Variant { .. }) {
+            return None;
+        }
+        let taken = node
+            .child_by_field_name("body")
+            .map_or(Form::Literal, |child| self.expression(child));
+        Some(Form::Repeat {
+            condition: Box::new(Form::Constant("true".to_owned())),
+            body: Box::new(Form::select(
+                scrutinee,
+                vec![
+                    Arm {
+                        pattern: bound,
+                        body: taken,
+                    },
+                    Arm {
+                        pattern: Pattern::Ignored,
+                        body: Form::Opaque {
+                            kind: "break_expression".to_owned(),
+                            parts: Vec::new(),
+                        },
+                    },
+                ],
+            )),
+        })
     }
 
     /// A `match`, as a decision among named alternatives.

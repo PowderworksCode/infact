@@ -1136,3 +1136,126 @@ fn nested_counter_loops_agree_with_nested_for_loops() {
     assert_eq!(counted, direct);
     assert!(counted.contains("(pairwise"), "{counted}");
 }
+
+/// Draining a container agrees with walking it.
+#[test]
+fn a_drain_agrees_with_a_for_loop() {
+    let drained = behavior_of(
+        "fn f(queue: &mut VecDeque<i32>) -> i32 {
+             let mut total = 0;
+             while let Some(x) = queue.pop_front() { total += x; }
+             total
+         }",
+        "f",
+    );
+    let direct = behavior_of(
+        "fn f(queue: VecDeque<i32>) -> i32 {
+             let mut total = 0;
+             for x in queue { total += x; }
+             total
+         }",
+        "f",
+    );
+    assert_eq!(drained, direct);
+}
+
+/// Pulling from an iterator by hand agrees with walking it.
+#[test]
+fn a_hand_written_next_loop_agrees_with_a_for_loop() {
+    let pulled = behavior_of(
+        "fn f(items: &mut Iter<i32>) -> i32 {
+             let mut total = 0;
+             while let Some(x) = items.next() { total += x; }
+             total
+         }",
+        "f",
+    );
+    let direct = behavior_of(
+        "fn f(items: Iter<i32>) -> i32 {
+             let mut total = 0;
+             for x in items { total += x; }
+             total
+         }",
+        "f",
+    );
+    assert_eq!(pulled, direct);
+}
+
+/// Taking from the back is not taking from the front.
+#[test]
+fn draining_from_each_end_gives_different_walks() {
+    let front = behavior_of(
+        "fn f(q: &mut VecDeque<i32>) -> i32 {
+             let mut t = 0; while let Some(x) = q.pop_front() { t += x; } t
+         }",
+        "f",
+    );
+    let back = behavior_of(
+        "fn f(q: &mut VecDeque<i32>) -> i32 {
+             let mut t = 0; while let Some(x) = q.pop_back() { t += x; } t
+         }",
+        "f",
+    );
+    assert_ne!(front, back);
+    assert!(back.contains("traverse-back"), "{back}");
+}
+
+/// A worklist is not a drain.
+///
+/// Putting something back makes the loop visit elements the container did not
+/// start with, and it is the commoner shape by two to one.
+#[test]
+fn a_worklist_is_not_a_drain() {
+    let form = behavior_of(
+        "fn f(q: &mut VecDeque<i32>) -> i32 {
+             let mut t = 0;
+             while let Some(x) = q.pop_front() { t += x; if x > 0 { q.push_back(x - 1); } }
+             t
+         }",
+        "f",
+    );
+    assert!(form.contains("(repeat"), "{form}");
+}
+
+/// A bare `pop` settles no order, so it is not read as a walk.
+///
+/// It is the last element of a `Vec` and the greatest of a `BinaryHeap`, and
+/// nothing in the form says which. Measured across the corpus, 434 of the 931
+/// files that drain with `pop` also use a `BinaryHeap`.
+#[test]
+fn a_bare_pop_is_not_a_drain() {
+    let form = behavior_of(
+        "fn f(v: &mut Vec<i32>) -> i32 {
+             let mut t = 0; while let Some(x) = v.pop() { t += x; } t
+         }",
+        "f",
+    );
+    assert!(form.contains("(repeat"), "{form}");
+}
+
+/// Measuring the container mid-drain observes a state a walk never has.
+#[test]
+fn a_body_that_measures_the_container_is_not_a_drain() {
+    let form = behavior_of(
+        "fn f(q: &mut VecDeque<i32>) -> usize {
+             let mut t = 0; while let Some(_x) = q.pop_front() { t += q.len(); } t
+         }",
+        "f",
+    );
+    assert!(form.contains("(repeat"), "{form}");
+}
+
+/// A `while let` binds a name, and the body uses that name.
+///
+/// Held as a condition it was normalized as an expression, so the name came out
+/// a hole that matched anything rather than the binding the body reads.
+#[test]
+fn a_while_let_binds_rather_than_leaving_a_hole() {
+    let form = behavior_of(
+        "fn f(v: &mut Vec<i32>) -> i32 {
+             let mut t = 0; while let Some(x) = v.pop() { t += x; } t
+         }",
+        "f",
+    );
+    assert!(form.contains("(Some v"), "{form}");
+}

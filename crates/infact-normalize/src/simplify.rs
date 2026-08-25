@@ -180,6 +180,7 @@ impl Form {
             .or_else(|| rebuilt.as_counted_traversal())
             .or_else(|| rebuilt.as_reversed_traversal())
             .or_else(|| rebuilt.as_single_step())
+            .or_else(|| rebuilt.as_drain())
             .or_else(|| rebuilt.as_guarded_repeat())
             .or_else(|| rebuilt.as_recovered_escape())
             .or_else(|| rebuilt.as_unfolded(fuel))
@@ -682,6 +683,67 @@ impl Form {
             return Some(Self::Sequence(rest));
         }
         None
+    }
+
+    /// Taking from a container until it is empty is walking it.
+    ///
+    /// `while let Some(x) = queue.pop_front() { .. }` reaches every element
+    /// exactly once and leaves the container empty, which is what `for x in
+    /// queue` does. The two shared nothing.
+    ///
+    /// Only methods whose order the name settles are taken. `pop_front` and
+    /// `pop_back` say which end on any container that has them; a bare `pop`
+    /// does not — it is the last element of a `Vec` and the GREATEST element of
+    /// a `BinaryHeap`, and the form carries no types to tell them apart. In the
+    /// corpus that is not a corner: of 931 files with a `while let Some(..) =
+    /// x.pop()`, 434 also use `BinaryHeap`. Calling a heap's drain a backward
+    /// walk would be reporting the opposite order, which is the one thing
+    /// `Direction` exists to prevent.
+    ///
+    /// A body that puts something back is not draining. That is the commoner
+    /// shape by two to one — a worklist, breadth-first search, a queue that
+    /// feeds itself — and the elements it visits are not the ones the container
+    /// started with.
+    fn as_drain(&self) -> Option<Self> {
+        let Self::Repeat { condition, body } = self else {
+            return None;
+        };
+        if **condition != Self::Constant("true".to_owned()) {
+            return None;
+        }
+        let Self::Select { scrutinee, arms } = body.as_ref() else {
+            return None;
+        };
+        let [taken, exhausted] = arms.as_slice() else {
+            return None;
+        };
+        // The other arm must do nothing but leave. Anything else happens when
+        // the container runs out, and a walk over the elements has nowhere to
+        // put it.
+        if !matches!(exhausted.pattern, Pattern::Ignored)
+            || !matches!(&exhausted.body, Self::Opaque { kind, .. } if kind == "break_expression")
+        {
+            return None;
+        }
+        let Pattern::Variant { name, parts } = &taken.pattern else {
+            return None;
+        };
+        let [item] = parts.as_slice() else {
+            return None;
+        };
+        if name != "Some" {
+            return None;
+        }
+        let (direction, container) = taking_method(scrutinee)?;
+        if disturbs_container(&taken.body, container) {
+            return None;
+        }
+        Some(Self::Traverse {
+            sequence: Box::new(container.clone()),
+            item: Box::new(item.clone()),
+            body: Box::new(taken.body.clone()),
+            direction,
+        })
     }
 
     /// A repetition that tests for its own end is a repetition with a guard.
@@ -1507,6 +1569,52 @@ fn collect_names(form: &Form, found: &mut Vec<Form>) {
     for child in form.children() {
         collect_names(child, found);
     }
+}
+
+/// The container a call takes an element from, and which end it takes from.
+///
+/// `next` is here because an iterator's is the whole of its contract and yields
+/// in order; `pop` is not, because the name settles no order.
+fn taking_method(scrutinee: &Form) -> Option<(Direction, &Form)> {
+    let Form::Method {
+        name,
+        receiver,
+        arguments,
+    } = scrutinee
+    else {
+        return None;
+    };
+    if !arguments.is_empty() {
+        return None;
+    }
+    let direction = match name.as_str() {
+        "pop_front" | "next" => Direction::Forward,
+        "pop_back" | "next_back" => Direction::Backward,
+        _ => return None,
+    };
+    Some((direction, receiver.as_ref()))
+}
+
+/// Whether a body reaches the container it is being handed elements from.
+///
+/// Putting something back makes the walk cover elements the container did not
+/// start with; measuring it mid-drain observes a state a walk over the elements
+/// never has. Both are asked as one question, because the form carries no
+/// effects and a method on the container could be either.
+fn disturbs_container(body: &Form, container: &Form) -> bool {
+    let touched = match body {
+        Form::Assign { target, .. } => mentions(target, container),
+        Form::Method { receiver, .. } => receiver.as_ref() == container,
+        Form::Swap { sequence, .. } | Form::Index { sequence, .. } => {
+            sequence.as_ref() == container
+        }
+        _ => false,
+    };
+    touched
+        || body
+            .children()
+            .into_iter()
+            .any(|child| disturbs_container(child, container))
 }
 
 /// Whether a body does anything to a name beyond reading it.
