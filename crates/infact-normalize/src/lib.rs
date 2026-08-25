@@ -233,6 +233,32 @@ pub enum Form {
         /// lets a reader of the form tell which they have.
         coverage: Coverage,
     },
+    /// Repeating a body for as long as a condition holds.
+    ///
+    /// A `while` and a `loop` are one construct: the second is the first with
+    /// the condition written inside as a `break`. Held as syntax they were two,
+    /// and neither described work, so a library function that loops this way
+    /// yielded no behavior at all.
+    ///
+    /// Distinct from [`Form::Traverse`], which walks something. A repetition
+    /// has no sequence — what it visits, if anything, is whatever its body
+    /// advances. Where that is a counted index, simplification turns the whole
+    /// thing into the traversal it is written to be.
+    Repeat {
+        condition: Box<Form>,
+        body: Box<Form>,
+    },
+    /// Exchanging two of a sequence's elements.
+    ///
+    /// `v.swap(i, j)` and the three-line dance through a temporary are the same
+    /// operation, and held apart they share no subterm. This is the operation
+    /// every naive sort is built from, so a form that cannot say it cannot say
+    /// anything about one.
+    Swap {
+        sequence: Box<Form>,
+        left: Box<Form>,
+        right: Box<Form>,
+    },
     /// Producing a new sequence by transforming each element.
     Transform {
         sequence: Box<Form>,
@@ -480,6 +506,12 @@ impl Form {
             } => vec![sequence.as_ref(), initial.as_ref(), body.as_ref()],
             Self::Collect { sequence, .. } => vec![sequence.as_ref()],
             Self::Assign { target, value, .. } => vec![target.as_ref(), value.as_ref()],
+            Self::Repeat { condition, body } => vec![condition.as_ref(), body.as_ref()],
+            Self::Swap {
+                sequence,
+                left,
+                right,
+            } => vec![sequence.as_ref(), left.as_ref(), right.as_ref()],
             Self::Binary { left, right, .. } => vec![left.as_ref(), right.as_ref()],
             Self::Unary { value, .. } => vec![value.as_ref()],
             Self::Index { sequence, position } => vec![sequence.as_ref(), position.as_ref()],
@@ -667,6 +699,19 @@ impl Form {
                 left: apply(left),
                 right: apply(right),
             },
+            Self::Repeat { condition, body } => Self::Repeat {
+                condition: apply(condition),
+                body: apply(body),
+            },
+            Self::Swap {
+                sequence,
+                left,
+                right,
+            } => Self::Swap {
+                sequence: apply(sequence),
+                left: apply(left),
+                right: apply(right),
+            },
             Self::Unary { operator, value } => Self::Unary {
                 operator: operator.clone(),
                 value: apply(value),
@@ -740,7 +785,7 @@ impl Form {
             // Indexing names an operation the way a method call does. A span
             // names only a shape, so like a traversal it anchors nothing of its
             // own and is counted through its endpoints.
-            Self::Index { .. } => 1,
+            Self::Index { .. } | Self::Swap { .. } => 1,
             Self::Collect { container, .. } => u32::from(container.is_some()),
             // what the arms name is the whole content of a decision
             Self::Select { arms, .. } => arms.iter().map(|arm| arm.pattern.anchors()).sum(),
@@ -1032,6 +1077,8 @@ impl Form {
             | Self::Retain { .. }
             | Self::Accumulate { .. }
             | Self::Pairwise { .. }
+            | Self::Repeat { .. }
+            | Self::Swap { .. }
             | Self::Collect { .. } => true,
             _ => self.children().into_iter().any(Self::describes_work),
         }
@@ -1402,6 +1449,12 @@ impl Display for Form {
                 right,
             } => write!(formatter, "(binary {operator} {left} {right})"),
             Self::Unary { operator, value } => write!(formatter, "(unary {operator} {value})"),
+            Self::Repeat { condition, body } => write!(formatter, "(repeat {condition} {body})"),
+            Self::Swap {
+                sequence,
+                left,
+                right,
+            } => write!(formatter, "(swap {sequence} {left} {right})"),
             Self::Index { sequence, position } => {
                 write!(formatter, "(index {sequence} {position})")
             }

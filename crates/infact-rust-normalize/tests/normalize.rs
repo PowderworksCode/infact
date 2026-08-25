@@ -822,3 +822,440 @@ fn adjacent_pairs_differ_from_every_pair() {
     );
     assert_ne!(adjacent, every);
 }
+
+/// An exchange written through a temporary is the exchange.
+///
+/// This is the difference the two spellings of a bubble sort came down to, and
+/// with it they reduce to one form.
+#[test]
+fn a_temporary_swap_agrees_with_the_method() {
+    let method = behavior_of(
+        "fn f(values: &mut [i32]) {
+             for i in 0..values.len() {
+                 for j in 0..values.len() - 1 - i {
+                     if values[j] > values[j + 1] { values.swap(j, j + 1); }
+                 }
+             }
+         }",
+        "f",
+    );
+    let temporary = behavior_of(
+        "fn f(values: &mut [i32]) {
+             for i in 0..values.len() {
+                 for j in 0..values.len() - 1 - i {
+                     if values[j] > values[j + 1] {
+                         let t = values[j];
+                         values[j] = values[j + 1];
+                         values[j + 1] = t;
+                     }
+                 }
+             }
+         }",
+        "f",
+    );
+    assert!(method.contains("(swap"), "{method}");
+    assert_eq!(method, temporary);
+}
+
+/// Moving values around is not exchanging two of them.
+#[test]
+fn a_shift_through_a_temporary_is_not_a_swap() {
+    let form = behavior_of(
+        "fn f(values: &mut [i32], i: usize, j: usize, k: usize) {
+             let t = values[i];
+             values[i] = values[j];
+             values[k] = t;
+         }",
+        "f",
+    );
+    assert!(!form.contains("(swap"), "{form}");
+}
+
+/// A temporary that is used again is not spent on the exchange.
+#[test]
+fn a_temporary_read_afterwards_is_not_a_swap() {
+    let form = behavior_of(
+        "fn f(values: &mut [i32], i: usize, j: usize) -> i32 {
+             let t = values[i];
+             values[i] = values[j];
+             values[j] = t;
+             t
+         }",
+        "f",
+    );
+    assert!(!form.contains("(swap"), "{form}");
+}
+
+/// A `loop` that tests for its own end is a `while`.
+#[test]
+fn a_loop_that_breaks_agrees_with_a_while() {
+    let broken = behavior_of(
+        "fn f(n: usize) -> usize {
+             let mut i = 0;
+             loop { if i >= n { break; } i += 1; }
+             i
+         }",
+        "f",
+    );
+    let guarded = behavior_of(
+        "fn f(n: usize) -> usize {
+             let mut i = 0;
+             while !(i >= n) { i += 1; }
+             i
+         }",
+        "f",
+    );
+    assert!(broken.contains("(repeat"), "{broken}");
+    assert_eq!(broken, guarded);
+}
+
+/// A loop with another way out is not just its first test.
+#[test]
+fn a_loop_with_a_second_break_keeps_its_shape() {
+    let form = behavior_of(
+        "fn f(n: usize, m: usize) -> usize {
+             let mut i = 0;
+             loop { if i >= n { break; } if i == m { break; } i += 1; }
+             i
+         }",
+        "f",
+    );
+    assert!(form.contains("(const true)"), "{form}");
+}
+
+/// A repetition describes work, so a library that loops has a behavior.
+#[test]
+fn a_repetition_is_comparable() {
+    let form = behavior_of(
+        "fn f(values: &mut Vec<i32>) -> i32 {
+             let mut total = 0;
+             while let Some(value) = values.pop() { total += value; }
+             total
+         }",
+        "f",
+    );
+    assert!(form.contains("(repeat"), "{form}");
+}
+
+/// A counter loop is the traversal it is written to be.
+///
+/// Two laws compose to get here: the counter loop becomes a walk over a span,
+/// and a span walk that only ever indexes becomes a walk over the elements.
+#[test]
+fn a_counter_loop_agrees_with_a_for_loop() {
+    let counted = behavior_of(
+        "fn f(values: &[i32]) -> i32 {
+             let mut total = 0;
+             let mut i = 0;
+             while i < values.len() { total += values[i]; i += 1; }
+             total
+         }",
+        "f",
+    );
+    let direct = behavior_of(
+        "fn f(values: &[i32]) -> i32 {
+             let mut total = 0;
+             for i in 0..values.len() { total += values[i]; }
+             total
+         }",
+        "f",
+    );
+    assert_eq!(counted, direct);
+    assert!(!counted.contains("(repeat"), "{counted}");
+}
+
+/// A `loop` with a leading `break` reaches the same place.
+///
+/// Four laws in a row: the break becomes a guard, the guard's negation is read
+/// as the counting test, the counter loop becomes a span walk, and the span
+/// walk becomes an element walk.
+#[test]
+fn a_loop_with_a_break_agrees_with_a_for_loop() {
+    let broken = behavior_of(
+        "fn f(values: &[i32]) -> i32 {
+             let mut total = 0;
+             let mut i = 0;
+             loop { if i >= values.len() { break; } total += values[i]; i += 1; }
+             total
+         }",
+        "f",
+    );
+    let direct = behavior_of(
+        "fn f(values: &[i32]) -> i32 {
+             let mut total = 0;
+             for i in 0..values.len() { total += values[i]; }
+             total
+         }",
+        "f",
+    );
+    assert_eq!(broken, direct);
+}
+
+/// Counting down agrees with walking a reversed range.
+#[test]
+fn a_descending_counter_agrees_with_a_reversed_range() {
+    let counted = behavior_of(
+        "fn f(values: &[i32]) -> i32 {
+             let mut total = 0;
+             let mut i = values.len();
+             while i > 0 { i -= 1; total += values[i]; }
+             total
+         }",
+        "f",
+    );
+    let reversed = behavior_of(
+        "fn f(values: &[i32]) -> i32 {
+             let mut total = 0;
+             for i in (0..values.len()).rev() { total += values[i]; }
+             total
+         }",
+        "f",
+    );
+    assert_eq!(counted, reversed);
+    assert!(counted.contains("traverse-back"), "{counted}");
+}
+
+/// Walking backwards is not the same as walking forwards.
+#[test]
+fn a_reversed_walk_differs_from_a_forward_one() {
+    let forward = behavior_of("fn f(v: &[i32]) { for x in v.iter() { g(x); } }", "f");
+    let backward = behavior_of("fn f(v: &[i32]) { for x in v.iter().rev() { g(x); } }", "f");
+    assert_ne!(forward, backward);
+}
+
+/// Where the step sits decides which positions the loop visits.
+///
+/// Counting down with the decrement LAST visits `n` through `1`, not `n - 1`
+/// through `0`, so it is a different span and is refused rather than given the
+/// span its sibling has.
+#[test]
+fn a_descending_loop_that_steps_last_is_refused() {
+    let form = behavior_of(
+        "fn f(values: &[i32]) -> i32 {
+             let mut total = 0;
+             let mut i = values.len();
+             while i > 0 { total += values[i - 1]; i -= 1; }
+             total
+         }",
+        "f",
+    );
+    assert!(form.contains("(repeat"), "{form}");
+}
+
+/// A loop whose body can move the limit is not a walk over a fixed span.
+#[test]
+fn a_loop_that_changes_its_limit_is_refused() {
+    let form = behavior_of(
+        "fn f(values: &mut Vec<i32>) -> usize {
+             let mut i = 0;
+             while i < values.len() { values.push(1); i += 1; }
+             i
+         }",
+        "f",
+    );
+    assert!(form.contains("(repeat"), "{form}");
+}
+
+/// A counter something reads afterwards is not one a traversal may consume.
+#[test]
+fn a_counter_read_after_the_loop_is_refused() {
+    let form = behavior_of(
+        "fn f(values: &[i32]) -> usize {
+             let mut total = 0;
+             let mut i = 0;
+             while i < values.len() { total += values[i]; i += 1; }
+             i
+         }",
+        "f",
+    );
+    assert!(form.contains("(repeat"), "{form}");
+}
+
+/// A step that might not happen is not a span.
+#[test]
+fn a_conditional_step_is_refused() {
+    let form = behavior_of(
+        "fn f(values: &[i32]) -> i32 {
+             let mut total = 0;
+             let mut i = 0;
+             while i < values.len() { if values[i] > 0 { i += 1; } total += 1; }
+             total
+         }",
+        "f",
+    );
+    assert!(form.contains("(repeat"), "{form}");
+}
+
+/// A stride is not a span.
+#[test]
+fn a_stride_is_refused() {
+    let form = behavior_of(
+        "fn f(n: usize) -> usize {
+             let mut i = 0;
+             let mut total = 0;
+             while i < n { total += i; i += 2; }
+             total
+         }",
+        "f",
+    );
+    assert!(form.contains("(repeat"), "{form}");
+}
+
+/// Nested counter loops reach the same walk over pairs as nested `for` loops.
+///
+/// The inner loop's own bound is `values.len()` as well, so this only holds
+/// because working the limit out again counts as reading it.
+#[test]
+fn nested_counter_loops_agree_with_nested_for_loops() {
+    let counted = behavior_of(
+        "fn f(values: &[i32]) -> bool {
+             let mut i = 0;
+             while i < values.len() {
+                 let mut j = i + 1;
+                 while j < values.len() {
+                     if values[i] == values[j] { return false; }
+                     j += 1;
+                 }
+                 i += 1;
+             }
+             true
+         }",
+        "f",
+    );
+    let direct = behavior_of(
+        "fn f(values: &[i32]) -> bool {
+             for i in 0..values.len() {
+                 for j in i + 1..values.len() {
+                     if values[i] == values[j] { return false; }
+                 }
+             }
+             true
+         }",
+        "f",
+    );
+    assert_eq!(counted, direct);
+    assert!(counted.contains("(pairwise"), "{counted}");
+}
+
+/// Draining a container agrees with walking it.
+#[test]
+fn a_drain_agrees_with_a_for_loop() {
+    let drained = behavior_of(
+        "fn f(queue: &mut VecDeque<i32>) -> i32 {
+             let mut total = 0;
+             while let Some(x) = queue.pop_front() { total += x; }
+             total
+         }",
+        "f",
+    );
+    let direct = behavior_of(
+        "fn f(queue: VecDeque<i32>) -> i32 {
+             let mut total = 0;
+             for x in queue { total += x; }
+             total
+         }",
+        "f",
+    );
+    assert_eq!(drained, direct);
+}
+
+/// Pulling from an iterator by hand agrees with walking it.
+#[test]
+fn a_hand_written_next_loop_agrees_with_a_for_loop() {
+    let pulled = behavior_of(
+        "fn f(items: &mut Iter<i32>) -> i32 {
+             let mut total = 0;
+             while let Some(x) = items.next() { total += x; }
+             total
+         }",
+        "f",
+    );
+    let direct = behavior_of(
+        "fn f(items: Iter<i32>) -> i32 {
+             let mut total = 0;
+             for x in items { total += x; }
+             total
+         }",
+        "f",
+    );
+    assert_eq!(pulled, direct);
+}
+
+/// Taking from the back is not taking from the front.
+#[test]
+fn draining_from_each_end_gives_different_walks() {
+    let front = behavior_of(
+        "fn f(q: &mut VecDeque<i32>) -> i32 {
+             let mut t = 0; while let Some(x) = q.pop_front() { t += x; } t
+         }",
+        "f",
+    );
+    let back = behavior_of(
+        "fn f(q: &mut VecDeque<i32>) -> i32 {
+             let mut t = 0; while let Some(x) = q.pop_back() { t += x; } t
+         }",
+        "f",
+    );
+    assert_ne!(front, back);
+    assert!(back.contains("traverse-back"), "{back}");
+}
+
+/// A worklist is not a drain.
+///
+/// Putting something back makes the loop visit elements the container did not
+/// start with, and it is the commoner shape by two to one.
+#[test]
+fn a_worklist_is_not_a_drain() {
+    let form = behavior_of(
+        "fn f(q: &mut VecDeque<i32>) -> i32 {
+             let mut t = 0;
+             while let Some(x) = q.pop_front() { t += x; if x > 0 { q.push_back(x - 1); } }
+             t
+         }",
+        "f",
+    );
+    assert!(form.contains("(repeat"), "{form}");
+}
+
+/// A bare `pop` settles no order, so it is not read as a walk.
+///
+/// It is the last element of a `Vec` and the greatest of a `BinaryHeap`, and
+/// nothing in the form says which. Measured across the corpus, 434 of the 931
+/// files that drain with `pop` also use a `BinaryHeap`.
+#[test]
+fn a_bare_pop_is_not_a_drain() {
+    let form = behavior_of(
+        "fn f(v: &mut Vec<i32>) -> i32 {
+             let mut t = 0; while let Some(x) = v.pop() { t += x; } t
+         }",
+        "f",
+    );
+    assert!(form.contains("(repeat"), "{form}");
+}
+
+/// Measuring the container mid-drain observes a state a walk never has.
+#[test]
+fn a_body_that_measures_the_container_is_not_a_drain() {
+    let form = behavior_of(
+        "fn f(q: &mut VecDeque<i32>) -> usize {
+             let mut t = 0; while let Some(_x) = q.pop_front() { t += q.len(); } t
+         }",
+        "f",
+    );
+    assert!(form.contains("(repeat"), "{form}");
+}
+
+/// A `while let` binds a name, and the body uses that name.
+///
+/// Held as a condition it was normalized as an expression, so the name came out
+/// a hole that matched anything rather than the binding the body reads.
+#[test]
+fn a_while_let_binds_rather_than_leaving_a_hole() {
+    let form = behavior_of(
+        "fn f(v: &mut Vec<i32>) -> i32 {
+             let mut t = 0; while let Some(x) = v.pop() { t += x; } t
+         }",
+        "f",
+    );
+    assert!(form.contains("(Some v"), "{form}");
+}

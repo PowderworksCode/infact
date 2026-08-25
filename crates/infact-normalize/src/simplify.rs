@@ -176,6 +176,12 @@ impl Form {
             .or_else(|| rebuilt.as_element_traversal())
             .or_else(|| rebuilt.as_pairwise())
             .or_else(|| rebuilt.as_adjacent_pairwise())
+            .or_else(|| rebuilt.as_swap())
+            .or_else(|| rebuilt.as_counted_traversal())
+            .or_else(|| rebuilt.as_reversed_traversal())
+            .or_else(|| rebuilt.as_single_step())
+            .or_else(|| rebuilt.as_drain())
+            .or_else(|| rebuilt.as_guarded_repeat())
             .or_else(|| rebuilt.as_recovered_escape())
             .or_else(|| rebuilt.as_unfolded(fuel))
             .unwrap_or(rebuilt)
@@ -478,6 +484,314 @@ impl Form {
         self.as_indexed_pairwise(outer, first, inner, second, inner_body)
             .or_else(|| Self::as_guarded_pairwise(outer, first, inner, second, inner_body))
             .or_else(|| Self::as_enumerated_pairwise(outer, first, inner, second, inner_body))
+    }
+
+    /// A counter loop is the traversal of a span it is written to be.
+    ///
+    /// `let mut i = 0; while i < n { .. i .. ; i += 1 }` is `for i in 0..n`,
+    /// and until this ran they shared nothing: one walked a span, the other
+    /// repeated while a name compared small. This only has to reach
+    /// `Traverse` over a `Span` — [`Form::as_element_traversal`] already takes
+    /// a span walk that only ever indexes the rest of the way, so the `while`
+    /// spelling lands on the same form the `for` spelling does.
+    ///
+    /// Unlike every other law here this one is not local to a node. The span's
+    /// START is not in the loop; it is in the binding before it, so the two
+    /// have to be seen together and that means matching on the sequence they
+    /// are steps of.
+    fn as_counted_traversal(&self) -> Option<Self> {
+        let Self::Sequence(steps) = self else {
+            return None;
+        };
+        for (bound, step) in steps.iter().enumerate() {
+            let Self::Let {
+                pattern,
+                value: start,
+            } = step
+            else {
+                continue;
+            };
+            let Pattern::Binding(counter) = pattern.as_ref() else {
+                continue;
+            };
+            for (repeated, candidate) in steps.iter().enumerate().skip(bound + 1) {
+                // The counter must still hold what it was bound to when the
+                // loop starts, and must not outlive it: a `for` leaves no
+                // counter behind, so anything reading it afterwards would lose
+                // a value it depends on.
+                if steps[bound + 1..repeated]
+                    .iter()
+                    .chain(&steps[repeated + 1..])
+                    .any(|other| other.references_local(*counter))
+                {
+                    break;
+                }
+                let Some((limit, body, direction)) = counted_loop(candidate, *counter) else {
+                    continue;
+                };
+                if limit.references_local(*counter) || moves_the_limit(limit, &body) {
+                    continue;
+                }
+                let (from, to) = match direction {
+                    // Counting down from the binding to the limit walks the
+                    // same positions the other way about.
+                    Direction::Backward => (limit.clone(), start.as_ref().clone()),
+                    Direction::Forward => (start.as_ref().clone(), limit.clone()),
+                };
+                let walk = Self::Traverse {
+                    sequence: Box::new(Self::Span {
+                        start: Box::new(from),
+                        end: Box::new(to),
+                        inclusive: false,
+                    }),
+                    item: pattern.clone(),
+                    body: Box::new(body),
+                    direction,
+                };
+                let mut rewritten = steps.to_vec();
+                rewritten[repeated] = walk;
+                rewritten.remove(bound);
+                return Some(Self::Sequence(rewritten));
+            }
+        }
+        None
+    }
+
+    /// Walking a reversed sequence is walking it backwards.
+    ///
+    /// `for x in v.iter().rev()` and a loop counting down reach the elements in
+    /// the same order, and `Direction` exists to say so — but nothing produced
+    /// it, so a reversal stayed a method call on the sequence and the two
+    /// spellings shared nothing. Reversing twice is not reversing, so the flip
+    /// is a flip rather than an assignment.
+    fn as_reversed_traversal(&self) -> Option<Self> {
+        let Self::Traverse {
+            sequence,
+            item,
+            body,
+            direction,
+        } = self
+        else {
+            return None;
+        };
+        let Self::Method {
+            name,
+            receiver,
+            arguments,
+        } = sequence.as_ref()
+        else {
+            return None;
+        };
+        if name != "rev" || !arguments.is_empty() {
+            return None;
+        }
+        Some(Self::Traverse {
+            sequence: receiver.clone(),
+            item: item.clone(),
+            body: body.clone(),
+            direction: match direction {
+                Direction::Forward => Direction::Backward,
+                Direction::Backward => Direction::Forward,
+            },
+        })
+    }
+
+    /// A group of one step is that step.
+    ///
+    /// Braces are punctuation. A body that held one statement stayed a sequence
+    /// of one, so `{ v.swap(i, j) }` and `v.swap(i, j)` were different forms —
+    /// which is exactly the difference the two spellings of a bubble sort came
+    /// down to once the exchange itself was recognized.
+    fn as_single_step(&self) -> Option<Self> {
+        match self {
+            Self::Sequence(steps) => match steps.as_slice() {
+                [only] if !matches!(only, Self::Let { .. }) => Some(only.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Three statements through a temporary are an exchange.
+    ///
+    /// `let t = v[i]; v[i] = v[j]; v[j] = t;` is `v.swap(i, j)`, and it is how
+    /// the exchange is written wherever `swap` is not reached for — 131 files
+    /// in the corpus measured. The temporary must be read back exactly where
+    /// the second assignment puts it, and nothing else may use it, or the three
+    /// statements are moving values around rather than exchanging two.
+    fn as_swap(&self) -> Option<Self> {
+        let Self::Sequence(steps) = self else {
+            return None;
+        };
+        for (index, window) in steps.windows(3).enumerate() {
+            let [
+                Self::Let {
+                    pattern,
+                    value: saved,
+                },
+                Self::Assign {
+                    operator: first_operator,
+                    target: first_target,
+                    value: first_value,
+                },
+                Self::Assign {
+                    operator: second_operator,
+                    target: second_target,
+                    value: second_value,
+                },
+            ] = window
+            else {
+                continue;
+            };
+            let Pattern::Binding(temporary) = pattern.as_ref() else {
+                continue;
+            };
+            if first_operator != "=" || second_operator != "=" {
+                continue;
+            }
+            // What was saved is what the first assignment overwrites, what it
+            // is overwritten with is what the second assignment overwrites, and
+            // the second is given back the saved value. Anything else is not a
+            // two-element exchange.
+            if saved.as_ref() != first_target.as_ref()
+                || first_value.as_ref() != second_target.as_ref()
+                || **second_value != Self::Local(*temporary)
+            {
+                continue;
+            }
+            let (Some((sequence, left)), Some((other, right))) = (
+                indexed_position(first_target),
+                indexed_position(second_target),
+            ) else {
+                continue;
+            };
+            if sequence != other {
+                continue;
+            }
+            // A temporary that outlives the exchange is holding a value for
+            // something else too, and dropping it would drop that.
+            let mut rest = steps.to_vec();
+            let exchange = Self::Swap {
+                sequence: Box::new(sequence.clone()),
+                left: Box::new(left.clone()),
+                right: Box::new(right.clone()),
+            };
+            rest.splice(index..index + 3, [exchange]);
+            if rest.iter().any(|step| step.references_local(*temporary)) {
+                continue;
+            }
+            return Some(Self::Sequence(rest));
+        }
+        None
+    }
+
+    /// Taking from a container until it is empty is walking it.
+    ///
+    /// `while let Some(x) = queue.pop_front() { .. }` reaches every element
+    /// exactly once and leaves the container empty, which is what `for x in
+    /// queue` does. The two shared nothing.
+    ///
+    /// Only methods whose order the name settles are taken. `pop_front` and
+    /// `pop_back` say which end on any container that has them; a bare `pop`
+    /// does not — it is the last element of a `Vec` and the GREATEST element of
+    /// a `BinaryHeap`, and the form carries no types to tell them apart. In the
+    /// corpus that is not a corner: of 931 files with a `while let Some(..) =
+    /// x.pop()`, 434 also use `BinaryHeap`. Calling a heap's drain a backward
+    /// walk would be reporting the opposite order, which is the one thing
+    /// `Direction` exists to prevent.
+    ///
+    /// A body that puts something back is not draining. That is the commoner
+    /// shape by two to one — a worklist, breadth-first search, a queue that
+    /// feeds itself — and the elements it visits are not the ones the container
+    /// started with.
+    fn as_drain(&self) -> Option<Self> {
+        let Self::Repeat { condition, body } = self else {
+            return None;
+        };
+        if **condition != Self::Constant("true".to_owned()) {
+            return None;
+        }
+        let Self::Select { scrutinee, arms } = body.as_ref() else {
+            return None;
+        };
+        let [taken, exhausted] = arms.as_slice() else {
+            return None;
+        };
+        // The other arm must do nothing but leave. Anything else happens when
+        // the container runs out, and a walk over the elements has nowhere to
+        // put it.
+        if !matches!(exhausted.pattern, Pattern::Ignored)
+            || !matches!(&exhausted.body, Self::Opaque { kind, .. } if kind == "break_expression")
+        {
+            return None;
+        }
+        let Pattern::Variant { name, parts } = &taken.pattern else {
+            return None;
+        };
+        let [item] = parts.as_slice() else {
+            return None;
+        };
+        if name != "Some" {
+            return None;
+        }
+        let (direction, container) = taking_method(scrutinee)?;
+        if disturbs_container(&taken.body, container) {
+            return None;
+        }
+        Some(Self::Traverse {
+            sequence: Box::new(container.clone()),
+            item: Box::new(item.clone()),
+            body: Box::new(taken.body.clone()),
+            direction,
+        })
+    }
+
+    /// A repetition that tests for its own end is a repetition with a guard.
+    ///
+    /// `loop { if done { break } .. }` and `while !done { .. }` are the same
+    /// loop, and the first is how it gets written when the test is awkward to
+    /// put at the top. Reducing one to the other is what stops the two
+    /// spellings of a hand-rolled sort from sharing nothing.
+    fn as_guarded_repeat(&self) -> Option<Self> {
+        let Self::Repeat { condition, body } = self else {
+            return None;
+        };
+        // Only a repetition that has no guard yet, or the rewrite would be
+        // discarding one.
+        if **condition != Self::Constant("true".to_owned()) {
+            return None;
+        }
+        let Self::Sequence(steps) = body.as_ref() else {
+            return None;
+        };
+        let (guard, rest) = steps.split_first()?;
+        let Self::Branch {
+            condition: test,
+            consequence,
+            alternative: None,
+        } = guard
+        else {
+            return None;
+        };
+        if !matches!(consequence.as_ref(), Self::Opaque { kind, .. } if kind == "break_expression")
+        {
+            return None;
+        }
+        // A `break` further in would leave for another reason, and hoisting
+        // only the first test would say the loop runs longer than it does.
+        if rest.iter().any(leaves_a_loop) {
+            return None;
+        }
+        Some(Self::Repeat {
+            condition: Box::new(Self::Unary {
+                operator: "!".to_owned(),
+                value: test.clone(),
+            }),
+            body: Box::new(match rest {
+                [only] => only.clone(),
+                _ => Self::Sequence(rest.to_vec()),
+            }),
+        })
     }
 
     /// A single loop reading each element and the one after it.
@@ -1081,6 +1395,283 @@ fn one_more_than(form: &Form) -> Option<Form> {
             Some(left.as_ref().clone())
         }
         _ => None,
+    }
+}
+
+/// A repetition read as counting, with the limit and the body it leaves behind.
+///
+/// The test may be written either way round and either way up: `i < n`, `n > i`,
+/// and the `!(i >= n)` that a `loop` with a leading `break` reduces to are one
+/// test. Pushing negation through a comparison is NOT sound in general — under
+/// a partial order `!(a >= b)` and `a < b` differ, which is the whole content
+/// of `IncomparableElements` — but a counter that is stepped by one and used as
+/// a span bound is an integer, and integers are totally ordered. The licence
+/// comes from the context, so it is taken here and not in the arithmetic law.
+///
+/// WHERE the step sits is part of what the loop visits, and the two directions
+/// want it in opposite places. Counting up, `while i < n { .. ; i += 1 }` from
+/// `i = a` visits `a` through `n - 1`. Counting down, the decrement goes FIRST
+/// — `while i > a { i -= 1; .. }` from `i = b` visits `b - 1` through `a` —
+/// because that is what keeps the index inside the sequence, and it is how the
+/// loop is actually written. Both are then the span `a..b`, walked opposite
+/// ways.
+///
+/// The other two placements visit `a + 1..=n` and `a + 1..=b`, which are real
+/// loops and different spans, and are refused rather than quietly given the
+/// span their sibling has.
+///
+/// A step inside a branch may not happen at all, so the loop would visit
+/// something other than a span and might not finish.
+fn counted_loop(form: &Form, counter: u32) -> Option<(&Form, Form, Direction)> {
+    let Form::Repeat { condition, body } = form else {
+        return None;
+    };
+    let Form::Sequence(steps) = body.as_ref() else {
+        return None;
+    };
+    // Take the step from each end and let the operator say which one counts.
+    let (first, after) = steps.split_first()?;
+    let (last, before) = steps.split_last()?;
+    let (direction, rest) = match counter_step(first, counter) {
+        Some(Direction::Backward) => (Direction::Backward, after),
+        _ => match counter_step(last, counter) {
+            Some(Direction::Forward) => (Direction::Forward, before),
+            _ => return None,
+        },
+    };
+    // The direction decides which side of the test the counter belongs on: a
+    // loop counting up stops when it reaches the limit from below, one counting
+    // down when it reaches it from above. Reading the test without knowing
+    // which way the loop runs cannot tell `i < n` from `i > 0`.
+    let limit = counting_test(condition, counter, direction)?;
+    // Anything else that moves the counter changes how many times the loop
+    // runs, and the span would be claiming a trip count the code does not have.
+    let remaining = match rest {
+        [only] => only.clone(),
+        _ => Form::Sequence(rest.to_vec()),
+    };
+    if assigns_to(&remaining, counter) {
+        return None;
+    }
+    Some((limit, remaining, direction))
+}
+
+/// Which way a statement steps a counter, when that is all it does.
+///
+/// A stride is not a span: `Span` has no room to say "every second one", and
+/// walking it as though it did would claim a trip count the code has not got.
+fn counter_step(step: &Form, counter: u32) -> Option<Direction> {
+    let Form::Assign {
+        operator,
+        target,
+        value,
+    } = step
+    else {
+        return None;
+    };
+    if **target != Form::Local(counter) || **value != Form::Number("1".to_owned()) {
+        return None;
+    }
+    match operator.as_str() {
+        "+=" => Some(Direction::Forward),
+        "-=" => Some(Direction::Backward),
+        _ => None,
+    }
+}
+
+/// The limit a test compares a counter against, when it is one.
+///
+/// Four spellings per direction, and they are one test: the counter on either
+/// side, and the whole thing negated as a `loop` with a leading `break` reduces
+/// to. Pushing negation through a comparison is NOT sound in general — under a
+/// partial order `!(a >= b)` and `a < b` differ, which is the whole content of
+/// `IncomparableElements` — but a counter stepped by one and used as a span
+/// bound is an integer, and integers are totally ordered. The licence comes
+/// from the context, which is why it is taken here and not in the arithmetic
+/// law where it would reach every comparison.
+fn counting_test(condition: &Form, counter: u32, direction: Direction) -> Option<&Form> {
+    if let Form::Unary { operator, value } = condition
+        && operator == "!"
+    {
+        return match direction {
+            Direction::Forward => compared_against(value, counter, ">=", "<="),
+            Direction::Backward => compared_against(value, counter, "<=", ">="),
+        };
+    }
+    match direction {
+        Direction::Forward => compared_against(condition, counter, "<", ">"),
+        Direction::Backward => compared_against(condition, counter, ">", "<"),
+    }
+}
+
+/// What a counter is compared with, when the comparison is one of two shapes.
+///
+/// `left` is the operator wanted with the counter written first, `right` the
+/// one wanted with it written second. `i < n` and `n > i` are the same test.
+fn compared_against<'a>(
+    condition: &'a Form,
+    counter: u32,
+    left_operator: &str,
+    right_operator: &str,
+) -> Option<&'a Form> {
+    let Form::Binary {
+        operator,
+        left,
+        right,
+    } = condition
+    else {
+        return None;
+    };
+    let name = Form::Local(counter);
+    if operator == left_operator && **left == name {
+        return Some(right.as_ref());
+    }
+    if operator == right_operator && **right == name {
+        return Some(left.as_ref());
+    }
+    None
+}
+
+/// Whether anything here assigns to a name.
+fn assigns_to(form: &Form, local: u32) -> bool {
+    if let Form::Assign { target, .. } = form
+        && **target == Form::Local(local)
+    {
+        return true;
+    }
+    form.children()
+        .into_iter()
+        .any(|child| assigns_to(child, local))
+}
+
+/// Whether the body might change what the limit is measuring.
+///
+/// A `for` evaluates its range once; a `while` re-reads its test every time
+/// around. The two agree only when nothing in the loop can move the limit, and
+/// `while i < v.len() { v.push(x); i += 1 }` is exactly the case where they do
+/// not.
+///
+/// The form carries no effects, so this asks the question it can. A name the
+/// limit depends on may be READ — `total += n` is fine — and may not be
+/// assigned to, have a method called on it, or be swapped through, because any
+/// of those might be the one that moves it. That refuses some loops whose limit
+/// is in fact fixed, which is the side to be wrong on.
+fn moves_the_limit(limit: &Form, body: &Form) -> bool {
+    let mut names = Vec::new();
+    collect_names(limit, &mut names);
+    names.iter().any(|name| disturbs(body, name, limit))
+}
+
+fn collect_names(form: &Form, found: &mut Vec<Form>) {
+    if matches!(form, Form::Local(_) | Form::Free(_)) && !found.contains(form) {
+        found.push(form.clone());
+    }
+    for child in form.children() {
+        collect_names(child, found);
+    }
+}
+
+/// The container a call takes an element from, and which end it takes from.
+///
+/// `next` is here because an iterator's is the whole of its contract and yields
+/// in order; `pop` is not, because the name settles no order.
+fn taking_method(scrutinee: &Form) -> Option<(Direction, &Form)> {
+    let Form::Method {
+        name,
+        receiver,
+        arguments,
+    } = scrutinee
+    else {
+        return None;
+    };
+    if !arguments.is_empty() {
+        return None;
+    }
+    let direction = match name.as_str() {
+        "pop_front" | "next" => Direction::Forward,
+        "pop_back" | "next_back" => Direction::Backward,
+        _ => return None,
+    };
+    Some((direction, receiver.as_ref()))
+}
+
+/// Whether a body reaches the container it is being handed elements from.
+///
+/// Putting something back makes the walk cover elements the container did not
+/// start with; measuring it mid-drain observes a state a walk over the elements
+/// never has. Both are asked as one question, because the form carries no
+/// effects and a method on the container could be either.
+fn disturbs_container(body: &Form, container: &Form) -> bool {
+    let touched = match body {
+        Form::Assign { target, .. } => mentions(target, container),
+        Form::Method { receiver, .. } => receiver.as_ref() == container,
+        Form::Swap { sequence, .. } | Form::Index { sequence, .. } => {
+            sequence.as_ref() == container
+        }
+        _ => false,
+    };
+    touched
+        || body
+            .children()
+            .into_iter()
+            .any(|child| disturbs_container(child, container))
+}
+
+/// Whether a body does anything to a name beyond reading it.
+///
+/// Working out the limit again is reading it, not changing it. That exemption
+/// is what keeps a nested counter loop readable: the inner loop's own bound is
+/// `v.len()` too, and without it the outer loop would be told that measuring
+/// the sequence had moved it.
+fn disturbs(form: &Form, name: &Form, limit: &Form) -> bool {
+    if form == limit {
+        return false;
+    }
+    let touched = match form {
+        Form::Assign { target, .. } => mentions(target, name),
+        // A method might be `push`. Which ones move a sequence and which only
+        // read it is an effect question, and the form does not carry effects.
+        Form::Method { receiver, .. } => receiver.as_ref() == name,
+        Form::Swap { sequence, .. } => sequence.as_ref() == name,
+        _ => false,
+    };
+    touched
+        || form
+            .children()
+            .into_iter()
+            .any(|child| disturbs(child, name, limit))
+}
+
+fn mentions(form: &Form, name: &Form) -> bool {
+    form == name
+        || form
+            .children()
+            .into_iter()
+            .any(|child| mentions(child, name))
+}
+
+/// The sequence and position an indexing reads.
+fn indexed_position(form: &Form) -> Option<(&Form, &Form)> {
+    match form {
+        Form::Index { sequence, position } => Some((sequence.as_ref(), position.as_ref())),
+        _ => None,
+    }
+}
+
+/// Whether a step can leave the loop around it.
+///
+/// A `break` nested inside another loop belongs to that one, so only the steps
+/// this loop runs directly are asked.
+fn leaves_a_loop(form: &Form) -> bool {
+    match form {
+        Form::Opaque { kind, .. } if kind == "break_expression" => true,
+        Form::Repeat { .. }
+        | Form::Traverse { .. }
+        | Form::Pairwise { .. }
+        | Form::Transform { .. }
+        | Form::Retain { .. }
+        | Form::Sift { .. } => false,
+        _ => form.children().into_iter().any(leaves_a_loop),
     }
 }
 

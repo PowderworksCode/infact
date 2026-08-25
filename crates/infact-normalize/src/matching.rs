@@ -656,6 +656,36 @@ impl Bindings {
             (Form::Return(subject), Form::Return(pattern)) => self.form(subject, pattern),
             (Form::Sequence(subject), Form::Sequence(pattern)) => self.all(subject, pattern),
             (
+                Form::Repeat {
+                    condition: subject_condition,
+                    body: subject_body,
+                },
+                Form::Repeat {
+                    condition: pattern_condition,
+                    body: pattern_body,
+                },
+            ) => {
+                self.form(subject_condition, pattern_condition)
+                    && (self.form(subject_body, pattern_body)
+                        || self.fused_body(subject_body, pattern_body))
+            }
+            (
+                Form::Swap {
+                    sequence: subject_sequence,
+                    left: subject_left,
+                    right: subject_right,
+                },
+                Form::Swap {
+                    sequence: pattern_sequence,
+                    left: pattern_left,
+                    right: pattern_right,
+                },
+            ) => {
+                self.form(subject_sequence, pattern_sequence)
+                    && self.form(subject_left, pattern_left)
+                    && self.form(subject_right, pattern_right)
+            }
+            (
                 Form::Unary {
                     operator: subject_operator,
                     value: subject,

@@ -258,6 +258,18 @@ fn lower(form: &Form, level: usize, guesses: &Guesses, names: &Names) -> String 
             right,
         } => format!("({} {operator} {})", sub(left), sub(right)),
         Form::Unary { operator, value } => format!("{operator}{}", sub(value)),
+        Form::Repeat { condition, body } => format!(
+            "while {} {{\n{}{}\n{}}}",
+            sub(condition),
+            indent(level + 1),
+            lower(body, level + 1, guesses, names),
+            indent(level)
+        ),
+        Form::Swap {
+            sequence,
+            left,
+            right,
+        } => format!("{}.swap({}, {})", sub(sequence), sub(left), sub(right)),
         Form::Index { sequence, position } => format!("{}[{}]", sub(sequence), sub(position)),
         Form::Span {
             start,

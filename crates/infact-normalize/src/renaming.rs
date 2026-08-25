@@ -196,6 +196,19 @@ impl Renaming {
                 left: self.boxed(left),
                 right: self.boxed(right),
             },
+            Form::Repeat { condition, body } => Form::Repeat {
+                condition: self.boxed(condition),
+                body: self.boxed(body),
+            },
+            Form::Swap {
+                sequence,
+                left,
+                right,
+            } => Form::Swap {
+                sequence: self.boxed(sequence),
+                left: self.boxed(left),
+                right: self.boxed(right),
+            },
             Form::Unary { operator, value } => Form::Unary {
                 operator: operator.clone(),
                 value: self.boxed(value),
