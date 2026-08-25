@@ -215,16 +215,22 @@ pub enum Form {
     /// special case: it is a normalization that lets a written-out loop compare
     /// against a library API that exists.
     ///
-    /// Only the distinct-pairs walk reduces to this. Walking adjacent pairs is
-    /// `windows(2)` and a different coverage; walking every ordered pair
-    /// including an element with itself is a third. Both stay two traversals
-    /// until something needs them, because a coverage field with one inhabitant
-    /// says nothing and a wrong one would claim a walk the code does not make.
+    /// Walking adjacent pairs is `windows(2)` and is not this: it is a third
+    /// coverage, and it stays two traversals until something needs it.
     Pairwise {
         sequence: Box<Form>,
         left: Box<Pattern>,
         right: Box<Pattern>,
         body: Box<Form>,
+        /// Which of the pairs the walk actually reaches.
+        ///
+        /// Written out, the two are a triangular nested loop and a square one
+        /// with the diagonal guarded away, and both are common. They reach the
+        /// same pairs and differ in how often, which is behavior: a decision
+        /// that does not care how many times it sees a pair gets the same
+        /// answer from either, and a count gets double. Recording it is what
+        /// lets a reader of the form tell which they have.
+        coverage: Coverage,
     },
     /// Producing a new sequence by transforming each element.
     Transform {
@@ -338,6 +344,25 @@ pub enum Form {
         kind: String,
         parts: Vec<Form>,
     },
+}
+
+/// How often a pairwise walk reaches each pair.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum Coverage {
+    /// Each unordered pair once: `for i in 0..n { for j in i + 1..n { .. } }`,
+    /// which is what `itertools::tuple_combinations` offers.
+    #[default]
+    Once,
+    /// Each unordered pair both ways round, and no element with itself.
+    ///
+    /// A square nested loop over one sequence with an `i != j` guard. Every
+    /// pair is visited twice, in both orders, so this says strictly less than
+    /// [`Coverage::Once`] about anything order- or count-sensitive and exactly
+    /// as much about anything that is neither.
+    BothWays,
 }
 
 /// Which way a walk runs.
@@ -558,11 +583,13 @@ impl Form {
                 left,
                 right,
                 body,
+                coverage,
             } => Self::Pairwise {
                 sequence: apply(sequence),
                 left: left.clone(),
                 right: right.clone(),
                 body: apply(body),
+                coverage: *coverage,
             },
             Self::Transform {
                 sequence,
@@ -1228,7 +1255,14 @@ impl Display for Form {
                 left,
                 right,
                 body,
-            } => write!(formatter, "(pairwise {sequence} {left} {right} {body})"),
+                coverage,
+            } => {
+                let kind = match coverage {
+                    Coverage::Once => "pairwise",
+                    Coverage::BothWays => "pairwise-both-ways",
+                };
+                write!(formatter, "({kind} {sequence} {left} {right} {body})")
+            }
             Self::Accumulate {
                 sequence,
                 initial,

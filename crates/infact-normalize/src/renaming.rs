@@ -100,6 +100,7 @@ impl Renaming {
                 left,
                 right,
                 body,
+                coverage,
             } => {
                 let sequence = self.boxed(sequence);
                 let left = Box::new(self.pattern(left));
@@ -109,6 +110,7 @@ impl Renaming {
                     left,
                     right,
                     body: self.boxed(body),
+                    coverage: *coverage,
                 }
             }
             Form::Sift {

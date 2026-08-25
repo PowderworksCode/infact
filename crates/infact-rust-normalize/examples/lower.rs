@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use entl_tree_sitter::{ParserPack, ParserRuntime};
-use infact_normalize::{Direction, Form, Pattern};
+use infact_normalize::{Coverage, Direction, Form, Pattern};
 use infact_rust_normalize::normalize_file;
 
 /// A place the form did not keep enough to emit, by what was missing.
@@ -156,10 +156,16 @@ fn lower(form: &Form, level: usize, guesses: &Guesses, names: &Names) -> String 
             left,
             right,
             body,
+            coverage,
         } => {
             guesses.note("Pairwise: the loop bounds that produced the pairs are not recorded");
+            let call = match coverage {
+                Coverage::Once => "tuple_combinations()",
+                // Each pair both ways round is what `permutations(2)` yields.
+                Coverage::BothWays => "permutations(2)",
+            };
             format!(
-                "for ({}, {}) in {}.tuple_combinations() {{\n{}{}\n{}}}",
+                "for ({}, {}) in {}.{call} {{\n{}{}\n{}}}",
                 pattern(left, names),
                 pattern(right, names),
                 sub(sequence),

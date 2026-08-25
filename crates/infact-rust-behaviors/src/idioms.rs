@@ -202,11 +202,18 @@ fn deciding_pairwise(form: &Form) -> Result<&Form, IdiomRefusal> {
 /// A walk over pairs whose only reaction to an equal pair is to record that one
 /// exists.
 fn distinctness_walk(form: &Form) -> Result<&Form, IdiomRefusal> {
+    // Either coverage will do, and that is a claim worth making explicitly:
+    // a square guarded loop reaches each pair twice, and every reaction this
+    // accepts is idempotent — returning twice is returning, and setting a flag
+    // to the same constant twice is setting it. The reaction that is NOT
+    // idempotent is counting, and counting is refused below for its own
+    // reasons, so nothing here depends on which spelling was written.
     let Form::Pairwise {
         sequence,
         left,
         right,
         body,
+        coverage: _,
     } = form
     else {
         return Err(IdiomRefusal::NotThisShape);
@@ -265,20 +272,38 @@ fn records_that_one_exists(consequence: &Form) -> bool {
                 && matches!(target.as_ref(), Form::Local(_) | Form::Free(_))
                 && matches!(value.as_ref(), Form::Constant(_))
         }
-        // `println!("no"); return;` is one reaction written as two steps, and
-        // it is the spelling the corpus actually uses. Only the last step may
-        // leave, because a `return` reached in the middle would make the steps
-        // after it dead rather than part of the reaction.
-        Form::Sequence(steps) => steps.split_last().is_some_and(|(last, rest)| {
-            records_that_one_exists(last) && !rest.iter().any(leaves_the_walk)
-        }),
+        // One reaction is routinely written as several steps: `println!("no");
+        // return;` and `ans = "No"; break;` are both in the corpus. It is still
+        // only recording that a duplicate exists as long as one step does that
+        // and no step does anything else — every other step must be reporting
+        // or leaving, because those change nothing about the answer.
+        Form::Sequence(steps) => {
+            steps.iter().any(records_that_one_exists) && steps.iter().all(is_inert_beside_recording)
+        }
         _ => false,
     }
 }
 
-/// Whether a step can end the walk from somewhere other than its end.
-fn leaves_the_walk(form: &Form) -> bool {
-    matches!(form, Form::Return(_)) || form.children().into_iter().any(leaves_the_walk)
+/// Whether a step changes nothing about whether a duplicate was found.
+///
+/// Leaving a loop early is an optimization on a walk whose answer is already
+/// settled, and reporting is how the answer gets out. Anything else — another
+/// assignment, a call, a push — is work this recognizer has not accounted for,
+/// and a reaction it cannot account for is one it must not summarize.
+///
+/// Any macro counts as reporting, which is looser than it sounds and looser
+/// than it reads. The corpus spells the report `println!`, `write!`, `p!` and
+/// `echo!` — the last two being the submitter's own — so a list of known names
+/// would be a list of one corpus's habits. What bounds the damage is that the
+/// caller has already established the reaction cannot mention either element,
+/// so a macro here cannot carry the pair out; the residual risk is a macro with
+/// an unrelated effect, which makes the finding fused rather than wrong.
+fn is_inert_beside_recording(step: &Form) -> bool {
+    records_that_one_exists(step)
+        || matches!(step, Form::Opaque { kind, .. }
+            if kind == "break_expression"
+                || kind == "continue_expression"
+                || kind.starts_with("macro:"))
 }
 
 /// Whether a test asks whether the two elements of a pair are equal.
@@ -317,6 +342,7 @@ mod tests {
                 left: Box::new(Pattern::Binding(0)),
                 right: Box::new(Pattern::Binding(1)),
                 body: Box::new(body),
+                coverage: infact_core::Coverage::Once,
             },
             Form::Constant("true".to_owned()),
         ])
@@ -424,6 +450,55 @@ mod tests {
             alternative: None,
         });
         assert_eq!(all_different(&form, allowed()), Ok(&Form::Free(0)));
+    }
+
+    /// Recording and leaving the inner loop is one reaction written as two.
+    ///
+    /// `break` settles nothing by itself, but a walk whose flag is already set
+    /// has nothing left to learn from the rest of the row.
+    #[test]
+    fn a_walk_that_records_then_breaks_is_all_different() {
+        let form = pairwise(Form::Branch {
+            condition: Box::new(equal_pair()),
+            consequence: Box::new(Form::Sequence(vec![
+                Form::Assign {
+                    operator: "=".to_owned(),
+                    target: Box::new(Form::Local(2)),
+                    value: Box::new(Form::Constant("\"No\"".to_owned())),
+                },
+                Form::Opaque {
+                    kind: "break_expression".to_owned(),
+                    parts: Vec::new(),
+                },
+            ])),
+            alternative: None,
+        });
+        assert_eq!(all_different(&form, allowed()), Ok(&Form::Free(0)));
+    }
+
+    /// A reaction that also does unaccounted work is refused.
+    #[test]
+    fn a_walk_that_does_more_than_record_is_refused() {
+        let form = pairwise(Form::Branch {
+            condition: Box::new(equal_pair()),
+            consequence: Box::new(Form::Sequence(vec![
+                Form::Assign {
+                    operator: "=".to_owned(),
+                    target: Box::new(Form::Local(2)),
+                    value: Box::new(Form::Constant("false".to_owned())),
+                },
+                Form::Method {
+                    name: "push".to_owned(),
+                    receiver: Box::new(Form::Local(3)),
+                    arguments: vec![Form::Number("1".to_owned())],
+                },
+            ])),
+            alternative: None,
+        });
+        assert_eq!(
+            all_different(&form, allowed()),
+            Err(IdiomRefusal::NotThisShape)
+        );
     }
 
     /// Reporting and leaving is one reaction written as two steps.
