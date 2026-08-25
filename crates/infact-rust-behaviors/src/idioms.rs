@@ -18,7 +18,7 @@
 //! recommendation that gets switched off, and every shape below refuses
 //! anything it cannot account for.
 
-use infact_core::{Condition, Form, Pattern};
+use infact_core::{Condition, ExternalBound, ExternalCallable, ExternalType, Form, Pattern};
 
 /// Why a candidate yielded no recommendation.
 ///
@@ -65,6 +65,17 @@ impl Idiom {
         }
     }
 
+    /// What the code needs of its elements to compute this at all.
+    ///
+    /// The other half of an [`Condition::ElementBound`] comes from the catalog.
+    /// This half is a property of the written-out shape: comparing two elements
+    /// with `==` is all a pairwise distinctness check asks of them.
+    const fn element_bound_of_the_code(&self) -> &'static str {
+        match self {
+            Self::AllDifferent => "PartialEq",
+        }
+    }
+
     /// What has to hold for the recommendation to be sound.
     ///
     /// Fixed per idiom rather than per finding, because these are properties of
@@ -72,19 +83,68 @@ impl Idiom {
     /// are stated in full even when several will usually be satisfied: a reader
     /// who can dismiss three of them in a second is better served than one who
     /// is not told about the fourth.
-    pub fn conditions(&self) -> Vec<Condition> {
+    ///
+    /// The element bound is read off the catalog rather than written here.
+    /// Naming a bound from memory would be a claim about a version of a library
+    /// that nothing checked, and it is exactly the claim a reader is least able
+    /// to verify.
+    pub fn conditions(&self, callable: &ExternalCallable) -> Vec<Condition> {
+        let mut conditions = Vec::new();
+        if let Some(requires) = element_bound(callable) {
+            conditions.push(Condition::ElementBound {
+                requires,
+                code_requires: self.element_bound_of_the_code().to_owned(),
+            });
+        }
         match self {
-            Self::AllDifferent => vec![
-                Condition::ElementBound {
-                    requires: "Eq + Hash".to_owned(),
-                    code_requires: "PartialEq".to_owned(),
-                },
+            Self::AllDifferent => conditions.extend([
                 Condition::Allocates,
                 Condition::ComparisonObservable,
                 Condition::SmallInputsFavourTheCode,
-            ],
+            ]),
         }
+        conditions
     }
+}
+
+/// Whether a catalogued callable answers a yes-or-no question about a sequence.
+///
+/// The recognizer names one API by path, and a path is not a promise: a catalog
+/// is generated data, and the callable behind a path can change between
+/// versions. Checking that it still takes the receiver and still returns `bool`
+/// is what keeps a recommendation from being made against a signature nobody
+/// read.
+pub fn answers_a_predicate(callable: &ExternalCallable) -> bool {
+    let Some(signature) = &callable.signature else {
+        return false;
+    };
+    let returns_bool = matches!(
+        &signature.output,
+        Some(ExternalType::Primitive { name }) if name == "bool"
+    );
+    returns_bool && signature.inputs.iter().any(|input| input.name == "self")
+}
+
+/// The bounds a callable puts on the elements it walks.
+///
+/// A requirement whose subject is the iterator's own `Item` is a requirement on
+/// the elements; everything else constrains the iterator or its lifetimes and
+/// is not what a caller has to check about their data.
+fn element_bound(callable: &ExternalCallable) -> Option<String> {
+    let signature = callable.signature.as_ref()?;
+    let bounds = signature
+        .requirements
+        .iter()
+        .filter(|requirement| {
+            matches!(&requirement.subject, ExternalType::Associated { name, .. } if name == "Item")
+        })
+        .flat_map(|requirement| &requirement.bounds)
+        .filter_map(|bound| match bound {
+            ExternalBound::Trait { path } => Some(path.rsplit("::").next().unwrap_or(path)),
+            ExternalBound::Lifetime { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    (!bounds.is_empty()).then(|| bounds.join(" + "))
 }
 
 /// Whether a function may allocate.
@@ -398,14 +458,56 @@ mod tests {
         );
     }
 
-    /// Every recommendation states what it depends on.
+    /// The element bound is read off the catalog, not written from memory.
     #[test]
-    fn the_recommendation_carries_its_conditions() {
-        let conditions = Idiom::AllDifferent.conditions();
+    fn the_recommendation_carries_the_catalogs_own_bound() {
+        let conditions = Idiom::AllDifferent.conditions(&all_unique());
         assert!(conditions.contains(&Condition::Allocates));
         assert!(conditions.iter().any(|condition| matches!(
             condition,
-            Condition::ElementBound { requires, .. } if requires == "Eq + Hash"
+            Condition::ElementBound { requires, code_requires }
+                if requires == "Eq + Hash" && code_requires == "PartialEq"
         )));
+    }
+
+    /// A callable that no longer answers yes or no is not this API any more.
+    #[test]
+    fn a_callable_that_does_not_return_bool_is_not_a_predicate() {
+        assert!(answers_a_predicate(&all_unique()));
+        let mut changed = all_unique();
+        if let Some(signature) = changed.signature.as_mut() {
+            signature.output = Some(ExternalType::Primitive {
+                name: "usize".to_owned(),
+            });
+        }
+        assert!(!answers_a_predicate(&changed));
+    }
+
+    /// A catalog with no signature at all cannot be verified, so it is not used.
+    #[test]
+    fn a_callable_with_no_signature_is_not_a_predicate() {
+        let mut unknown = all_unique();
+        unknown.signature = None;
+        assert!(!answers_a_predicate(&unknown));
+        assert!(
+            Idiom::AllDifferent
+                .conditions(&unknown)
+                .iter()
+                .all(|condition| !matches!(condition, Condition::ElementBound { .. }))
+        );
+    }
+
+    /// The catalog entry the recognizer points at, as it is shipped.
+    fn all_unique() -> ExternalCallable {
+        let catalog = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../infact-packs/rust-itertools/api/itertools-0.15.0.json");
+        let catalog: infact_core::ExternalCatalog =
+            serde_json::from_slice(&std::fs::read(catalog).expect("itertools catalog"))
+                .expect("parsing the catalog");
+        catalog
+            .callables
+            .into_iter()
+            .find(|callable| callable.path == Idiom::AllDifferent.callable_path().1)
+            .expect("all_unique in the catalog")
     }
 }

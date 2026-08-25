@@ -21,7 +21,7 @@ use std::fmt::{self, Display, Formatter};
 
 use serde::{Deserialize, Serialize};
 
-pub const NORMALIZED_FORM_SCHEMA: u32 = 1;
+pub const NORMALIZED_FORM_SCHEMA: u32 = 2;
 
 /// The deepest a form may nest and still describe an operation.
 ///

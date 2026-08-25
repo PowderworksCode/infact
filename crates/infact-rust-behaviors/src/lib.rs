@@ -763,13 +763,18 @@ fn collect_idiom_matches(
     }
     let idiom = idioms::Idiom::AllDifferent;
     let (package, path) = idiom.callable_path();
-    let Some(catalog) = catalogs.iter().find(|catalog| {
-        catalog.package == package
-            && catalog
-                .callables
-                .iter()
-                .any(|callable| callable.path == path)
-    }) else {
+    // The callable has to be present AND still answer the question the idiom
+    // decides. A catalog is generated data and a path is not a promise: the
+    // signature is what says the API still does this.
+    let found = catalogs.iter().find_map(|catalog| {
+        let callable = catalog
+            .callables
+            .iter()
+            .find(|callable| callable.path == path)?;
+        (catalog.package == package && idioms::answers_a_predicate(callable))
+            .then_some((catalog, callable))
+    });
+    let Some((catalog, callable)) = found else {
         return Ok(());
     };
     output.insert(Fact {
@@ -794,7 +799,7 @@ fn collect_idiom_matches(
                 start_column: None,
                 end_column: None,
             },
-            conditions: idiom.conditions(),
+            conditions: idiom.conditions(callable),
         },
         derivation: Derivation {
             analyzer: "rust.idioms".to_owned(),
