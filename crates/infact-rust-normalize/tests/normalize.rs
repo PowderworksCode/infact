@@ -936,3 +936,203 @@ fn a_repetition_is_comparable() {
     );
     assert!(form.contains("(repeat"), "{form}");
 }
+
+/// A counter loop is the traversal it is written to be.
+///
+/// Two laws compose to get here: the counter loop becomes a walk over a span,
+/// and a span walk that only ever indexes becomes a walk over the elements.
+#[test]
+fn a_counter_loop_agrees_with_a_for_loop() {
+    let counted = behavior_of(
+        "fn f(values: &[i32]) -> i32 {
+             let mut total = 0;
+             let mut i = 0;
+             while i < values.len() { total += values[i]; i += 1; }
+             total
+         }",
+        "f",
+    );
+    let direct = behavior_of(
+        "fn f(values: &[i32]) -> i32 {
+             let mut total = 0;
+             for i in 0..values.len() { total += values[i]; }
+             total
+         }",
+        "f",
+    );
+    assert_eq!(counted, direct);
+    assert!(!counted.contains("(repeat"), "{counted}");
+}
+
+/// A `loop` with a leading `break` reaches the same place.
+///
+/// Four laws in a row: the break becomes a guard, the guard's negation is read
+/// as the counting test, the counter loop becomes a span walk, and the span
+/// walk becomes an element walk.
+#[test]
+fn a_loop_with_a_break_agrees_with_a_for_loop() {
+    let broken = behavior_of(
+        "fn f(values: &[i32]) -> i32 {
+             let mut total = 0;
+             let mut i = 0;
+             loop { if i >= values.len() { break; } total += values[i]; i += 1; }
+             total
+         }",
+        "f",
+    );
+    let direct = behavior_of(
+        "fn f(values: &[i32]) -> i32 {
+             let mut total = 0;
+             for i in 0..values.len() { total += values[i]; }
+             total
+         }",
+        "f",
+    );
+    assert_eq!(broken, direct);
+}
+
+/// Counting down agrees with walking a reversed range.
+#[test]
+fn a_descending_counter_agrees_with_a_reversed_range() {
+    let counted = behavior_of(
+        "fn f(values: &[i32]) -> i32 {
+             let mut total = 0;
+             let mut i = values.len();
+             while i > 0 { i -= 1; total += values[i]; }
+             total
+         }",
+        "f",
+    );
+    let reversed = behavior_of(
+        "fn f(values: &[i32]) -> i32 {
+             let mut total = 0;
+             for i in (0..values.len()).rev() { total += values[i]; }
+             total
+         }",
+        "f",
+    );
+    assert_eq!(counted, reversed);
+    assert!(counted.contains("traverse-back"), "{counted}");
+}
+
+/// Walking backwards is not the same as walking forwards.
+#[test]
+fn a_reversed_walk_differs_from_a_forward_one() {
+    let forward = behavior_of("fn f(v: &[i32]) { for x in v.iter() { g(x); } }", "f");
+    let backward = behavior_of("fn f(v: &[i32]) { for x in v.iter().rev() { g(x); } }", "f");
+    assert_ne!(forward, backward);
+}
+
+/// Where the step sits decides which positions the loop visits.
+///
+/// Counting down with the decrement LAST visits `n` through `1`, not `n - 1`
+/// through `0`, so it is a different span and is refused rather than given the
+/// span its sibling has.
+#[test]
+fn a_descending_loop_that_steps_last_is_refused() {
+    let form = behavior_of(
+        "fn f(values: &[i32]) -> i32 {
+             let mut total = 0;
+             let mut i = values.len();
+             while i > 0 { total += values[i - 1]; i -= 1; }
+             total
+         }",
+        "f",
+    );
+    assert!(form.contains("(repeat"), "{form}");
+}
+
+/// A loop whose body can move the limit is not a walk over a fixed span.
+#[test]
+fn a_loop_that_changes_its_limit_is_refused() {
+    let form = behavior_of(
+        "fn f(values: &mut Vec<i32>) -> usize {
+             let mut i = 0;
+             while i < values.len() { values.push(1); i += 1; }
+             i
+         }",
+        "f",
+    );
+    assert!(form.contains("(repeat"), "{form}");
+}
+
+/// A counter something reads afterwards is not one a traversal may consume.
+#[test]
+fn a_counter_read_after_the_loop_is_refused() {
+    let form = behavior_of(
+        "fn f(values: &[i32]) -> usize {
+             let mut total = 0;
+             let mut i = 0;
+             while i < values.len() { total += values[i]; i += 1; }
+             i
+         }",
+        "f",
+    );
+    assert!(form.contains("(repeat"), "{form}");
+}
+
+/// A step that might not happen is not a span.
+#[test]
+fn a_conditional_step_is_refused() {
+    let form = behavior_of(
+        "fn f(values: &[i32]) -> i32 {
+             let mut total = 0;
+             let mut i = 0;
+             while i < values.len() { if values[i] > 0 { i += 1; } total += 1; }
+             total
+         }",
+        "f",
+    );
+    assert!(form.contains("(repeat"), "{form}");
+}
+
+/// A stride is not a span.
+#[test]
+fn a_stride_is_refused() {
+    let form = behavior_of(
+        "fn f(n: usize) -> usize {
+             let mut i = 0;
+             let mut total = 0;
+             while i < n { total += i; i += 2; }
+             total
+         }",
+        "f",
+    );
+    assert!(form.contains("(repeat"), "{form}");
+}
+
+/// Nested counter loops reach the same walk over pairs as nested `for` loops.
+///
+/// The inner loop's own bound is `values.len()` as well, so this only holds
+/// because working the limit out again counts as reading it.
+#[test]
+fn nested_counter_loops_agree_with_nested_for_loops() {
+    let counted = behavior_of(
+        "fn f(values: &[i32]) -> bool {
+             let mut i = 0;
+             while i < values.len() {
+                 let mut j = i + 1;
+                 while j < values.len() {
+                     if values[i] == values[j] { return false; }
+                     j += 1;
+                 }
+                 i += 1;
+             }
+             true
+         }",
+        "f",
+    );
+    let direct = behavior_of(
+        "fn f(values: &[i32]) -> bool {
+             for i in 0..values.len() {
+                 for j in i + 1..values.len() {
+                     if values[i] == values[j] { return false; }
+                 }
+             }
+             true
+         }",
+        "f",
+    );
+    assert_eq!(counted, direct);
+    assert!(counted.contains("(pairwise"), "{counted}");
+}
