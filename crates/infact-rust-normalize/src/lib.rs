@@ -120,12 +120,42 @@ fn named_children<'a>(node: Node<'a>) -> Vec<Node<'a>> {
     node.named_children(&mut cursor).collect()
 }
 
+/// The operator a unary expression applies, as written.
+///
+/// The grammar gives it no field name, so it is the first child and it is
+/// anonymous.
+fn unary_operator<'a>(node: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
+    (node.kind() == "unary_expression")
+        .then(|| node.child(0))
+        .flatten()
+        .map(|operator| text(operator, source))
+}
+
+/// Whether a range reaches its final endpoint.
+///
+/// `0..n` and `0..=n` differ by exactly one element, so which was written is
+/// behavior. The operator is an anonymous token between the endpoints.
+fn range_is_inclusive(node: Node<'_>, source: &[u8]) -> bool {
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .any(|child| !child.is_named() && text(child, source) == "..=")
+}
+
 /// Strip wrappers that carry no behavior.
-fn unwrap_noise(mut node: Node<'_>) -> Node<'_> {
+///
+/// A dereference is noise: `*x` and `x` denote the same value, and Rust writes
+/// the star wherever a reference needs opening. Negation is NOT noise, and used
+/// to be stripped here alongside it because both are spelled as a
+/// `unary_expression`. That made `!seen.insert(x)` and `seen.insert(x)` — a
+/// test and its opposite — the same form. So the choice is made on the
+/// operator, not on the node kind.
+fn unwrap_noise<'a>(mut node: Node<'a>, source: &'a [u8]) -> Node<'a> {
     loop {
         let inner = match node.kind() {
+            "unary_expression" if unary_operator(node, source) == Some("*") => {
+                named_children(node).into_iter().next()
+            }
             "parenthesized_expression"
-            | "unary_expression"
             | "reference_expression"
             // `?` is not noise: it is a conditional return, and a loop whose
             // test can leave the function does not do what a library that takes
@@ -260,7 +290,7 @@ fn as_method_call<'a>(node: Node<'a>, source: &'a [u8]) -> Option<MethodCall<'a>
 /// Peel identity adapters off a receiver chain.
 fn peel_adapters<'a>(mut node: Node<'a>, source: &'a [u8]) -> Node<'a> {
     loop {
-        node = unwrap_noise(node);
+        node = unwrap_noise(node, source);
         match as_method_call(node, source) {
             Some(call) if is_receiver_noise(call.name) && call.arguments.is_empty() => {
                 node = call.receiver;
@@ -271,8 +301,8 @@ fn peel_adapters<'a>(mut node: Node<'a>, source: &'a [u8]) -> Node<'a> {
 }
 
 /// The closure passed to a sequence method, as (parameters, body).
-fn closure_parts<'a>(argument: Node<'a>) -> Option<(Vec<Node<'a>>, Node<'a>)> {
-    let closure = unwrap_noise(argument);
+fn closure_parts<'a>(argument: Node<'a>, source: &'a [u8]) -> Option<(Vec<Node<'a>>, Node<'a>)> {
+    let closure = unwrap_noise(argument, source);
     if closure.kind() != "closure_expression" {
         return None;
     }
@@ -387,7 +417,7 @@ impl<'a> Normalizer<'a> {
         if ACCUMULATE_METHODS.contains(&call.name) && call.arguments.len() == 2 {
             let sequence = self.expression(peel_adapters(call.receiver, self.source));
             let initial = self.expression(call.arguments[0]);
-            let (parameters, body) = closure_parts(call.arguments[1])?;
+            let (parameters, body) = closure_parts(call.arguments[1], self.source)?;
             let accumulator = parameters
                 .first()
                 .map_or(Pattern::Ignored, |node| self.bind_pattern(*node));
@@ -409,7 +439,7 @@ impl<'a> Normalizer<'a> {
             if arguments.len() != 1 {
                 return None;
             }
-            closure_parts(arguments[0])
+            closure_parts(arguments[0], self.source)
         };
         let kind = if TRAVERSAL_METHODS.contains(&call.name) {
             0
@@ -478,7 +508,7 @@ impl<'a> Normalizer<'a> {
     }
 
     fn expression(&mut self, node: Node<'a>) -> Form {
-        let node = unwrap_noise(node);
+        let node = unwrap_noise(node, self.source);
         if let Some(form) = self.sequence_operation(node) {
             return form;
         }
@@ -547,6 +577,53 @@ impl<'a> Normalizer<'a> {
                     operator,
                     left: Box::new(left),
                     right: Box::new(right),
+                }
+            }
+            // A dereference has already been peeled by `unwrap_noise`, so
+            // whatever reaches here applies an operator that changes the value.
+            "unary_expression" => {
+                let operator = unary_operator(node, self.source).unwrap_or_default();
+                let value = named_children(node)
+                    .into_iter()
+                    .next()
+                    .map_or(Form::Literal, |child| self.expression(child));
+                Form::Unary {
+                    operator: operator.to_owned(),
+                    value: Box::new(value),
+                }
+            }
+            // `s[i]`. The grammar names neither part, so they are positional:
+            // the sequence first, then the position.
+            "index_expression" => {
+                let mut parts = named_children(node).into_iter();
+                let (Some(sequence), Some(position)) = (parts.next(), parts.next()) else {
+                    return Form::Literal;
+                };
+                Form::Index {
+                    sequence: Box::new(self.expression(sequence)),
+                    position: Box::new(self.expression(position)),
+                }
+            }
+            // `a..b` and `a..=b`. An endpoint may be absent — `..b`, `a..`,
+            // and bare `..` are all legal — and an absent one is not a bound
+            // this can reason about, so it stays the syntax it was rather than
+            // becoming a `Span` with an invented endpoint.
+            "range_expression" => {
+                let mut parts = named_children(node).into_iter();
+                let (Some(start), Some(end)) = (parts.next(), parts.next()) else {
+                    return Form::Opaque {
+                        kind: "range_expression".to_owned(),
+                        parts: named_children(node)
+                            .into_iter()
+                            .map(|child| self.expression(child))
+                            .collect(),
+                    };
+                };
+                let inclusive = range_is_inclusive(node, self.source);
+                Form::Span {
+                    start: Box::new(self.expression(start)),
+                    end: Box::new(self.expression(end)),
+                    inclusive,
                 }
             }
             // a number's value can be the behavior, so it is kept

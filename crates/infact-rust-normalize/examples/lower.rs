@@ -229,6 +229,16 @@ fn lower(form: &Form, level: usize, guesses: &Guesses, names: &Names) -> String 
             left,
             right,
         } => format!("({} {operator} {})", sub(left), sub(right)),
+        Form::Unary { operator, value } => format!("{operator}{}", sub(value)),
+        Form::Index { sequence, position } => format!("{}[{}]", sub(sequence), sub(position)),
+        Form::Span {
+            start,
+            end,
+            inclusive,
+        } => {
+            let operator = if *inclusive { "..=" } else { ".." };
+            format!("{}{operator}{}", sub(start), sub(end))
+        }
         Form::Lambda { parameters, body } => format!(
             "|{}| {}",
             parameters

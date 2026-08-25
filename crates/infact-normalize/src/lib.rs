@@ -246,6 +246,39 @@ pub enum Form {
         left: Box<Form>,
         right: Box<Form>,
     },
+    /// An operator applied to one value: `!found`, `-count`.
+    ///
+    /// Negation used to be stripped as noise alongside parentheses and `&`,
+    /// which made a predicate and its opposite the same form: `if !seen.insert(x)`
+    /// and `if seen.insert(x)` both reduced to `(branch (method insert ..) ..)`.
+    /// A library that returns on one and a caller that returns on the other do
+    /// opposite things, so the operator is behavior. A dereference genuinely is
+    /// noise and is still stripped by the frontend, which is why this records
+    /// the operator rather than the syntax it came from.
+    Unary {
+        operator: String,
+        value: Box<Form>,
+    },
+    /// Reading a sequence at a position.
+    ///
+    /// Held apart from `Opaque` because the two parts have roles: which one is
+    /// the sequence and which is the position is the whole content of an
+    /// indexing, and `Opaque` compares parts by position alone.
+    Index {
+        sequence: Box<Form>,
+        position: Box<Form>,
+    },
+    /// A span of integers, as a loop over indices walks.
+    ///
+    /// `inclusive` is carried rather than folded into `end`, because folding
+    /// would need arithmetic on an expression that is usually symbolic. Left in
+    /// `Opaque`, `0..n` and `0..=n` had the same kind and the same arity and
+    /// unified with each other, which is an off-by-one reported as a match.
+    Span {
+        start: Box<Form>,
+        end: Box<Form>,
+        inclusive: bool,
+    },
     Lambda {
         parameters: Vec<Pattern>,
         body: Box<Form>,
@@ -377,6 +410,9 @@ impl Form {
             Self::Collect { sequence, .. } => vec![sequence.as_ref()],
             Self::Assign { target, value, .. } => vec![target.as_ref(), value.as_ref()],
             Self::Binary { left, right, .. } => vec![left.as_ref(), right.as_ref()],
+            Self::Unary { value, .. } => vec![value.as_ref()],
+            Self::Index { sequence, position } => vec![sequence.as_ref(), position.as_ref()],
+            Self::Span { start, end, .. } => vec![start.as_ref(), end.as_ref()],
             Self::Lambda { body, .. } => vec![body.as_ref()],
             Self::Let { value, .. } => vec![value.as_ref()],
             Self::Branch {
@@ -546,6 +582,23 @@ impl Form {
                 left: apply(left),
                 right: apply(right),
             },
+            Self::Unary { operator, value } => Self::Unary {
+                operator: operator.clone(),
+                value: apply(value),
+            },
+            Self::Index { sequence, position } => Self::Index {
+                sequence: apply(sequence),
+                position: apply(position),
+            },
+            Self::Span {
+                start,
+                end,
+                inclusive,
+            } => Self::Span {
+                start: apply(start),
+                end: apply(end),
+                inclusive: *inclusive,
+            },
             Self::Lambda { parameters, body } => Self::Lambda {
                 parameters: parameters.clone(),
                 body: apply(body),
@@ -596,9 +649,13 @@ impl Form {
             Self::Construct(_) | Self::Path(_) | Self::Number(_) | Self::Constant(_) => 1,
             Self::Variant { .. } => 1,
             Self::Method { .. } | Self::Field { .. } => 1,
-            Self::Assign { operator, .. } | Self::Binary { operator, .. } => {
-                u32::from(!operator.is_empty())
-            }
+            Self::Assign { operator, .. }
+            | Self::Binary { operator, .. }
+            | Self::Unary { operator, .. } => u32::from(!operator.is_empty()),
+            // Indexing names an operation the way a method call does. A span
+            // names only a shape, so like a traversal it anchors nothing of its
+            // own and is counted through its endpoints.
+            Self::Index { .. } => 1,
             Self::Collect { container, .. } => u32::from(container.is_some()),
             // what the arms name is the whole content of a decision
             Self::Select { arms, .. } => arms.iter().map(|arm| arm.pattern.anchors()).sum(),
@@ -1028,6 +1085,18 @@ impl Display for Form {
                 left,
                 right,
             } => write!(formatter, "(binary {operator} {left} {right})"),
+            Self::Unary { operator, value } => write!(formatter, "(unary {operator} {value})"),
+            Self::Index { sequence, position } => {
+                write!(formatter, "(index {sequence} {position})")
+            }
+            Self::Span {
+                start,
+                end,
+                inclusive,
+            } => {
+                let kind = if *inclusive { "span=" } else { "span" };
+                write!(formatter, "({kind} {start} {end})")
+            }
             Self::Lambda { parameters, body } => {
                 formatter.write_str("(lambda (")?;
                 for (index, parameter) in parameters.iter().enumerate() {

@@ -178,6 +178,23 @@ impl Renaming {
                 left: self.boxed(left),
                 right: self.boxed(right),
             },
+            Form::Unary { operator, value } => Form::Unary {
+                operator: operator.clone(),
+                value: self.boxed(value),
+            },
+            Form::Index { sequence, position } => Form::Index {
+                sequence: self.boxed(sequence),
+                position: self.boxed(position),
+            },
+            Form::Span {
+                start,
+                end,
+                inclusive,
+            } => Form::Span {
+                start: self.boxed(start),
+                end: self.boxed(end),
+                inclusive: *inclusive,
+            },
             Form::Lambda { parameters, body } => {
                 let parameters = parameters
                     .iter()

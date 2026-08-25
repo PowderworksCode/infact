@@ -587,6 +587,47 @@ impl Bindings {
             (Form::Return(subject), Form::Return(pattern)) => self.form(subject, pattern),
             (Form::Sequence(subject), Form::Sequence(pattern)) => self.all(subject, pattern),
             (
+                Form::Unary {
+                    operator: subject_operator,
+                    value: subject,
+                },
+                Form::Unary {
+                    operator: pattern_operator,
+                    value: pattern,
+                },
+            ) => subject_operator == pattern_operator && self.form(subject, pattern),
+            (
+                Form::Index {
+                    sequence: subject_sequence,
+                    position: subject_position,
+                },
+                Form::Index {
+                    sequence: pattern_sequence,
+                    position: pattern_position,
+                },
+            ) => {
+                self.form(subject_sequence, pattern_sequence)
+                    && self.form(subject_position, pattern_position)
+            }
+            (
+                Form::Span {
+                    start: subject_start,
+                    end: subject_end,
+                    inclusive: subject_inclusive,
+                },
+                Form::Span {
+                    start: pattern_start,
+                    end: pattern_end,
+                    inclusive: pattern_inclusive,
+                },
+            ) => {
+                // an inclusive bound reaches one element further, so the two
+                // are different spans and must not stand for one another
+                subject_inclusive == pattern_inclusive
+                    && self.form(subject_start, pattern_start)
+                    && self.form(subject_end, pattern_end)
+            }
+            (
                 Form::Opaque {
                     kind: subject_kind,
                     parts: subject_parts,
