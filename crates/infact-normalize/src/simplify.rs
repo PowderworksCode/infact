@@ -176,6 +176,9 @@ impl Form {
             .or_else(|| rebuilt.as_element_traversal())
             .or_else(|| rebuilt.as_pairwise())
             .or_else(|| rebuilt.as_adjacent_pairwise())
+            .or_else(|| rebuilt.as_swap())
+            .or_else(|| rebuilt.as_single_step())
+            .or_else(|| rebuilt.as_guarded_repeat())
             .or_else(|| rebuilt.as_recovered_escape())
             .or_else(|| rebuilt.as_unfolded(fuel))
             .unwrap_or(rebuilt)
@@ -478,6 +481,143 @@ impl Form {
         self.as_indexed_pairwise(outer, first, inner, second, inner_body)
             .or_else(|| Self::as_guarded_pairwise(outer, first, inner, second, inner_body))
             .or_else(|| Self::as_enumerated_pairwise(outer, first, inner, second, inner_body))
+    }
+
+    /// A group of one step is that step.
+    ///
+    /// Braces are punctuation. A body that held one statement stayed a sequence
+    /// of one, so `{ v.swap(i, j) }` and `v.swap(i, j)` were different forms —
+    /// which is exactly the difference the two spellings of a bubble sort came
+    /// down to once the exchange itself was recognized.
+    fn as_single_step(&self) -> Option<Self> {
+        match self {
+            Self::Sequence(steps) => match steps.as_slice() {
+                [only] if !matches!(only, Self::Let { .. }) => Some(only.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Three statements through a temporary are an exchange.
+    ///
+    /// `let t = v[i]; v[i] = v[j]; v[j] = t;` is `v.swap(i, j)`, and it is how
+    /// the exchange is written wherever `swap` is not reached for — 131 files
+    /// in the corpus measured. The temporary must be read back exactly where
+    /// the second assignment puts it, and nothing else may use it, or the three
+    /// statements are moving values around rather than exchanging two.
+    fn as_swap(&self) -> Option<Self> {
+        let Self::Sequence(steps) = self else {
+            return None;
+        };
+        for (index, window) in steps.windows(3).enumerate() {
+            let [
+                Self::Let {
+                    pattern,
+                    value: saved,
+                },
+                Self::Assign {
+                    operator: first_operator,
+                    target: first_target,
+                    value: first_value,
+                },
+                Self::Assign {
+                    operator: second_operator,
+                    target: second_target,
+                    value: second_value,
+                },
+            ] = window
+            else {
+                continue;
+            };
+            let Pattern::Binding(temporary) = pattern.as_ref() else {
+                continue;
+            };
+            if first_operator != "=" || second_operator != "=" {
+                continue;
+            }
+            // What was saved is what the first assignment overwrites, what it
+            // is overwritten with is what the second assignment overwrites, and
+            // the second is given back the saved value. Anything else is not a
+            // two-element exchange.
+            if saved.as_ref() != first_target.as_ref()
+                || first_value.as_ref() != second_target.as_ref()
+                || **second_value != Self::Local(*temporary)
+            {
+                continue;
+            }
+            let (Some((sequence, left)), Some((other, right))) = (
+                indexed_position(first_target),
+                indexed_position(second_target),
+            ) else {
+                continue;
+            };
+            if sequence != other {
+                continue;
+            }
+            // A temporary that outlives the exchange is holding a value for
+            // something else too, and dropping it would drop that.
+            let mut rest = steps.to_vec();
+            let exchange = Self::Swap {
+                sequence: Box::new(sequence.clone()),
+                left: Box::new(left.clone()),
+                right: Box::new(right.clone()),
+            };
+            rest.splice(index..index + 3, [exchange]);
+            if rest.iter().any(|step| step.references_local(*temporary)) {
+                continue;
+            }
+            return Some(Self::Sequence(rest));
+        }
+        None
+    }
+
+    /// A repetition that tests for its own end is a repetition with a guard.
+    ///
+    /// `loop { if done { break } .. }` and `while !done { .. }` are the same
+    /// loop, and the first is how it gets written when the test is awkward to
+    /// put at the top. Reducing one to the other is what stops the two
+    /// spellings of a hand-rolled sort from sharing nothing.
+    fn as_guarded_repeat(&self) -> Option<Self> {
+        let Self::Repeat { condition, body } = self else {
+            return None;
+        };
+        // Only a repetition that has no guard yet, or the rewrite would be
+        // discarding one.
+        if **condition != Self::Constant("true".to_owned()) {
+            return None;
+        }
+        let Self::Sequence(steps) = body.as_ref() else {
+            return None;
+        };
+        let (guard, rest) = steps.split_first()?;
+        let Self::Branch {
+            condition: test,
+            consequence,
+            alternative: None,
+        } = guard
+        else {
+            return None;
+        };
+        if !matches!(consequence.as_ref(), Self::Opaque { kind, .. } if kind == "break_expression")
+        {
+            return None;
+        }
+        // A `break` further in would leave for another reason, and hoisting
+        // only the first test would say the loop runs longer than it does.
+        if rest.iter().any(leaves_a_loop) {
+            return None;
+        }
+        Some(Self::Repeat {
+            condition: Box::new(Self::Unary {
+                operator: "!".to_owned(),
+                value: test.clone(),
+            }),
+            body: Box::new(match rest {
+                [only] => only.clone(),
+                _ => Self::Sequence(rest.to_vec()),
+            }),
+        })
     }
 
     /// A single loop reading each element and the one after it.
@@ -1081,6 +1221,31 @@ fn one_more_than(form: &Form) -> Option<Form> {
             Some(left.as_ref().clone())
         }
         _ => None,
+    }
+}
+
+/// The sequence and position an indexing reads.
+fn indexed_position(form: &Form) -> Option<(&Form, &Form)> {
+    match form {
+        Form::Index { sequence, position } => Some((sequence.as_ref(), position.as_ref())),
+        _ => None,
+    }
+}
+
+/// Whether a step can leave the loop around it.
+///
+/// A `break` nested inside another loop belongs to that one, so only the steps
+/// this loop runs directly are asked.
+fn leaves_a_loop(form: &Form) -> bool {
+    match form {
+        Form::Opaque { kind, .. } if kind == "break_expression" => true,
+        Form::Repeat { .. }
+        | Form::Traverse { .. }
+        | Form::Pairwise { .. }
+        | Form::Transform { .. }
+        | Form::Retain { .. }
+        | Form::Sift { .. } => false,
+        _ => form.children().into_iter().any(leaves_a_loop),
     }
 }
 

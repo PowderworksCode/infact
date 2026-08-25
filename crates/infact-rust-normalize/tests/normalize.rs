@@ -822,3 +822,117 @@ fn adjacent_pairs_differ_from_every_pair() {
     );
     assert_ne!(adjacent, every);
 }
+
+/// An exchange written through a temporary is the exchange.
+///
+/// This is the difference the two spellings of a bubble sort came down to, and
+/// with it they reduce to one form.
+#[test]
+fn a_temporary_swap_agrees_with_the_method() {
+    let method = behavior_of(
+        "fn f(values: &mut [i32]) {
+             for i in 0..values.len() {
+                 for j in 0..values.len() - 1 - i {
+                     if values[j] > values[j + 1] { values.swap(j, j + 1); }
+                 }
+             }
+         }",
+        "f",
+    );
+    let temporary = behavior_of(
+        "fn f(values: &mut [i32]) {
+             for i in 0..values.len() {
+                 for j in 0..values.len() - 1 - i {
+                     if values[j] > values[j + 1] {
+                         let t = values[j];
+                         values[j] = values[j + 1];
+                         values[j + 1] = t;
+                     }
+                 }
+             }
+         }",
+        "f",
+    );
+    assert!(method.contains("(swap"), "{method}");
+    assert_eq!(method, temporary);
+}
+
+/// Moving values around is not exchanging two of them.
+#[test]
+fn a_shift_through_a_temporary_is_not_a_swap() {
+    let form = behavior_of(
+        "fn f(values: &mut [i32], i: usize, j: usize, k: usize) {
+             let t = values[i];
+             values[i] = values[j];
+             values[k] = t;
+         }",
+        "f",
+    );
+    assert!(!form.contains("(swap"), "{form}");
+}
+
+/// A temporary that is used again is not spent on the exchange.
+#[test]
+fn a_temporary_read_afterwards_is_not_a_swap() {
+    let form = behavior_of(
+        "fn f(values: &mut [i32], i: usize, j: usize) -> i32 {
+             let t = values[i];
+             values[i] = values[j];
+             values[j] = t;
+             t
+         }",
+        "f",
+    );
+    assert!(!form.contains("(swap"), "{form}");
+}
+
+/// A `loop` that tests for its own end is a `while`.
+#[test]
+fn a_loop_that_breaks_agrees_with_a_while() {
+    let broken = behavior_of(
+        "fn f(n: usize) -> usize {
+             let mut i = 0;
+             loop { if i >= n { break; } i += 1; }
+             i
+         }",
+        "f",
+    );
+    let guarded = behavior_of(
+        "fn f(n: usize) -> usize {
+             let mut i = 0;
+             while !(i >= n) { i += 1; }
+             i
+         }",
+        "f",
+    );
+    assert!(broken.contains("(repeat"), "{broken}");
+    assert_eq!(broken, guarded);
+}
+
+/// A loop with another way out is not just its first test.
+#[test]
+fn a_loop_with_a_second_break_keeps_its_shape() {
+    let form = behavior_of(
+        "fn f(n: usize, m: usize) -> usize {
+             let mut i = 0;
+             loop { if i >= n { break; } if i == m { break; } i += 1; }
+             i
+         }",
+        "f",
+    );
+    assert!(form.contains("(const true)"), "{form}");
+}
+
+/// A repetition describes work, so a library that loops has a behavior.
+#[test]
+fn a_repetition_is_comparable() {
+    let form = behavior_of(
+        "fn f(values: &mut Vec<i32>) -> i32 {
+             let mut total = 0;
+             while let Some(value) = values.pop() { total += value; }
+             total
+         }",
+        "f",
+    );
+    assert!(form.contains("(repeat"), "{form}");
+}

@@ -586,6 +586,31 @@ impl<'a> Normalizer<'a> {
                     right: Box::new(right),
                 }
             }
+            // `while c { b }` and `loop { b }` are one construct: a loop is a
+            // repetition whose condition is always met, and whatever ends it is
+            // written inside. Spelling that out here is what lets one law reach
+            // both.
+            "while_expression" => {
+                let condition = node
+                    .child_by_field_name("condition")
+                    .map_or(Form::Literal, |child| self.expression(child));
+                let body = node
+                    .child_by_field_name("body")
+                    .map_or(Form::Literal, |child| self.expression(child));
+                Form::Repeat {
+                    condition: Box::new(condition),
+                    body: Box::new(body),
+                }
+            }
+            "loop_expression" => {
+                let body = node
+                    .child_by_field_name("body")
+                    .map_or(Form::Literal, |child| self.expression(child));
+                Form::Repeat {
+                    condition: Box::new(Form::Constant("true".to_owned())),
+                    body: Box::new(body),
+                }
+            }
             // A dereference has already been peeled by `unwrap_noise`, so
             // whatever reaches here applies an operator that changes the value.
             "unary_expression" => {
@@ -900,6 +925,19 @@ impl<'a> Normalizer<'a> {
             let name = call.name.to_owned();
             let receiver = self.expression(peel_adapters(call.receiver, self.source));
             let arguments = self.arguments(node);
+            // Exchanging two elements is an operation, not a call that happens
+            // to be named `swap`. Written out through a temporary it is three
+            // statements, and a form that held one spelling as a method and the
+            // other as assignments could never see they were the same.
+            if name == "swap"
+                && let [left, right] = arguments.as_slice()
+            {
+                return Form::Swap {
+                    sequence: Box::new(receiver),
+                    left: Box::new(left.clone()),
+                    right: Box::new(right.clone()),
+                };
+            }
             return Form::Method {
                 name,
                 receiver: Box::new(receiver),

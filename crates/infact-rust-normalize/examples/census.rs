@@ -65,6 +65,8 @@ fn variant(form: &Form) -> &'static str {
         Form::Assign { .. } => "Assign",
         Form::Binary { .. } => "Binary",
         Form::Unary { .. } => "Unary",
+        Form::Repeat { .. } => "Repeat",
+        Form::Swap { .. } => "Swap",
         Form::Pairwise { .. } => "Pairwise",
         Form::Index { .. } => "Index",
         Form::Span { .. } => "Span",
