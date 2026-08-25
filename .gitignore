@@ -6,3 +6,8 @@ target/
 # built on demand rather than committed. The small packs under `infact-packs/`
 # are the ones this repository's own tests and documentation depend on.
 /generated-packs
+
+# The standard library's catalog. Generated the same way, but 26 MB rather than
+# the few hundred kilobytes a library takes, and reproducible in two seconds
+# from a rustup component. `infact-packs/rust-std/README.md` is the command.
+/infact-packs/rust-std/api/*.json

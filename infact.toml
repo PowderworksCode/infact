@@ -2,7 +2,7 @@
 search-paths = ["../entl/parser-packs"]
 
 [catalogs]
-search-paths = ["infact-packs/rust-itertools/api"]
+search-paths = ["infact-packs/rust-itertools/api", "infact-packs/rust-std/api"]
 
 [behaviors]
 search-paths = ["infact-packs/rust-itertools/behaviors"]

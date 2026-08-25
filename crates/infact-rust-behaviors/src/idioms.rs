@@ -53,28 +53,93 @@ pub enum IdiomRefusal {
 }
 
 /// An algorithm recognized in written-out form.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Each one is a walk over pairs that decides something, and they differ in
+/// three ways only: which pairs the walk has to reach, what it asks of a pair,
+/// and what has to hold before the API may be recommended in its place. Adding
+/// one is answering those three questions, not writing another recognizer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Idiom {
     /// Deciding that no two elements of one sequence are equal.
     AllDifferent,
+    /// Deciding that each element is no greater than the one after it.
+    IsSorted,
 }
 
 impl Idiom {
+    /// Every algorithm this recognizes.
+    pub const ALL: &'static [Self] = &[Self::AllDifferent, Self::IsSorted];
+
     /// The API this recommends, as a path into the package that offers it.
     pub const fn callable_path(&self) -> (&'static str, &'static str) {
         match self {
             Self::AllDifferent => ("itertools", "itertools::Itertools::all_unique"),
+            Self::IsSorted => ("core", "slice::is_sorted"),
+        }
+    }
+
+    /// Which pairs a walk must reach to decide this.
+    ///
+    /// Distinctness is a question about every pair, and it does not matter how
+    /// often each is seen or in which order. Sortedness is a question about
+    /// NEIGHBOURS: the same test over every pair decides something much
+    /// stronger, so admitting the other coverages here would report a sortedness
+    /// API for code that checks far more than sortedness.
+    const fn coverages(&self) -> &'static [Coverage] {
+        match self {
+            Self::AllDifferent => &[Coverage::Once, Coverage::BothWays],
+            Self::IsSorted => &[Coverage::Adjacent],
+        }
+    }
+
+    /// Whether the recommended API needs an allocator.
+    const fn allocates(&self) -> bool {
+        match self {
+            Self::AllDifferent => true,
+            Self::IsSorted => false,
         }
     }
 
     /// What the code needs of its elements to compute this at all.
     ///
-    /// The other half of an [`Condition::ElementBound`] comes from the catalog.
+    /// The other half of a [`Condition::ElementBound`] comes from the catalog.
     /// This half is a property of the written-out shape: comparing two elements
-    /// with `==` is all a pairwise distinctness check asks of them.
+    /// with `==` is all a distinctness check asks of them, and `>` is all a
+    /// sortedness check asks.
     const fn element_bound_of_the_code(&self) -> &'static str {
         match self {
             Self::AllDifferent => "PartialEq",
+            Self::IsSorted => "PartialOrd",
+        }
+    }
+
+    /// Whether a test asks this idiom's question of a pair.
+    ///
+    /// Distinctness asks whether the two are equal, and equality reads the same
+    /// either way round. Sortedness asks whether the EARLIER one is greater,
+    /// and reading that backwards is the opposite question, so the order the
+    /// walk bound them in is part of the test.
+    fn tests_the_pair(&self, condition: &Form, left: u32, right: u32) -> bool {
+        let Form::Binary {
+            operator,
+            left: first,
+            right: second,
+        } = condition
+        else {
+            return false;
+        };
+        let named = |form: &Form, index: u32| *form == Form::Local(index);
+        match self {
+            Self::AllDifferent => {
+                operator == "=="
+                    && ((named(first, left) && named(second, right))
+                        || (named(first, right) && named(second, left)))
+            }
+            // `a > b` and `b < a` are one test written two ways.
+            Self::IsSorted => {
+                (operator == ">" && named(first, left) && named(second, right))
+                    || (operator == "<" && named(first, right) && named(second, left))
+            }
         }
     }
 
@@ -89,13 +154,18 @@ impl Idiom {
     /// The element bound is read off the catalog rather than written here.
     /// Naming a bound from memory would be a claim about a version of a library
     /// that nothing checked, and it is exactly the claim a reader is least able
-    /// to verify.
+    /// to verify. When the two sides agree there is nothing for a reader to
+    /// check, and saying so anyway is noise that makes the real conditions
+    /// harder to see.
     pub fn conditions(&self, callable: &ExternalCallable) -> Vec<Condition> {
         let mut conditions = Vec::new();
-        if let Some(requires) = element_bound(callable) {
+        let code_requires = self.element_bound_of_the_code();
+        if let Some(requires) = element_bound(callable)
+            && requires != code_requires
+        {
             conditions.push(Condition::ElementBound {
                 requires,
-                code_requires: self.element_bound_of_the_code().to_owned(),
+                code_requires: code_requires.to_owned(),
             });
         }
         match self {
@@ -104,6 +174,10 @@ impl Idiom {
                 Condition::ComparisonObservable,
                 Condition::SmallInputsFavourTheCode,
             ]),
+            // Reaching the answer costs the same either way — one pass, the
+            // same comparisons, no allocation — so the only gap is what the two
+            // do where the order runs out.
+            Self::IsSorted => conditions.push(Condition::IncomparableElements),
         }
         conditions
     }
@@ -200,34 +274,30 @@ pub struct Recognized {
     pub shape: Form,
 }
 
-/// Recognize an all-different check in a normalized function body.
+/// Recognize one algorithm in a normalized function body.
 ///
-/// The shape is a walk over each pair of one sequence that, on finding two
-/// equal elements, does something that does not depend on WHICH pair it found.
-/// That is the whole claim: a walk like that computes exactly whether a
-/// duplicate exists, which is what the recommended API answers. What the code
-/// then does with the answer — return it, print it, set a flag — is the
-/// caller's business and does not change what the loop computed.
+/// The shape is a walk over pairs of one sequence that, on a pair answering the
+/// idiom's test, does something that does not depend on WHICH pair it found.
+/// That is the whole claim: a walk like that computes exactly whether such a
+/// pair exists, which is what the recommended API answers. What the code then
+/// does with the answer — return it, print it, set a flag — is the caller's
+/// business and does not change what the loop computed.
 ///
-/// Either coverage will do, and that is worth saying explicitly: a square
-/// guarded loop reaches each pair twice, and every reaction accepted below is
-/// idempotent — returning twice is returning, setting a flag to the same
-/// constant twice is setting it. The reaction that is NOT idempotent is
-/// counting, and counting is refused for its own reasons, so nothing here
-/// depends on which spelling was written.
-///
-/// Returns the sequence the check is over, which is what a caller would put the
-/// recommended call on.
-pub fn all_different(form: &Form, context: Context) -> Result<Recognized, IdiomRefusal> {
+/// For distinctness either of the unordered coverages will do, and that is
+/// worth saying explicitly: a square guarded loop reaches each pair twice, and
+/// every reaction accepted below is idempotent — returning twice is returning,
+/// setting a flag to the same constant twice is setting it. The reaction that
+/// is NOT idempotent is counting, and counting is refused for its own reasons.
+pub fn recognize(idiom: Idiom, form: &Form, context: Context) -> Result<Recognized, IdiomRefusal> {
     // Why the nearest thing to the shape was not it. Finding no walk at all is
     // the uninformative answer, so anything else outranks it.
     let mut refusal = IdiomRefusal::NotThisShape;
-    for coverage in [Coverage::Once, Coverage::BothWays] {
-        let pattern = pairwise_decision(coverage);
+    for coverage in idiom.coverages() {
+        let pattern = pairwise_decision(*coverage);
         for resolved in form.resolve_all(&pattern) {
-            match decides_distinctness(&resolved) {
+            match decides(idiom, &resolved) {
                 Ok(sequence) => {
-                    if !context.can_allocate {
+                    if idiom.allocates() && !context.can_allocate {
                         return Err(IdiomRefusal::CannotAllocate);
                     }
                     let mut shape = pattern.clone();
@@ -244,13 +314,18 @@ pub fn all_different(form: &Form, context: Context) -> Result<Recognized, IdiomR
     Err(refusal)
 }
 
-/// Whether one match of the pairwise shape decides distinctness.
+/// Recognize a distinctness check, which is the idiom this began with.
+pub fn all_different(form: &Form, context: Context) -> Result<Recognized, IdiomRefusal> {
+    recognize(Idiom::AllDifferent, form, context)
+}
+
+/// Whether one match of the pairwise shape decides the idiom's question.
 ///
 /// Every question here is asked of a piece the matcher handed over, and the two
 /// names are the subject's own — a pattern numbers its roles by its own
 /// counting, and asking whether the reaction mentions the pattern's `Local(0)`
 /// would be asking about the wrong function's names.
-fn decides_distinctness(resolved: &Resolved) -> Result<Form, IdiomRefusal> {
+fn decides(idiom: Idiom, resolved: &Resolved) -> Result<Form, IdiomRefusal> {
     let (Some(sequence), Some(condition), Some(consequence)) =
         (resolved.hole(0), resolved.hole(1), resolved.hole(2))
     else {
@@ -259,11 +334,11 @@ fn decides_distinctness(resolved: &Resolved) -> Result<Form, IdiomRefusal> {
     let (Some(left), Some(right)) = (resolved.local(0), resolved.local(1)) else {
         return Err(IdiomRefusal::NotThisShape);
     };
-    if !compares_the_pair(condition, left, right) {
+    if !idiom.tests_the_pair(condition, left, right) {
         return Err(IdiomRefusal::DecidesSomethingElse);
     }
     // Reading either element means the pair is being used for its content, and
-    // an API that answers only whether a duplicate exists cannot supply that.
+    // an API that answers only whether such a pair exists cannot supply that.
     if consequence.references_local(left) || consequence.references_local(right) {
         return Err(IdiomRefusal::EscapesWithAValue);
     }
@@ -273,7 +348,7 @@ fn decides_distinctness(resolved: &Resolved) -> Result<Form, IdiomRefusal> {
     Ok(sequence.clone())
 }
 
-/// Whether a reaction to an equal pair records only that one was found.
+/// Whether a reaction to a matching pair records only that one was found.
 ///
 /// Two spellings, and between them they are how the check is written. Leaving
 /// the function ends the walk, so nothing after it runs and the duplicate has
@@ -332,27 +407,6 @@ fn is_inert_beside_recording(step: &Form) -> bool {
             if kind == "break_expression"
                 || kind == "continue_expression"
                 || kind.starts_with("macro:"))
-}
-
-/// Whether a test asks whether the two elements of a pair are equal.
-///
-/// Equality only. `<` over every pair is a sortedness check and `!=` is the
-/// opposite question, and both would be told to use a distinctness API by a
-/// test that merely looked for a comparison.
-fn compares_the_pair(condition: &Form, left: u32, right: u32) -> bool {
-    let Form::Binary {
-        operator,
-        left: first,
-        right: second,
-    } = condition
-    else {
-        return false;
-    };
-    if operator != "==" {
-        return false;
-    }
-    let named = |form: &Form, index: u32| *form == Form::Local(index);
-    (named(first, left) && named(second, right)) || (named(first, right) && named(second, left))
 }
 
 #[cfg(test)]
@@ -612,17 +666,148 @@ mod tests {
         );
     }
 
+    /// A sortedness check asks its question of neighbours, in order.
+    #[test]
+    fn an_ordered_test_over_neighbours_is_is_sorted() {
+        let ordered = Form::Binary {
+            operator: ">".to_owned(),
+            left: Box::new(Form::Local(0)),
+            right: Box::new(Form::Local(1)),
+        };
+        let form = adjacent(escaping(ordered, Form::Constant("false".to_owned())));
+        assert_eq!(
+            recognize(Idiom::IsSorted, &form, allowed()).map(|found| found.sequence),
+            Ok(Form::Free(0))
+        );
+    }
+
+    /// Reading the comparison backwards is the opposite question.
+    #[test]
+    fn a_reversed_ordering_is_not_is_sorted() {
+        let reversed = Form::Binary {
+            operator: ">".to_owned(),
+            left: Box::new(Form::Local(1)),
+            right: Box::new(Form::Local(0)),
+        };
+        let form = adjacent(escaping(reversed, Form::Constant("false".to_owned())));
+        assert_eq!(
+            recognize(Idiom::IsSorted, &form, allowed()),
+            Err(IdiomRefusal::DecidesSomethingElse)
+        );
+    }
+
+    /// Sortedness is a question about neighbours, not about every pair.
+    ///
+    /// `a > b` over every pair says every element is no greater than every
+    /// later one, which is far more than sortedness and would be a much
+    /// stronger claim to summarize as `is_sorted`.
+    #[test]
+    fn an_ordered_test_over_every_pair_is_not_is_sorted() {
+        let ordered = Form::Binary {
+            operator: ">".to_owned(),
+            left: Box::new(Form::Local(0)),
+            right: Box::new(Form::Local(1)),
+        };
+        let form = pairwise(escaping(ordered, Form::Constant("false".to_owned())));
+        assert_eq!(
+            recognize(Idiom::IsSorted, &form, allowed()),
+            Err(IdiomRefusal::NotThisShape)
+        );
+    }
+
+    /// Distinctness is not decided by a walk over neighbours.
+    #[test]
+    fn an_equality_test_over_neighbours_is_not_all_different() {
+        let form = adjacent(escaping(equal_pair(), Form::Constant("false".to_owned())));
+        assert_eq!(
+            all_different(&form, allowed()),
+            Err(IdiomRefusal::NotThisShape)
+        );
+    }
+
+    /// A sortedness check allocates nothing, so a `const fn` may still have it.
+    #[test]
+    fn is_sorted_is_offered_where_nothing_may_allocate() {
+        let ordered = Form::Binary {
+            operator: ">".to_owned(),
+            left: Box::new(Form::Local(0)),
+            right: Box::new(Form::Local(1)),
+        };
+        let form = adjacent(escaping(ordered, Form::Constant("false".to_owned())));
+        let context = Context {
+            can_allocate: false,
+        };
+        assert!(recognize(Idiom::IsSorted, &form, context).is_ok());
+    }
+
+    /// Where both sides need the same of the elements there is nothing to check.
+    #[test]
+    fn a_bound_the_code_already_needs_is_not_a_condition() {
+        let conditions = Idiom::IsSorted.conditions(&excerpted("slice-is-sorted"));
+        assert!(
+            !conditions
+                .iter()
+                .any(|condition| matches!(condition, Condition::ElementBound { .. })),
+            "{conditions:?}"
+        );
+        assert_eq!(conditions, vec![Condition::IncomparableElements]);
+    }
+
+    fn adjacent(body: Form) -> Form {
+        Form::Sequence(vec![
+            Form::Pairwise {
+                sequence: Box::new(Form::Free(0)),
+                left: Box::new(Pattern::Binding(0)),
+                right: Box::new(Pattern::Binding(1)),
+                body: Box::new(body),
+                coverage: Coverage::Adjacent,
+            },
+            Form::Constant("true".to_owned()),
+        ])
+    }
+
+    /// One catalogued callable, copied out of a generated catalog.
+    ///
+    /// The standard library's catalog is not committed — 26 MB of generated
+    /// JSON, reproducible from a rustup component — so a test that needs a real
+    /// signature reads the excerpt rather than a pack that may not be built.
+    fn excerpted(name: &str) -> ExternalCallable {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/catalog")
+            .join(format!("{name}.json"));
+        serde_json::from_slice(&std::fs::read(&path).expect("catalog excerpt"))
+            .expect("parsing the excerpt")
+    }
+
+    /// A shipped catalog entry, read rather than written out.
+    fn catalogued(path: &str) -> ExternalCallable {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../infact-packs");
+        for api in ["rust-itertools/api", "rust-std/api"] {
+            let Ok(entries) = std::fs::read_dir(root.join(api)) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Ok(bytes) = std::fs::read(entry.path()) else {
+                    continue;
+                };
+                let Ok(catalog) = serde_json::from_slice::<infact_core::ExternalCatalog>(&bytes)
+                else {
+                    continue;
+                };
+                if let Some(found) = catalog
+                    .callables
+                    .into_iter()
+                    .find(|callable| callable.path == path)
+                {
+                    return found;
+                }
+            }
+        }
+        panic!("{path} is in no shipped catalog");
+    }
+
     /// The catalog entry the recognizer points at, as it is shipped.
     fn all_unique() -> ExternalCallable {
-        let catalog = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../infact-packs/rust-itertools/api/itertools-0.15.0.json");
-        let catalog: infact_core::ExternalCatalog =
-            serde_json::from_slice(&std::fs::read(catalog).expect("itertools catalog"))
-                .expect("parsing the catalog");
-        catalog
-            .callables
-            .into_iter()
-            .find(|callable| callable.path == Idiom::AllDifferent.callable_path().1)
-            .expect("all_unique in the catalog")
+        catalogued(Idiom::AllDifferent.callable_path().1)
     }
 }

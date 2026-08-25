@@ -364,6 +364,25 @@ pub enum Coverage {
     /// [`Coverage::Once`] about anything order- or count-sensitive and exactly
     /// as much about anything that is neither.
     BothWays,
+    /// Each element with the one after it: the `windows(2)` walk.
+    ///
+    /// A single loop, not a nested one, and the only coverage where `left` and
+    /// `right` are neighbours rather than an arbitrary pair. That makes it the
+    /// one that says something about ORDER: a test over adjacent pairs decides
+    /// whether the sequence is sorted, and the same test over every pair
+    /// decides something much stronger.
+    Adjacent,
+}
+
+/// Whether a position is one past a named one.
+///
+/// Canonicalized arithmetic puts the name first, but both orders are accepted
+/// so that a rewrite does not depend on which way the ordering happened to fall.
+fn is_next_position(form: &Form, index: u32) -> bool {
+    matches!(form, Form::Binary { operator, left, right }
+        if operator == "+"
+            && ((**left == Form::Local(index) && **right == Form::Number("1".to_owned()))
+                || (**right == Form::Local(index) && **left == Form::Number("1".to_owned()))))
 }
 
 /// Which way a walk runs.
@@ -1127,6 +1146,68 @@ impl Form {
         Some(())
     }
 
+    /// The largest binding number anything here introduces or mentions.
+    ///
+    /// A rewrite that turns one name into two needs a number for the second,
+    /// and reusing one already in play would silently identify two different
+    /// values. Renaming makes the numbers canonical afterwards, so any unused
+    /// one will do.
+    fn highest_binding(&self) -> Option<u32> {
+        let here = match self {
+            Self::Local(index) => Some(*index),
+            _ => None,
+        };
+        self.children()
+            .into_iter()
+            .filter_map(Self::highest_binding)
+            .chain(here)
+            .max()
+    }
+
+    /// Whether a body reads a sequence only by indexing it at a position and
+    /// its successor.
+    ///
+    /// The adjacent-pairs licence, and narrower than it looks: `v[i]` and
+    /// `v[i + 1]` are the only two readings allowed, so `v[i + 2]`, a bare `i`,
+    /// or any other use of `v` declines. Without that, a loop that happens to
+    /// read a neighbour among other things would be reported as a walk over
+    /// neighbours, which is not what it does.
+    fn adjacent_only(&self, sequence: &Self, index: u32) -> bool {
+        if let Self::Index {
+            sequence: indexed,
+            position,
+        } = self
+            && indexed.as_ref() == sequence
+            && (**position == Self::Local(index) || is_next_position(position, index))
+        {
+            return true;
+        }
+        if self == sequence || *self == Self::Local(index) {
+            return false;
+        }
+        self.children()
+            .into_iter()
+            .all(|child| child.adjacent_only(sequence, index))
+    }
+
+    /// The same body with each neighbour reading replaced by its element.
+    fn with_adjacent_elements(&self, sequence: &Self, index: u32, successor: u32) -> Self {
+        if let Self::Index {
+            sequence: indexed,
+            position,
+        } = self
+            && indexed.as_ref() == sequence
+        {
+            if **position == Self::Local(index) {
+                return Self::Local(index);
+            }
+            if is_next_position(position, index) {
+                return Self::Local(successor);
+            }
+        }
+        self.map_children(&|child| child.with_adjacent_elements(sequence, index, successor))
+    }
+
     /// Whether a body reads a sequence only by indexing it at named positions.
     ///
     /// This is the licence to forget the index. `for i in 0..v.len()` visits
@@ -1289,6 +1370,7 @@ impl Display for Form {
                 let kind = match coverage {
                     Coverage::Once => "pairwise",
                     Coverage::BothWays => "pairwise-both-ways",
+                    Coverage::Adjacent => "pairwise-adjacent",
                 };
                 write!(formatter, "({kind} {sequence} {left} {right} {body})")
             }

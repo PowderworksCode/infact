@@ -163,6 +163,9 @@ fn lower(form: &Form, level: usize, guesses: &Guesses, names: &Names) -> String 
                 Coverage::Once => "tuple_combinations()",
                 // Each pair both ways round is what `permutations(2)` yields.
                 Coverage::BothWays => "permutations(2)",
+                // `windows(2)` yields slices, not pairs; `tuple_windows` yields
+                // the pair this form holds.
+                Coverage::Adjacent => "tuple_windows()",
             };
             format!(
                 "for ({}, {}) in {}.{call} {{\n{}{}\n{}}}",

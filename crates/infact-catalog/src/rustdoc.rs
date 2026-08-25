@@ -84,6 +84,67 @@ pub fn build_catalog(request: CatalogRequest<'_>) -> Result<ExternalCatalog> {
         }
     }
 
+    // Methods written on a type rather than in a trait. They are associated
+    // items, so the free-function pass below skips them, and they belong to no
+    // trait, so the pass above never saw them: `Vec::push` and `<[T]>::sorted`
+    // fell between the two and the catalog held only what a library declared in
+    // traits. For core that was five thousand methods, and for the standard
+    // library it is most of what anyone calls.
+    for item in index.values() {
+        let item = object(item, "item")?;
+        let Some(implementation) = item
+            .get("inner")
+            .and_then(Value::as_object)
+            .and_then(|inner| inner.get("impl"))
+            .and_then(Value::as_object)
+        else {
+            continue;
+        };
+        // A trait implementation's methods belong to the trait, which the pass
+        // above already catalogued from its declaration.
+        if implementation
+            .get("trait")
+            .is_some_and(|value| !value.is_null())
+        {
+            continue;
+        }
+        let Some(container) = implemented_type(implementation.get("for"), paths) else {
+            continue;
+        };
+        for method_id in implementation
+            .get("items")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(method) = method_id
+                .as_u64()
+                .and_then(|id| index.get(&id.to_string()))
+                .and_then(Value::as_object)
+            else {
+                continue;
+            };
+            let Some(function) = method
+                .get("inner")
+                .and_then(Value::as_object)
+                .and_then(|inner| inner.get("function"))
+                .and_then(Value::as_object)
+            else {
+                continue;
+            };
+            let Some(name) = string(method.get("name")) else {
+                continue;
+            };
+            callables.push(ExternalCallable {
+                path: format!("{container}::{name}"),
+                container: CallableContainer::Type {
+                    path: container.clone(),
+                },
+                signature: Some(signature(function)?),
+            });
+        }
+    }
+
     for (id, item) in index {
         if associated_items.contains(id) {
             continue;
@@ -316,6 +377,33 @@ fn type_arguments(value: Option<&Value>) -> Result<Vec<ExternalType>> {
         .filter_map(|argument| argument.get("type"))
         .map(external_type)
         .collect()
+}
+
+/// The name of the type an inherent implementation is written on.
+///
+/// A nominal type is named by the path the crate publishes it under. A built-in
+/// one has no path to look up and is named the way the language names it, which
+/// is also how its documentation is addressed: `slice`, `str`, `u32`. Anything
+/// else — a raw pointer, a function type — has no name a caller would write a
+/// method path with, and is left out rather than given an invented one.
+fn implemented_type(value: Option<&Value>, paths: &Map<String, Value>) -> Option<String> {
+    let target = value?.as_object()?;
+    if let Some(resolved) = target.get("resolved_path").and_then(Value::as_object) {
+        let id = resolved.get("id")?.as_u64()?.to_string();
+        // The published path is what a caller writes. Falling back to the bare
+        // name would put two types with one name under a single heading.
+        return public_path(paths, &id);
+    }
+    if let Some(primitive) = target.get("primitive").and_then(Value::as_str) {
+        return Some(primitive.to_owned());
+    }
+    if target.contains_key("slice") {
+        return Some("slice".to_owned());
+    }
+    if target.contains_key("array") {
+        return Some("array".to_owned());
+    }
+    None
 }
 
 fn public_path(paths: &Map<String, Value>, id: &str) -> Option<String> {

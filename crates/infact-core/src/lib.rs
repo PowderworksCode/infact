@@ -303,8 +303,21 @@ pub struct ExternalCallable {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CallableContainer {
-    Trait { path: String },
-    Module { path: String },
+    Trait {
+        path: String,
+    },
+    Module {
+        path: String,
+    },
+    /// The type a method is written on, outside any trait.
+    ///
+    /// `Vec::push` and `<[T]>::is_sorted` belong to no trait and no module, and
+    /// without this they belonged to nothing and were dropped. In core alone
+    /// that is 5,621 methods — most of what a caller of the standard library
+    /// actually calls.
+    Type {
+        path: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -439,6 +452,14 @@ pub enum Condition {
     /// A quadratic scan of four elements beats allocating a hash set. Which one
     /// this is depends on the caller, and nothing in the callee says.
     SmallInputsFavourTheCode,
+    /// The API and the code disagree where two elements are incomparable.
+    ///
+    /// A hand-written sortedness check refuses only on a strict `a > b`; the
+    /// API accepts only on `a <= b`. Under a total order those are the same
+    /// question. Under a partial one they are not — two `f64` NaNs are neither
+    /// greater nor less than each other, so the loop calls the sequence sorted
+    /// and the API does not.
+    IncomparableElements,
 }
 
 impl std::fmt::Display for Condition {
@@ -458,6 +479,9 @@ impl std::fmt::Display for Condition {
             Self::SmallInputsFavourTheCode => {
                 formatter.write_str("the code is faster at small sizes")
             }
+            Self::IncomparableElements => formatter.write_str(
+                "two elements that cannot be compared are sorted to the code and not to the API",
+            ),
         }
     }
 }
