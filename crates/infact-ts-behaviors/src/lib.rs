@@ -355,6 +355,7 @@ fn behavior_match(
             alternatives,
             span,
             fused,
+            conditions: Vec::new(),
         },
         derivation: Derivation {
             analyzer: "typescript.library-behaviors".to_owned(),

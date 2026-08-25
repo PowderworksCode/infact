@@ -397,6 +397,69 @@ pub struct LibraryBehaviorMatch {
     /// something else is interleaved with it.
     #[serde(default)]
     pub fused: bool,
+    /// What has to hold for the swap to be sound, that this cannot check.
+    ///
+    /// A match says the code computes what the API computes. It does not say
+    /// the two are interchangeable here, and for some behaviors they are not:
+    /// the API may need a stronger bound on the element type, or allocate where
+    /// the code does not, or reach the same answer by a different route that a
+    /// caller could tell apart. None of that is in the syntax.
+    ///
+    /// Reporting the gap is what makes this a recommendation rather than a
+    /// lint. Where the gap IS visible — a `const fn` that cannot allocate at
+    /// all — the recognizer refuses instead, because a condition a reader must
+    /// check is worse than a finding they never see.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<Condition>,
+}
+
+/// Something a recommendation depends on that the syntax does not settle.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Condition {
+    /// The API needs a bound on the element type that the code does not.
+    ///
+    /// A pairwise `==` needs only `PartialEq`; reaching the same answer through
+    /// a hash set needs `Eq + Hash`. The difference is not pedantic: `f64` is
+    /// `PartialEq` and not `Eq`, and two `NaN`s are unequal to each other, so
+    /// the loop calls them distinct and the set cannot be built at all.
+    ElementBound {
+        requires: String,
+        code_requires: String,
+    },
+    /// The API allocates where the code does not.
+    Allocates,
+    /// The API reaches the answer without making the comparisons the code makes.
+    ///
+    /// An operator with an observable effect — one that logs, counts, or panics
+    /// — runs a quadratic number of times here and need not run at all there.
+    ComparisonObservable,
+    /// The code is cheaper at the sizes it is actually called with.
+    ///
+    /// A quadratic scan of four elements beats allocating a hash set. Which one
+    /// this is depends on the caller, and nothing in the callee says.
+    SmallInputsFavourTheCode,
+}
+
+impl std::fmt::Display for Condition {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ElementBound {
+                requires,
+                code_requires,
+            } => write!(
+                formatter,
+                "the element type must be {requires}; the code needs only {code_requires}"
+            ),
+            Self::Allocates => formatter.write_str("the API allocates and the code does not"),
+            Self::ComparisonObservable => formatter.write_str(
+                "a comparison with an observable effect runs here and need not run there",
+            ),
+            Self::SmallInputsFavourTheCode => {
+                formatter.write_str("the code is faster at small sizes")
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

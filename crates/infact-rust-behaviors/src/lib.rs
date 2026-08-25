@@ -1,6 +1,7 @@
 //! Facts matching Rust code behavior to external library APIs.
 
 mod derivation;
+mod idioms;
 mod macro_derivation;
 mod pack;
 
@@ -21,6 +22,7 @@ use tree_sitter::Node;
 pub use derivation::{
     DerivedLibrary, derive_behavior, derive_catalog, derive_library, is_comparable, is_reportable,
 };
+pub use idioms::{Context, Idiom, IdiomRefusal, all_different};
 pub use macro_derivation::{MacroDerivationRequest, derive_macro_behavior};
 pub use pack::{
     BuiltLibraryPack, LibraryPackRequest, behavior_file_name, build_library_pack, registry_sources,
@@ -199,6 +201,10 @@ pub fn analyze_repository(
             // is put in the same one. Locating stays on the form as written,
             // because that is what the spans were taken from.
             let candidate = function.form.simplify();
+            // An idiom is recognized directly rather than derived, because no
+            // library writes the thing it replaces. Same fact, same evidence,
+            // different route to the shape.
+            collect_idiom_matches(file, &function, &candidate, catalogs, &mut matches)?;
             // Behaviors that share a form are indistinguishable here by
             // construction, so all of them are kept and reported together.
             let mut best: BTreeMap<&Form, (Vec<&&DerivedLibraryBehavior>, bool)> = BTreeMap::new();
@@ -409,6 +415,7 @@ fn behavior_match(
             alternatives,
             span,
             fused,
+            conditions: Vec::new(),
         },
         derivation: Derivation {
             analyzer: "rust.library-behaviors".to_owned(),
@@ -735,6 +742,76 @@ fn collect_enum_macro_matches(
     Ok(())
 }
 
+/// Report the algorithms recognized in one normalized function.
+///
+/// An idiom names the API it recommends by path, so it can only be reported
+/// when a catalog for that package is loaded — the same rule derived behaviors
+/// follow, and for the same reason: naming a version that was never read would
+/// be inventing provenance.
+fn collect_idiom_matches(
+    file: &ParsedFile,
+    function: &infact_rust_normalize::NormalizedFunction,
+    candidate: &Form,
+    catalogs: &[ExternalCatalog],
+    output: &mut BTreeSet<Fact<LibraryBehaviorMatch>>,
+) -> Result<()> {
+    let context = idioms::Context {
+        can_allocate: !function.is_const,
+    };
+    if idioms::all_different(candidate, context).is_err() {
+        return Ok(());
+    }
+    let idiom = idioms::Idiom::AllDifferent;
+    let (package, path) = idiom.callable_path();
+    let Some(catalog) = catalogs.iter().find(|catalog| {
+        catalog.package == package
+            && catalog
+                .callables
+                .iter()
+                .any(|callable| callable.path == path)
+    }) else {
+        return Ok(());
+    };
+    output.insert(Fact {
+        value: LibraryBehaviorMatch {
+            target: LibraryTarget::Callable {
+                package: catalog.package.clone(),
+                version: catalog.version.clone(),
+                path: path.to_owned(),
+                catalog_sha256: catalog.source_sha256.clone(),
+            },
+            // The recognizer names one API, so there is nothing to choose
+            // between; what is uncertain about the recommendation is in the
+            // conditions rather than in which callable it points at.
+            alternatives: Vec::new(),
+            fused: false,
+            span: SourceSpan {
+                path: file.path.clone(),
+                start_byte: Some(function.start_byte),
+                end_byte: Some(function.end_byte),
+                start_line: function.start_line,
+                end_line: function.end_line,
+                start_column: None,
+                end_column: None,
+            },
+            conditions: idiom.conditions(),
+        },
+        derivation: Derivation {
+            analyzer: "rust.idioms".to_owned(),
+            analyzer_version: env!("CARGO_PKG_VERSION").to_owned(),
+            inputs: vec![InputEvidence {
+                path: file.path.clone(),
+                content_sha256: file.provenance.source_sha256.clone(),
+                parser_id: file.provenance.parser_id.clone(),
+                parser_version: file.provenance.parser_version.clone(),
+                grammar_sha256: file.provenance.grammar_sha256.clone(),
+                queries_sha256: file.provenance.queries_sha256.clone(),
+            }],
+        },
+    });
+    Ok(())
+}
+
 fn mapping_is_exhaustive(mappings: &BTreeMap<String, String>, variants: &[String]) -> bool {
     mappings.keys().cloned().collect::<BTreeSet<_>>()
         == variants.iter().cloned().collect::<BTreeSet<_>>()
@@ -783,6 +860,7 @@ fn macro_behavior_match(
             // a derive names exactly one macro
             alternatives: Vec::new(),
             fused: false,
+            conditions: Vec::new(),
             span: SourceSpan {
                 path: file.path.clone(),
                 start_byte: Some(start_byte),
