@@ -7,9 +7,15 @@ that ships as a rustup component rather than from a checkout of the compiler:
 rustup component add rust-docs-json --toolchain nightly
 J=$(rustc +nightly --print sysroot)/share/doc/rust/json
 V=$(rustc +nightly --version | awk '{print $2}')
+mkdir -p infact-packs/rust-std/api
 infact catalog "$J/core.json" --package core --version "$V" \
     --output "infact-packs/rust-std/api/core-$V.json"
 ```
+
+The `mkdir` is not decoration. The catalog is not committed, git does not track
+an empty directory, and `--output` does not create the path it is given — so on
+a fresh checkout `api/` does not exist and the command fails with a bare
+`No such file or directory`.
 
 `alloc.json` and `std.json` build the same way and are not kept here, because
 nothing yet matches against anything they add. Regenerating one takes two
