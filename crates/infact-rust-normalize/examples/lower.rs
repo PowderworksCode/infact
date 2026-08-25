@@ -149,6 +149,25 @@ fn lower(form: &Form, level: usize, guesses: &Guesses, names: &Names) -> String 
                 indent(level)
             )
         }
+        // The pairs are what the form records; which loop bounds produced them
+        // is not, so this is emitted as the library call that offers them.
+        Form::Pairwise {
+            sequence,
+            left,
+            right,
+            body,
+        } => {
+            guesses.note("Pairwise: the loop bounds that produced the pairs are not recorded");
+            format!(
+                "for ({}, {}) in {}.tuple_combinations() {{\n{}{}\n{}}}",
+                pattern(left, names),
+                pattern(right, names),
+                sub(sequence),
+                indent(level + 1),
+                lower(body, level + 1, guesses, names),
+                indent(level)
+            )
+        }
         // Every adapter that fed the sequence was peeled off as noise, so the
         // receiver is emitted bare and will not be an iterator.
         Form::Transform {
@@ -229,6 +248,16 @@ fn lower(form: &Form, level: usize, guesses: &Guesses, names: &Names) -> String 
             left,
             right,
         } => format!("({} {operator} {})", sub(left), sub(right)),
+        Form::Unary { operator, value } => format!("{operator}{}", sub(value)),
+        Form::Index { sequence, position } => format!("{}[{}]", sub(sequence), sub(position)),
+        Form::Span {
+            start,
+            end,
+            inclusive,
+        } => {
+            let operator = if *inclusive { "..=" } else { ".." };
+            format!("{}{operator}{}", sub(start), sub(end))
+        }
         Form::Lambda { parameters, body } => format!(
             "|{}| {}",
             parameters

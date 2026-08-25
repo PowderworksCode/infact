@@ -201,6 +201,31 @@ pub enum Form {
         #[serde(default, skip_serializing_if = "Direction::is_forward")]
         direction: Direction,
     },
+    /// Visiting each unordered pair of a sequence's elements, once each.
+    ///
+    /// A nested loop over one collection is what a hand-rolled pairwise
+    /// algorithm is made of, and the index arithmetic in its bounds is the
+    /// whole statement of which pairs it visits. Left as two traversals, the
+    /// spellings share nothing: `for i in 0..v.len() { for j in i+1.. }` and
+    /// `v.iter().enumerate()` with `skip(i + 1)` have no subterm in common,
+    /// though they visit the same pairs in the same order.
+    ///
+    /// This is the shape `itertools::tuple_combinations` offers, which is what
+    /// earns it a place beside `Sift` and `Retain` rather than making it a
+    /// special case: it is a normalization that lets a written-out loop compare
+    /// against a library API that exists.
+    ///
+    /// Only the distinct-pairs walk reduces to this. Walking adjacent pairs is
+    /// `windows(2)` and a different coverage; walking every ordered pair
+    /// including an element with itself is a third. Both stay two traversals
+    /// until something needs them, because a coverage field with one inhabitant
+    /// says nothing and a wrong one would claim a walk the code does not make.
+    Pairwise {
+        sequence: Box<Form>,
+        left: Box<Pattern>,
+        right: Box<Pattern>,
+        body: Box<Form>,
+    },
     /// Producing a new sequence by transforming each element.
     Transform {
         sequence: Box<Form>,
@@ -245,6 +270,39 @@ pub enum Form {
         operator: String,
         left: Box<Form>,
         right: Box<Form>,
+    },
+    /// An operator applied to one value: `!found`, `-count`.
+    ///
+    /// Negation used to be stripped as noise alongside parentheses and `&`,
+    /// which made a predicate and its opposite the same form: `if !seen.insert(x)`
+    /// and `if seen.insert(x)` both reduced to `(branch (method insert ..) ..)`.
+    /// A library that returns on one and a caller that returns on the other do
+    /// opposite things, so the operator is behavior. A dereference genuinely is
+    /// noise and is still stripped by the frontend, which is why this records
+    /// the operator rather than the syntax it came from.
+    Unary {
+        operator: String,
+        value: Box<Form>,
+    },
+    /// Reading a sequence at a position.
+    ///
+    /// Held apart from `Opaque` because the two parts have roles: which one is
+    /// the sequence and which is the position is the whole content of an
+    /// indexing, and `Opaque` compares parts by position alone.
+    Index {
+        sequence: Box<Form>,
+        position: Box<Form>,
+    },
+    /// A span of integers, as a loop over indices walks.
+    ///
+    /// `inclusive` is carried rather than folded into `end`, because folding
+    /// would need arithmetic on an expression that is usually symbolic. Left in
+    /// `Opaque`, `0..n` and `0..=n` had the same kind and the same arity and
+    /// unified with each other, which is an off-by-one reported as a match.
+    Span {
+        start: Box<Form>,
+        end: Box<Form>,
+        inclusive: bool,
     },
     Lambda {
         parameters: Vec<Pattern>,
@@ -367,6 +425,7 @@ impl Form {
             Self::Traverse { sequence, body, .. }
             | Self::Sift { sequence, body, .. }
             | Self::Transform { sequence, body, .. }
+            | Self::Pairwise { sequence, body, .. }
             | Self::Retain { sequence, body, .. } => vec![sequence.as_ref(), body.as_ref()],
             Self::Accumulate {
                 sequence,
@@ -377,6 +436,9 @@ impl Form {
             Self::Collect { sequence, .. } => vec![sequence.as_ref()],
             Self::Assign { target, value, .. } => vec![target.as_ref(), value.as_ref()],
             Self::Binary { left, right, .. } => vec![left.as_ref(), right.as_ref()],
+            Self::Unary { value, .. } => vec![value.as_ref()],
+            Self::Index { sequence, position } => vec![sequence.as_ref(), position.as_ref()],
+            Self::Span { start, end, .. } => vec![start.as_ref(), end.as_ref()],
             Self::Lambda { body, .. } => vec![body.as_ref()],
             Self::Let { value, .. } => vec![value.as_ref()],
             Self::Branch {
@@ -427,6 +489,7 @@ impl Form {
             {
                 true
             }
+            Self::Pairwise { left, right, .. } if left.binds(index) || right.binds(index) => true,
             _ => self
                 .children()
                 .into_iter()
@@ -490,6 +553,17 @@ impl Form {
                 item: item.clone(),
                 body: apply(body),
             },
+            Self::Pairwise {
+                sequence,
+                left,
+                right,
+                body,
+            } => Self::Pairwise {
+                sequence: apply(sequence),
+                left: left.clone(),
+                right: right.clone(),
+                body: apply(body),
+            },
             Self::Transform {
                 sequence,
                 item,
@@ -546,6 +620,23 @@ impl Form {
                 left: apply(left),
                 right: apply(right),
             },
+            Self::Unary { operator, value } => Self::Unary {
+                operator: operator.clone(),
+                value: apply(value),
+            },
+            Self::Index { sequence, position } => Self::Index {
+                sequence: apply(sequence),
+                position: apply(position),
+            },
+            Self::Span {
+                start,
+                end,
+                inclusive,
+            } => Self::Span {
+                start: apply(start),
+                end: apply(end),
+                inclusive: *inclusive,
+            },
             Self::Lambda { parameters, body } => Self::Lambda {
                 parameters: parameters.clone(),
                 body: apply(body),
@@ -596,9 +687,13 @@ impl Form {
             Self::Construct(_) | Self::Path(_) | Self::Number(_) | Self::Constant(_) => 1,
             Self::Variant { .. } => 1,
             Self::Method { .. } | Self::Field { .. } => 1,
-            Self::Assign { operator, .. } | Self::Binary { operator, .. } => {
-                u32::from(!operator.is_empty())
-            }
+            Self::Assign { operator, .. }
+            | Self::Binary { operator, .. }
+            | Self::Unary { operator, .. } => u32::from(!operator.is_empty()),
+            // Indexing names an operation the way a method call does. A span
+            // names only a shape, so like a traversal it anchors nothing of its
+            // own and is counted through its endpoints.
+            Self::Index { .. } => 1,
             Self::Collect { container, .. } => u32::from(container.is_some()),
             // what the arms name is the whole content of a decision
             Self::Select { arms, .. } => arms.iter().map(|arm| arm.pattern.anchors()).sum(),
@@ -861,6 +956,7 @@ impl Form {
             | Self::Transform { .. }
             | Self::Retain { .. }
             | Self::Accumulate { .. }
+            | Self::Pairwise { .. }
             | Self::Collect { .. } => true,
             _ => self.children().into_iter().any(Self::describes_work),
         }
@@ -927,6 +1023,86 @@ impl Form {
             && self.anchors() >= MINIMUM_ANCHORS
             && self.anchors() >= self.holes()
             && self.is_comparable()
+    }
+
+    /// Whether a body reads a sequence only by indexing it at named positions.
+    ///
+    /// This is the licence to forget the index. `for i in 0..v.len()` visits
+    /// each element of `v` only when `i` is used for nothing but `v[i]` and `v`
+    /// is reached no other way: `v[i + 1]` looks at a different element,
+    /// `w[i]` at a different sequence, and `v.swap(i, j)` at the sequence
+    /// itself. Each of those makes the loop something other than an element
+    /// visit, and each fails this test.
+    fn indexed_only(&self, sequence: &Self, positions: &[u32]) -> bool {
+        if let Self::Index {
+            sequence: indexed,
+            position,
+        } = self
+            && indexed.as_ref() == sequence
+            && let Self::Local(index) = position.as_ref()
+            && positions.contains(index)
+        {
+            return true;
+        }
+        if self == sequence {
+            return false;
+        }
+        if let Self::Local(index) = self
+            && positions.contains(index)
+        {
+            return false;
+        }
+        self.children()
+            .into_iter()
+            .all(|child| child.indexed_only(sequence, positions))
+    }
+
+    /// Whether anything here writes through an index into a sequence.
+    ///
+    /// `v[i] = x` passes `indexed_only` and is not an element visit: it
+    /// replaces the element rather than looking at it, and forgetting the index
+    /// would turn a write into a read of the value written.
+    fn writes_indexed(&self, sequence: &Self) -> bool {
+        if let Self::Assign { target, .. } = self
+            && target.indexes(sequence)
+        {
+            return true;
+        }
+        self.children()
+            .into_iter()
+            .any(|child| child.writes_indexed(sequence))
+    }
+
+    /// Whether this form indexes into a sequence anywhere.
+    fn indexes(&self, sequence: &Self) -> bool {
+        if let Self::Index {
+            sequence: indexed, ..
+        } = self
+            && indexed.as_ref() == sequence
+        {
+            return true;
+        }
+        self.children()
+            .into_iter()
+            .any(|child| child.indexes(sequence))
+    }
+
+    /// The same body with each licensed indexing replaced by the element.
+    ///
+    /// Only positions `indexed_only` has already accepted are rewritten, so the
+    /// name that held an index comes to hold what it indexed.
+    fn with_indexed_elements(&self, sequence: &Self, positions: &[u32]) -> Self {
+        if let Self::Index {
+            sequence: indexed,
+            position,
+        } = self
+            && indexed.as_ref() == sequence
+            && let Self::Local(index) = position.as_ref()
+            && positions.contains(index)
+        {
+            return Self::Local(*index);
+        }
+        self.map_children(&|child| child.with_indexed_elements(sequence, positions))
     }
 
     /// Whether this form describes no behavior worth comparing.
@@ -1001,6 +1177,12 @@ impl Display for Form {
                 item,
                 body,
             } => write!(formatter, "(retain {sequence} {item} {body})"),
+            Self::Pairwise {
+                sequence,
+                left,
+                right,
+                body,
+            } => write!(formatter, "(pairwise {sequence} {left} {right} {body})"),
             Self::Accumulate {
                 sequence,
                 initial,
@@ -1028,6 +1210,18 @@ impl Display for Form {
                 left,
                 right,
             } => write!(formatter, "(binary {operator} {left} {right})"),
+            Self::Unary { operator, value } => write!(formatter, "(unary {operator} {value})"),
+            Self::Index { sequence, position } => {
+                write!(formatter, "(index {sequence} {position})")
+            }
+            Self::Span {
+                start,
+                end,
+                inclusive,
+            } => {
+                let kind = if *inclusive { "span=" } else { "span" };
+                write!(formatter, "({kind} {start} {end})")
+            }
             Self::Lambda { parameters, body } => {
                 formatter.write_str("(lambda (")?;
                 for (index, parameter) in parameters.iter().enumerate() {

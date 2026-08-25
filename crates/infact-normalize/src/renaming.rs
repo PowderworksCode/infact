@@ -95,6 +95,22 @@ impl Renaming {
                     direction: *direction,
                 }
             }
+            Form::Pairwise {
+                sequence,
+                left,
+                right,
+                body,
+            } => {
+                let sequence = self.boxed(sequence);
+                let left = Box::new(self.pattern(left));
+                let right = Box::new(self.pattern(right));
+                Form::Pairwise {
+                    sequence,
+                    left,
+                    right,
+                    body: self.boxed(body),
+                }
+            }
             Form::Sift {
                 sequence,
                 item,
@@ -177,6 +193,23 @@ impl Renaming {
                 operator: operator.clone(),
                 left: self.boxed(left),
                 right: self.boxed(right),
+            },
+            Form::Unary { operator, value } => Form::Unary {
+                operator: operator.clone(),
+                value: self.boxed(value),
+            },
+            Form::Index { sequence, position } => Form::Index {
+                sequence: self.boxed(sequence),
+                position: self.boxed(position),
+            },
+            Form::Span {
+                start,
+                end,
+                inclusive,
+            } => Form::Span {
+                start: self.boxed(start),
+                end: self.boxed(end),
+                inclusive: *inclusive,
             },
             Form::Lambda { parameters, body } => {
                 let parameters = parameters
