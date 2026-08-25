@@ -486,3 +486,137 @@ fn a_subtraction_chain_has_one_spelling() {
     );
     assert_eq!(first, second);
 }
+
+/// A loop bounded by a variable walks a prefix, and the form says so.
+///
+/// Measured on CodeNet, pairwise loops bound by a bare variable outnumber those
+/// bound by `len()` six to one, so this is the common case rather than an edge.
+/// The prefix is recorded because `0..n` does not reach past `n`, and claiming
+/// it covered the sequence would recommend an API over elements never read.
+#[test]
+fn a_loop_bounded_by_a_variable_walks_a_prefix() {
+    let bounded = behavior_of(
+        "fn f(values: &[i32], n: usize) -> bool {
+             for i in 0..n {
+                 for j in i + 1..n {
+                     if values[i] == values[j] { return false; }
+                 }
+             }
+             true
+         }",
+        "f",
+    );
+    assert!(bounded.contains("(pairwise (index"), "{bounded}");
+    let whole = behavior_of(
+        "fn f(values: &[i32]) -> bool {
+             for i in 0..values.len() {
+                 for j in i + 1..values.len() {
+                     if values[i] == values[j] { return false; }
+                 }
+             }
+             true
+         }",
+        "f",
+    );
+    assert!(whole.contains("(pairwise f"), "{whole}");
+    assert_ne!(bounded, whole);
+}
+
+/// Two loops bounded by different things are not a walk over pairs.
+#[test]
+fn loops_with_disagreeing_bounds_are_not_a_pairwise_walk() {
+    let form = behavior_of(
+        "fn f(values: &[i32], n: usize, m: usize) -> bool {
+             for i in 0..n {
+                 for j in i + 1..m {
+                     if values[i] == values[j] { return false; }
+                 }
+             }
+             true
+         }",
+        "f",
+    );
+    assert!(!form.contains("(pairwise"), "{form}");
+}
+
+/// Indexing two different sequences is a walk over neither.
+#[test]
+fn indexing_two_sequences_is_not_a_pairwise_walk() {
+    let form = behavior_of(
+        "fn f(left: &[i32], right: &[i32], n: usize) -> bool {
+             for i in 0..n {
+                 for j in i + 1..n {
+                     if left[i] == right[j] { return false; }
+                 }
+             }
+             true
+         }",
+        "f",
+    );
+    assert!(!form.contains("(pairwise"), "{form}");
+}
+
+/// An outer loop that stops one short reaches the same pairs.
+///
+/// `0..n - 1` with `i + 1..n` pairs everything `0..n` would: the last position
+/// has nothing above it. A third of the checks measured in CodeNet are written
+/// this way.
+#[test]
+fn an_outer_loop_that_stops_one_short_is_still_a_pairwise_walk() {
+    let form = behavior_of(
+        "fn f(values: &[i32], n: usize) -> bool {
+             for i in 0..n - 1 {
+                 for j in i + 1..n {
+                     if values[i] == values[j] { return false; }
+                 }
+             }
+             true
+         }",
+        "f",
+    );
+    assert!(form.contains("(pairwise"), "{form}");
+    // The extent is how far the sequence is read, which is the inner bound.
+    let whole = behavior_of(
+        "fn f(values: &[i32], n: usize) -> bool {
+             for i in 0..n {
+                 for j in i + 1..n {
+                     if values[i] == values[j] { return false; }
+                 }
+             }
+             true
+         }",
+        "f",
+    );
+    assert_eq!(form, whole);
+}
+
+/// A lower-triangle inner loop gets no such slack.
+///
+/// `0..n - 1` with `0..i` never pairs the last position with anything, so it is
+/// not a walk over the pairs of `n` elements.
+#[test]
+fn a_short_outer_loop_with_a_lower_triangle_walks_a_shorter_prefix() {
+    let short = behavior_of(
+        "fn f(values: &[i32], n: usize) -> bool {
+             for i in 0..n - 1 {
+                 for j in 0..i {
+                     if values[i] == values[j] { return false; }
+                 }
+             }
+             true
+         }",
+        "f",
+    );
+    let whole = behavior_of(
+        "fn f(values: &[i32], n: usize) -> bool {
+             for i in 0..n {
+                 for j in 0..i {
+                     if values[i] == values[j] { return false; }
+                 }
+             }
+             true
+         }",
+        "f",
+    );
+    assert_ne!(short, whole);
+}

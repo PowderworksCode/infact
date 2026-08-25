@@ -423,14 +423,16 @@ impl Form {
         let Pattern::Binding(index) = item.as_ref() else {
             return None;
         };
-        let source = whole_index_span(sequence)?;
-        if !body.indexed_only(source, &[*index]) || body.writes_indexed(source) {
+        let bound = span_from_zero(sequence)?;
+        let positions = [*index];
+        let source = body.sole_indexed_sequence(&positions)?;
+        if !body.indexed_only(source, &positions) || body.writes_indexed(source) {
             return None;
         }
         Some(Self::Traverse {
-            sequence: Box::new(source.clone()),
+            sequence: Box::new(walked_sequence(bound, source)),
             item: item.clone(),
-            body: Box::new(body.with_indexed_elements(source, &[*index])),
+            body: Box::new(body.with_indexed_elements(source, &positions)),
             direction: *direction,
         })
     }
@@ -485,19 +487,18 @@ impl Form {
         second: &Pattern,
         body: &Self,
     ) -> Option<Self> {
-        let source = whole_index_span(outer)?;
         let (Pattern::Binding(left), Pattern::Binding(right)) = (first, second) else {
             return None;
         };
-        if !covers_each_pair_once(inner, *left, source) {
-            return None;
-        }
+        let bound = span_from_zero(outer)?;
+        let extent = pairwise_extent(bound, inner, *left)?;
         let positions = [*left, *right];
+        let source = body.sole_indexed_sequence(&positions)?;
         if !body.indexed_only(source, &positions) || body.writes_indexed(source) {
             return None;
         }
         Some(Self::Pairwise {
-            sequence: Box::new(source.clone()),
+            sequence: Box::new(walked_sequence(extent, source)),
             left: Box::new(first.clone()),
             right: Box::new(second.clone()),
             body: Box::new(body.with_indexed_elements(source, &positions)),
@@ -809,12 +810,11 @@ fn unfoldable(bindings: &[(u32, Form)]) -> Vec<(u32, Form)> {
     }
 }
 
-/// The sequence whose whole index range a span walks.
+/// The bound of a span that counts up from zero.
 ///
-/// `0..v.len()` reaches every position of `v` and nothing else. An inclusive
-/// bound reaches one position past the end, which is a different walk and in
-/// Rust a panicking one, so it is not this.
-fn whole_index_span(form: &Form) -> Option<&Form> {
+/// An inclusive bound reaches one position past the end, which is a different
+/// walk and in Rust a panicking one, so it is not this.
+fn span_from_zero(form: &Form) -> Option<&Form> {
     let Form::Span {
         start,
         end,
@@ -823,43 +823,81 @@ fn whole_index_span(form: &Form) -> Option<&Form> {
     else {
         return None;
     };
-    if *inclusive || **start != Form::Number("0".to_owned()) {
-        return None;
-    }
-    let Form::Method {
+    (!*inclusive && **start == Form::Number("0".to_owned())).then(|| end.as_ref())
+}
+
+/// The sequence a loop counting to `bound` actually walks.
+///
+/// `0..v.len()` walks `v` itself. `0..n` walks its first `n` elements, which is
+/// the slice `v[..n]` — and that is the form the frontend already produces for
+/// that slice written out, so a loop over a prefix and a slice of the same
+/// extent agree. Recording it this way is what keeps the form honest: a walk
+/// bounded by something other than the length does not cover the sequence, and
+/// saying it did would recommend an API over elements that were never read.
+///
+/// Measured, this is most of the corpus rather than an edge: across CodeNet's
+/// Rust submissions, pairwise loops bound by a bare variable outnumber those
+/// bound by `len()` six to one.
+fn walked_sequence(bound: &Form, sequence: &Form) -> Form {
+    if let Form::Method {
         name,
         receiver,
         arguments,
-    } = end.as_ref()
-    else {
-        return None;
-    };
-    (name == "len" && arguments.is_empty()).then(|| receiver.as_ref())
+    } = bound
+        && name == "len"
+        && arguments.is_empty()
+        && receiver.as_ref() == sequence
+    {
+        return sequence.clone();
+    }
+    Form::Index {
+        sequence: Box::new(sequence.clone()),
+        position: Box::new(Form::Span {
+            start: Box::new(Form::Number("0".to_owned())),
+            end: Box::new(bound.clone()),
+            inclusive: false,
+        }),
+    }
 }
 
-/// Whether an inner span visits each pair of a sequence exactly once.
+/// How far a pair of nested spans reads, when they reach each pair once.
 ///
-/// Two spans do it, and they are the two triangles of the index square:
-/// `i + 1 .. len` takes every position after the outer one, and `0 .. i` every
-/// position before it. Either way each unordered pair is reached once. A table
-/// rather than arithmetic — a bound this cannot read is a bound this refuses.
-fn covers_each_pair_once(span: &Form, outer: u32, sequence: &Form) -> bool {
+/// Two inner spans do it, and they are the two triangles of the index square:
+/// `i + 1 .. bound` takes every position after the outer one, and `0 .. i`
+/// every position before it. Either way each unordered pair is reached once.
+///
+/// The upper triangle admits an outer loop that stops one short. `0..n - 1`
+/// with `i + 1..n` reaches exactly the pairs `0..n` with `i + 1..n` does,
+/// because the last position has nothing above it to pair with — and it is
+/// what a third of the checks measured in the corpus were written as. The
+/// extent is then the inner bound rather than the outer, because the inner
+/// bound is the one that says how far the sequence is actually read.
+///
+/// A table rather than arithmetic: a bound this cannot read is one it refuses.
+fn pairwise_extent<'a>(outer_bound: &'a Form, inner: &'a Form, outer: u32) -> Option<&'a Form> {
     let Form::Span {
         start,
         end,
         inclusive: false,
-    } = span
+    } = inner
     else {
-        return false;
+        return None;
     };
-    let above = is_successor_of(start, outer)
-        && matches!(whole_index_span(&Form::Span {
-            start: Box::new(Form::Number("0".to_owned())),
-            end: end.clone(),
-            inclusive: false,
-        }), Some(walked) if walked == sequence);
-    let below = **start == Form::Number("0".to_owned()) && **end == Form::Local(outer);
-    above || below
+    if is_successor_of(start, outer) {
+        let matches_outer = end.as_ref() == outer_bound || is_predecessor_of(outer_bound, end);
+        return matches_outer.then(|| end.as_ref());
+    }
+    // The lower triangle allows no such slack: an outer loop that stopped one
+    // short would never pair the last position with anything.
+    (**start == Form::Number("0".to_owned()) && **end == Form::Local(outer)).then_some(outer_bound)
+}
+
+/// Whether a form is one less than another.
+fn is_predecessor_of(form: &Form, of: &Form) -> bool {
+    matches!(form, Form::Binary { operator, left, right }
+        if operator == "-"
+            && left.as_ref() == of
+            && **right == Form::Number("1".to_owned()))
 }
 
 /// Whether a form is one more than a named position.

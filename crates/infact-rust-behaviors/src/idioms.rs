@@ -98,55 +98,40 @@ pub struct Context {
 
 /// Recognize an all-different check in a normalized function body.
 ///
-/// The shape is a walk over each pair of one sequence that leaves with one
-/// constant on finding an equal pair, in a body that yields the opposite
-/// constant otherwise. `Pairwise` is what makes this one shape rather than
-/// several: the index and iterator spellings of the walk have already met by
-/// the time this runs.
+/// The shape is a walk over each pair of one sequence that, on finding two
+/// equal elements, does something that does not depend on WHICH pair it found.
+/// That is the whole claim: a walk like that computes exactly whether a
+/// duplicate exists, which is what the recommended API answers. What the code
+/// then does with the answer — return it, print it, set a flag — is the
+/// caller's business and does not change what the loop computed.
+///
+/// `Pairwise` is what makes this one shape rather than several: the index and
+/// iterator spellings of the walk have already met by the time this runs.
 ///
 /// Returns the sequence the check is over, which is what a caller would put the
 /// recommended call on.
 pub fn all_different(form: &Form, context: Context) -> Result<&Form, IdiomRefusal> {
-    let (sequence, escaped, otherwise) = decisive_pairwise(form)?;
-    // Two arms of one decision that name the same constant decide nothing.
-    if escaped == otherwise {
-        return Err(IdiomRefusal::NotThisShape);
-    }
+    let sequence = deciding_pairwise(form)?;
     if !context.can_allocate {
         return Err(IdiomRefusal::CannotAllocate);
     }
     Ok(sequence)
 }
 
-/// A pairwise walk that leaves with a constant, and the constant after it.
-///
-/// The walk and the value the body ends with are one claim: a walk that escapes
-/// with `false` inside a body ending in `true` decides a question about every
-/// pair, and the same walk followed by anything else is doing something this
-/// cannot name.
-fn decisive_pairwise(form: &Form) -> Result<(&Form, &str, &str), IdiomRefusal> {
+/// Search a form for a pairwise walk that decides distinctness.
+fn deciding_pairwise(form: &Form) -> Result<&Form, IdiomRefusal> {
     // Why the nearest thing to the shape was not it. A walk over pairs that
     // decides the wrong question is worth saying so about; not finding a walk
     // at all is the uninformative answer, so anything else outranks it.
     let mut refusal = IdiomRefusal::NotThisShape;
-    if let Form::Sequence(steps) = form {
-        // The walk need not be the first step: a function may bind or check
-        // things before it. It must be immediately before the value, because
-        // anything between them could change what is returned.
-        for pair in steps.windows(2) {
-            let [walk, Form::Constant(otherwise)] = pair else {
-                continue;
-            };
-            match escaping_pairwise(walk) {
-                Ok((sequence, escaped)) => return Ok((sequence, escaped, otherwise)),
-                Err(IdiomRefusal::NotThisShape) => {}
-                Err(specific) => refusal = specific,
-            }
-        }
+    match distinctness_walk(form) {
+        Ok(sequence) => return Ok(sequence),
+        Err(IdiomRefusal::NotThisShape) => {}
+        Err(specific) => refusal = specific,
     }
     for child in form.children() {
-        match decisive_pairwise(child) {
-            Ok(found) => return Ok(found),
+        match deciding_pairwise(child) {
+            Ok(sequence) => return Ok(sequence),
             Err(IdiomRefusal::NotThisShape) => {}
             Err(specific) => refusal = specific,
         }
@@ -154,8 +139,9 @@ fn decisive_pairwise(form: &Form) -> Result<(&Form, &str, &str), IdiomRefusal> {
     Err(refusal)
 }
 
-/// A walk over pairs that leaves as soon as two are equal.
-fn escaping_pairwise(form: &Form) -> Result<(&Form, &str), IdiomRefusal> {
+/// A walk over pairs whose only reaction to an equal pair is to record that one
+/// exists.
+fn distinctness_walk(form: &Form) -> Result<&Form, IdiomRefusal> {
     let Form::Pairwise {
         sequence,
         left,
@@ -181,13 +167,58 @@ fn escaping_pairwise(form: &Form) -> Result<(&Form, &str), IdiomRefusal> {
     if !compares_the_pair(condition, *left, *right) {
         return Err(IdiomRefusal::DecidesSomethingElse);
     }
-    let Form::Return(escaped) = consequence.as_ref() else {
-        return Err(IdiomRefusal::NotThisShape);
-    };
-    let Form::Constant(escaped) = escaped.as_ref() else {
+    // Reading either element means the pair is being used for its content, and
+    // an API that answers only whether a duplicate exists cannot supply that.
+    if consequence.references_local(*left) || consequence.references_local(*right) {
         return Err(IdiomRefusal::EscapesWithAValue);
-    };
-    Ok((sequence.as_ref(), escaped))
+    }
+    if !records_that_one_exists(consequence) {
+        return Err(IdiomRefusal::NotThisShape);
+    }
+    Ok(sequence.as_ref())
+}
+
+/// Whether a reaction to an equal pair records only that one was found.
+///
+/// Two spellings, and between them they are how the check is written. Leaving
+/// the function ends the walk, so nothing after it runs and the duplicate has
+/// decided the outcome. Assigning a constant to a name from outside sets the
+/// flag that is read afterwards.
+///
+/// `continue` and `break` are neither, and refusing them is most of what keeps
+/// this honest: measured across CodeNet, `continue` is the commonest thing a
+/// pairwise equality test does by a factor of six, and it is skipping duplicate
+/// pairs inside a larger computation rather than testing for them. `count += 1`
+/// is refused for the same reason — it counts duplicates, and knowing one
+/// exists does not give you how many.
+fn records_that_one_exists(consequence: &Form) -> bool {
+    match consequence {
+        Form::Return(_) => true,
+        // A constant is a flag. A value built from what is already there is an
+        // accumulation, which is a different question about the same pairs.
+        Form::Assign {
+            operator,
+            target,
+            value,
+        } => {
+            operator == "="
+                && matches!(target.as_ref(), Form::Local(_) | Form::Free(_))
+                && matches!(value.as_ref(), Form::Constant(_))
+        }
+        // `println!("no"); return;` is one reaction written as two steps, and
+        // it is the spelling the corpus actually uses. Only the last step may
+        // leave, because a `return` reached in the middle would make the steps
+        // after it dead rather than part of the reaction.
+        Form::Sequence(steps) => steps.split_last().is_some_and(|(last, rest)| {
+            records_that_one_exists(last) && !rest.iter().any(leaves_the_walk)
+        }),
+        _ => false,
+    }
+}
+
+/// Whether a step can end the walk from somewhere other than its end.
+fn leaves_the_walk(form: &Form) -> bool {
+    matches!(form, Form::Return(_)) || form.children().into_iter().any(leaves_the_walk)
 }
 
 /// Whether a test asks whether the two elements of a pair are equal.
@@ -268,9 +299,12 @@ mod tests {
         );
     }
 
-    /// Leaving with a computed value means the pairs are being used, not counted.
+    /// Leaving with one of the elements means the pair is being used.
+    ///
+    /// Knowing that a duplicate exists does not tell you what it was, so an API
+    /// that answers only the first question cannot stand in here.
     #[test]
-    fn a_walk_that_escapes_with_a_value_is_refused() {
+    fn a_walk_that_escapes_with_an_element_is_refused() {
         let form = pairwise(escaping(equal_pair(), Form::Local(0)));
         assert_eq!(
             all_different(&form, allowed()),
@@ -278,14 +312,77 @@ mod tests {
         );
     }
 
-    /// Both arms naming one constant decides nothing.
+    /// Skipping a duplicate pair is not testing for one.
+    ///
+    /// The commonest thing a pairwise equality test does in real code, by a
+    /// wide margin, and it belongs to a larger computation rather than being
+    /// one.
     #[test]
-    fn a_walk_that_yields_what_it_escapes_with_is_refused() {
-        let form = pairwise(escaping(equal_pair(), Form::Constant("true".to_owned())));
+    fn a_walk_that_continues_past_a_duplicate_is_refused() {
+        let form = pairwise(Form::Branch {
+            condition: Box::new(equal_pair()),
+            consequence: Box::new(Form::Opaque {
+                kind: "continue_expression".to_owned(),
+                parts: Vec::new(),
+            }),
+            alternative: None,
+        });
         assert_eq!(
             all_different(&form, allowed()),
             Err(IdiomRefusal::NotThisShape)
         );
+    }
+
+    /// Counting duplicates asks how many, not whether.
+    #[test]
+    fn a_walk_that_counts_duplicates_is_refused() {
+        let form = pairwise(Form::Branch {
+            condition: Box::new(equal_pair()),
+            consequence: Box::new(Form::Assign {
+                operator: "+=".to_owned(),
+                target: Box::new(Form::Local(2)),
+                value: Box::new(Form::Number("1".to_owned())),
+            }),
+            alternative: None,
+        });
+        assert_eq!(
+            all_different(&form, allowed()),
+            Err(IdiomRefusal::NotThisShape)
+        );
+    }
+
+    /// Setting a flag is the other way the check is written.
+    #[test]
+    fn a_walk_that_sets_a_flag_is_all_different() {
+        let form = pairwise(Form::Branch {
+            condition: Box::new(equal_pair()),
+            consequence: Box::new(Form::Assign {
+                operator: "=".to_owned(),
+                target: Box::new(Form::Local(2)),
+                value: Box::new(Form::Constant("false".to_owned())),
+            }),
+            alternative: None,
+        });
+        assert_eq!(all_different(&form, allowed()), Ok(&Form::Free(0)));
+    }
+
+    /// Reporting and leaving is one reaction written as two steps.
+    ///
+    /// This is the spelling CodeNet's submissions actually use.
+    #[test]
+    fn a_walk_that_reports_then_leaves_is_all_different() {
+        let form = pairwise(Form::Branch {
+            condition: Box::new(equal_pair()),
+            consequence: Box::new(Form::Sequence(vec![
+                Form::Opaque {
+                    kind: "macro:println".to_owned(),
+                    parts: vec![Form::Constant("\"no\"".to_owned())],
+                },
+                Form::Return(Box::new(Form::Literal)),
+            ])),
+            alternative: None,
+        });
+        assert_eq!(all_different(&form, allowed()), Ok(&Form::Free(0)));
     }
 
     /// A context with no allocator is told nothing rather than told wrongly.

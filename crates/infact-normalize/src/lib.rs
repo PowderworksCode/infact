@@ -1025,6 +1025,52 @@ impl Form {
             && self.is_comparable()
     }
 
+    /// The one sequence a body indexes at every named position.
+    ///
+    /// A loop bound is often a variable rather than the sequence's own length —
+    /// `for i in 0..n` far more often than `for i in 0..v.len()` — so the span
+    /// does not always say what is being walked. The body does: whatever it
+    /// reads at those positions is the sequence, and it has to be exactly one
+    /// of them, or the loop is walking positions into two things at once and is
+    /// not a walk over either.
+    fn sole_indexed_sequence(&self, positions: &[u32]) -> Option<&Self> {
+        let mut sequence = None;
+        let mut seen = Vec::new();
+        self.collect_indexed(positions, &mut sequence, &mut seen)?;
+        positions
+            .iter()
+            .all(|position| seen.contains(position))
+            .then_some(sequence)?
+    }
+
+    /// Gather the sequence indexed at each position, failing on disagreement.
+    fn collect_indexed<'a>(
+        &'a self,
+        positions: &[u32],
+        sequence: &mut Option<&'a Self>,
+        seen: &mut Vec<u32>,
+    ) -> Option<()> {
+        if let Self::Index {
+            sequence: indexed,
+            position,
+        } = self
+            && let Self::Local(index) = position.as_ref()
+            && positions.contains(index)
+        {
+            if sequence.is_some_and(|found| found != indexed.as_ref()) {
+                return None;
+            }
+            *sequence = Some(indexed.as_ref());
+            if !seen.contains(index) {
+                seen.push(*index);
+            }
+        }
+        for child in self.children() {
+            child.collect_indexed(positions, sequence, seen)?;
+        }
+        Some(())
+    }
+
     /// Whether a body reads a sequence only by indexing it at named positions.
     ///
     /// This is the licence to forget the index. `for i in 0..v.len()` visits
