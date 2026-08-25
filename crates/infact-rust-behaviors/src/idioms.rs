@@ -18,7 +18,9 @@
 //! recommendation that gets switched off, and every shape below refuses
 //! anything it cannot account for.
 
-use infact_core::{Condition, ExternalBound, ExternalCallable, ExternalType, Form, Pattern};
+use infact_core::{
+    Condition, Coverage, ExternalBound, ExternalCallable, ExternalType, Form, Pattern, Resolved,
+};
 
 /// Why a candidate yielded no recommendation.
 ///
@@ -156,6 +158,48 @@ pub struct Context {
     pub can_allocate: bool,
 }
 
+/// The shape of a pairwise decision, as a pattern to be matched.
+///
+/// Written as a `Form` and unified by the same machinery a derived library
+/// behavior goes through, rather than as a walk over the subject by hand. What
+/// that buys is not brevity but the parts: unification records what each hole
+/// stood for, so the conditions below are stated about the pieces it found
+/// instead of re-found by a second traversal that can disagree with the first.
+///
+/// The holes are deliberately wide. Hole 1 is the test and hole 2 the reaction,
+/// and admitting anything there is what leaves every judgement about them to
+/// [`all_different`], which can then say WHICH of them was wrong. A pattern
+/// narrow enough to reject on its own would only ever answer "no".
+fn pairwise_decision(coverage: Coverage) -> Form {
+    Form::Pairwise {
+        sequence: Box::new(Form::Free(0)),
+        left: Box::new(Pattern::Binding(0)),
+        right: Box::new(Pattern::Binding(1)),
+        body: Box::new(Form::Branch {
+            condition: Box::new(Form::Free(1)),
+            consequence: Box::new(Form::Free(2)),
+            // A test with an `else` is choosing between two things to do, and
+            // only one of them is being described here.
+            alternative: None,
+        }),
+        coverage,
+    }
+}
+
+/// A recognized algorithm, and what a caller needs to act on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recognized {
+    /// The sequence the check is over, which is what the recommended call goes
+    /// on.
+    pub sequence: Form,
+    /// The shape as it was matched, for locating it among the statements.
+    ///
+    /// The recognizer's pattern leaves the sequence a hole and admits either
+    /// coverage, so on its own it would locate the first walk in the function
+    /// rather than the one recognized. Both are filled back in here.
+    pub shape: Form,
+}
+
 /// Recognize an all-different check in a normalized function body.
 ///
 /// The shape is a walk over each pair of one sequence that, on finding two
@@ -165,84 +209,68 @@ pub struct Context {
 /// then does with the answer — return it, print it, set a flag — is the
 /// caller's business and does not change what the loop computed.
 ///
-/// `Pairwise` is what makes this one shape rather than several: the index and
-/// iterator spellings of the walk have already met by the time this runs.
+/// Either coverage will do, and that is worth saying explicitly: a square
+/// guarded loop reaches each pair twice, and every reaction accepted below is
+/// idempotent — returning twice is returning, setting a flag to the same
+/// constant twice is setting it. The reaction that is NOT idempotent is
+/// counting, and counting is refused for its own reasons, so nothing here
+/// depends on which spelling was written.
 ///
 /// Returns the sequence the check is over, which is what a caller would put the
 /// recommended call on.
-pub fn all_different(form: &Form, context: Context) -> Result<&Form, IdiomRefusal> {
-    let sequence = deciding_pairwise(form)?;
-    if !context.can_allocate {
-        return Err(IdiomRefusal::CannotAllocate);
-    }
-    Ok(sequence)
-}
-
-/// Search a form for a pairwise walk that decides distinctness.
-fn deciding_pairwise(form: &Form) -> Result<&Form, IdiomRefusal> {
-    // Why the nearest thing to the shape was not it. A walk over pairs that
-    // decides the wrong question is worth saying so about; not finding a walk
-    // at all is the uninformative answer, so anything else outranks it.
+pub fn all_different(form: &Form, context: Context) -> Result<Recognized, IdiomRefusal> {
+    // Why the nearest thing to the shape was not it. Finding no walk at all is
+    // the uninformative answer, so anything else outranks it.
     let mut refusal = IdiomRefusal::NotThisShape;
-    match distinctness_walk(form) {
-        Ok(sequence) => return Ok(sequence),
-        Err(IdiomRefusal::NotThisShape) => {}
-        Err(specific) => refusal = specific,
-    }
-    for child in form.children() {
-        match deciding_pairwise(child) {
-            Ok(sequence) => return Ok(sequence),
-            Err(IdiomRefusal::NotThisShape) => {}
-            Err(specific) => refusal = specific,
+    for coverage in [Coverage::Once, Coverage::BothWays] {
+        let pattern = pairwise_decision(coverage);
+        for resolved in form.resolve_all(&pattern) {
+            match decides_distinctness(&resolved) {
+                Ok(sequence) => {
+                    if !context.can_allocate {
+                        return Err(IdiomRefusal::CannotAllocate);
+                    }
+                    let mut shape = pattern.clone();
+                    if let Form::Pairwise { sequence, .. } = &mut shape {
+                        **sequence = resolved.hole(0).cloned().unwrap_or(Form::Literal);
+                    }
+                    return Ok(Recognized { sequence, shape });
+                }
+                Err(IdiomRefusal::NotThisShape) => {}
+                Err(specific) => refusal = specific,
+            }
         }
     }
     Err(refusal)
 }
 
-/// A walk over pairs whose only reaction to an equal pair is to record that one
-/// exists.
-fn distinctness_walk(form: &Form) -> Result<&Form, IdiomRefusal> {
-    // Either coverage will do, and that is a claim worth making explicitly:
-    // a square guarded loop reaches each pair twice, and every reaction this
-    // accepts is idempotent — returning twice is returning, and setting a flag
-    // to the same constant twice is setting it. The reaction that is NOT
-    // idempotent is counting, and counting is refused below for its own
-    // reasons, so nothing here depends on which spelling was written.
-    let Form::Pairwise {
-        sequence,
-        left,
-        right,
-        body,
-        coverage: _,
-    } = form
+/// Whether one match of the pairwise shape decides distinctness.
+///
+/// Every question here is asked of a piece the matcher handed over, and the two
+/// names are the subject's own — a pattern numbers its roles by its own
+/// counting, and asking whether the reaction mentions the pattern's `Local(0)`
+/// would be asking about the wrong function's names.
+fn decides_distinctness(resolved: &Resolved) -> Result<Form, IdiomRefusal> {
+    let (Some(sequence), Some(condition), Some(consequence)) =
+        (resolved.hole(0), resolved.hole(1), resolved.hole(2))
     else {
         return Err(IdiomRefusal::NotThisShape);
     };
-    let (Pattern::Binding(left), Pattern::Binding(right)) = (left.as_ref(), right.as_ref()) else {
+    let (Some(left), Some(right)) = (resolved.local(0), resolved.local(1)) else {
         return Err(IdiomRefusal::NotThisShape);
     };
-    // A test with an `else` is choosing between two things to do, and only one
-    // of them is being described here.
-    let Form::Branch {
-        condition,
-        consequence,
-        alternative: None,
-    } = body.as_ref()
-    else {
-        return Err(IdiomRefusal::NotThisShape);
-    };
-    if !compares_the_pair(condition, *left, *right) {
+    if !compares_the_pair(condition, left, right) {
         return Err(IdiomRefusal::DecidesSomethingElse);
     }
     // Reading either element means the pair is being used for its content, and
     // an API that answers only whether a duplicate exists cannot supply that.
-    if consequence.references_local(*left) || consequence.references_local(*right) {
+    if consequence.references_local(left) || consequence.references_local(right) {
         return Err(IdiomRefusal::EscapesWithAValue);
     }
     if !records_that_one_exists(consequence) {
         return Err(IdiomRefusal::NotThisShape);
     }
-    Ok(sequence.as_ref())
+    Ok(sequence.clone())
 }
 
 /// Whether a reaction to an equal pair records only that one was found.
@@ -367,7 +395,10 @@ mod tests {
     #[test]
     fn a_pairwise_equality_check_is_all_different() {
         let form = pairwise(escaping(equal_pair(), Form::Constant("false".to_owned())));
-        assert_eq!(all_different(&form, allowed()), Ok(&Form::Free(0)));
+        assert_eq!(
+            all_different(&form, allowed()).map(|found| found.sequence),
+            Ok(Form::Free(0))
+        );
     }
 
     /// A relation other than equality asks a different question.
@@ -449,7 +480,10 @@ mod tests {
             }),
             alternative: None,
         });
-        assert_eq!(all_different(&form, allowed()), Ok(&Form::Free(0)));
+        assert_eq!(
+            all_different(&form, allowed()).map(|found| found.sequence),
+            Ok(Form::Free(0))
+        );
     }
 
     /// Recording and leaving the inner loop is one reaction written as two.
@@ -473,7 +507,10 @@ mod tests {
             ])),
             alternative: None,
         });
-        assert_eq!(all_different(&form, allowed()), Ok(&Form::Free(0)));
+        assert_eq!(
+            all_different(&form, allowed()).map(|found| found.sequence),
+            Ok(Form::Free(0))
+        );
     }
 
     /// A reaction that also does unaccounted work is refused.
@@ -517,7 +554,10 @@ mod tests {
             ])),
             alternative: None,
         });
-        assert_eq!(all_different(&form, allowed()), Ok(&Form::Free(0)));
+        assert_eq!(
+            all_different(&form, allowed()).map(|found| found.sequence),
+            Ok(Form::Free(0))
+        );
     }
 
     /// A context with no allocator is told nothing rather than told wrongly.

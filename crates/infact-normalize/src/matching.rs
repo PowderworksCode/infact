@@ -59,6 +59,41 @@ fn interrupts_iteration(form: &Form) -> bool {
     }
 }
 
+/// What a pattern's roles stood for where it matched.
+///
+/// Matching already works this out — a hole has to mean the same thing every
+/// time it appears, so it is recorded — and used to throw it away at the door,
+/// leaving callers who needed a part of what matched to walk the subject again
+/// by hand looking for the thing the matcher had just found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolved {
+    holes: Vec<(u32, Form)>,
+    locals: Vec<(u32, u32)>,
+}
+
+impl Resolved {
+    /// What the pattern's hole stood for.
+    #[must_use]
+    pub fn hole(&self, index: u32) -> Option<&Form> {
+        self.holes
+            .iter()
+            .find(|(bound, _)| *bound == index)
+            .map(|(_, form)| form)
+    }
+
+    /// Which of the subject's names the pattern's name lined up with.
+    ///
+    /// A pattern names the roles it binds by its own numbering; this is how to
+    /// ask a question about the subject, whose numbering is its own.
+    #[must_use]
+    pub fn local(&self, index: u32) -> Option<u32> {
+        self.locals
+            .iter()
+            .find(|(bound, _)| *bound == index)
+            .map(|(_, subject)| *subject)
+    }
+}
+
 impl Bindings {
     /// A fresh set of bindings, told whether to accept work done alongside the
     /// pattern rather than only the pattern itself.
@@ -66,6 +101,14 @@ impl Bindings {
         Self {
             fused,
             ..Self::default()
+        }
+    }
+
+    /// What this match worked out, for a caller that needs the parts.
+    pub(crate) fn resolved(self) -> Resolved {
+        Resolved {
+            holes: self.holes,
+            locals: self.locals,
         }
     }
 

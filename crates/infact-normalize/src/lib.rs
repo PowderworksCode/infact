@@ -15,6 +15,7 @@ mod renaming;
 mod simplify;
 
 use matching::Bindings;
+pub use matching::Resolved;
 use renaming::Renaming;
 
 use std::fmt::{self, Display, Formatter};
@@ -781,6 +782,34 @@ impl Form {
     pub fn canonical(&self) -> Self {
         let mut renaming = Renaming::default();
         renaming.form(self)
+    }
+
+    /// Every place `pattern` matches, with what its roles stood for.
+    ///
+    /// The companion to [`Form::contains`], which answers whether a pattern is
+    /// here and discards what it found. A recognizer that has to say something
+    /// about a *part* of what matched — this hole must not mention that name —
+    /// needs the parts, and working them out by walking the subject again is
+    /// how a matcher comes to be reimplemented beside itself.
+    ///
+    /// Matches at nodes, not at runs of statements: a pattern spread over
+    /// several steps has no single node to have matched, so [`Form::locate_all`]
+    /// is what places those.
+    #[must_use]
+    pub fn resolve_all(&self, pattern: &Self) -> Vec<Resolved> {
+        let mut found = Vec::new();
+        self.resolve_into(pattern, &mut found);
+        found
+    }
+
+    fn resolve_into(&self, pattern: &Self, found: &mut Vec<Resolved>) {
+        let mut bindings = Bindings::default();
+        if bindings.form(self, pattern) {
+            found.push(bindings.resolved());
+        }
+        for child in self.children() {
+            child.resolve_into(pattern, found);
+        }
     }
 
     /// Whether this form contains `pattern` anywhere within it.

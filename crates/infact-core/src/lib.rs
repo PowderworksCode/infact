@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-pub use infact_normalize::{Coverage, Form, Pattern};
+pub use infact_normalize::{Coverage, Form, Pattern, Resolved};
 use serde::{Deserialize, Serialize};
 use strum::IntoStaticStr;
 
