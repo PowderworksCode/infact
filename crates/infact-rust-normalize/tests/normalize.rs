@@ -270,3 +270,219 @@ fn normalizing_a_body_directly_matches_normalizing_its_file() {
     assert_eq!(from_file, direct);
     let _ = Path::new("unused");
 }
+
+/// The normalized, simplified, consistently-renamed form of one function.
+///
+/// Comparing two spellings means comparing what a match would compare, which is
+/// the simplified form up to renaming rather than the form as written.
+fn behavior_of(source: &str, function: &str) -> String {
+    let pack = Arc::new(ParserPack::load(parser_packs()).expect("rust parser pack"));
+    let parsed = ParserRuntime::new()
+        .expect("parser runtime")
+        .load(pack)
+        .expect("loading rust parser")
+        .parse("source.rs", Arc::<[u8]>::from(source.as_bytes()))
+        .expect("parsing source");
+    normalize_file(&parsed)
+        .into_iter()
+        .find(|candidate| candidate.name == function)
+        .unwrap_or_else(|| panic!("no function named {function}"))
+        .form
+        .simplify()
+        .canonical()
+        .to_string()
+}
+
+/// A test and its opposite are not the same behavior.
+///
+/// `unary_expression` used to be stripped as noise, so these two forms were
+/// equal and a library that returns on one matched code that returns on the
+/// other.
+#[test]
+fn a_negated_test_differs_from_the_test() {
+    let negated = behavior_of(
+        "fn f(values: &[i32]) -> bool {
+             let mut seen = HashSet::new();
+             for value in values { if !seen.insert(value) { return false; } }
+             true
+         }",
+        "f",
+    );
+    let plain = behavior_of(
+        "fn f(values: &[i32]) -> bool {
+             let mut seen = HashSet::new();
+             for value in values { if seen.insert(value) { return false; } }
+             true
+         }",
+        "f",
+    );
+    assert_ne!(negated, plain);
+    assert!(negated.contains("(unary !"), "{negated}");
+}
+
+/// A dereference still is noise.
+#[test]
+fn a_dereference_is_not_behavior() {
+    let starred = behavior_of("fn f(value: &i32) -> i32 { *value + 1 }", "f");
+    let bare = behavior_of("fn f(value: i32) -> i32 { value + 1 }", "f");
+    assert_eq!(starred, bare);
+}
+
+/// An inclusive range reaches one element further, so it is a different walk.
+#[test]
+fn an_inclusive_span_differs_from_an_exclusive_one() {
+    let exclusive = behavior_of("fn f(n: usize) { for i in 0..n { g(i); } }", "f");
+    let inclusive = behavior_of("fn f(n: usize) { for i in 0..=n { g(i); } }", "f");
+    assert_ne!(exclusive, inclusive);
+}
+
+/// A loop over indices that only ever indexes is a loop over elements.
+#[test]
+fn an_index_loop_agrees_with_an_element_loop() {
+    let indexed = behavior_of(
+        "fn f(values: &[i32]) -> i32 {
+             let mut total = 0;
+             for i in 0..values.len() { total += values[i]; }
+             total
+         }",
+        "f",
+    );
+    let direct = behavior_of(
+        "fn f(values: &[i32]) -> i32 {
+             let mut total = 0;
+             for value in values { total += value; }
+             total
+         }",
+        "f",
+    );
+    assert_eq!(indexed, direct);
+}
+
+/// An index used for anything but indexing is not forgotten.
+///
+/// `values[i + 1]` looks at a different element, so the loop is not an element
+/// visit and the span has to stay.
+#[test]
+fn an_index_loop_that_looks_elsewhere_keeps_its_span() {
+    let form = behavior_of(
+        "fn f(values: &[i32]) -> i32 {
+             let mut total = 0;
+             for i in 0..values.len() { total += values[i + 1]; }
+             total
+         }",
+        "f",
+    );
+    assert!(form.contains("(span"), "{form}");
+}
+
+/// Writing through an index is not visiting an element.
+#[test]
+fn an_index_loop_that_writes_keeps_its_span() {
+    let form = behavior_of(
+        "fn f(values: &mut [i32]) {
+             for i in 0..values.len() { values[i] = 0; }
+         }",
+        "f",
+    );
+    assert!(form.contains("(span"), "{form}");
+}
+
+/// The two spellings of a pairwise walk reduce to one form.
+#[test]
+fn an_index_pair_loop_agrees_with_an_enumerated_one() {
+    let indexed = behavior_of(
+        "fn f(values: &[i32]) -> bool {
+             for i in 0..values.len() {
+                 for j in i + 1..values.len() {
+                     if values[i] == values[j] { return false; }
+                 }
+             }
+             true
+         }",
+        "f",
+    );
+    let enumerated = behavior_of(
+        "fn f(values: &[i32]) -> bool {
+             for (i, a) in values.iter().enumerate() {
+                 for b in values.iter().skip(i + 1) {
+                     if a == b { return false; }
+                 }
+             }
+             true
+         }",
+        "f",
+    );
+    assert_eq!(indexed, enumerated);
+    assert!(indexed.contains("(pairwise"), "{indexed}");
+}
+
+/// The lower triangle visits the same pairs as the upper one.
+#[test]
+fn the_lower_triangle_is_also_a_pairwise_walk() {
+    let form = behavior_of(
+        "fn f(values: &[i32]) -> bool {
+             for i in 0..values.len() {
+                 for j in 0..i {
+                     if values[i] == values[j] { return false; }
+                 }
+             }
+             true
+         }",
+        "f",
+    );
+    assert!(form.contains("(pairwise"), "{form}");
+}
+
+/// A nested loop over the whole sequence twice is not a walk over pairs.
+///
+/// It visits each ordered pair and an element with itself, and the `i != j`
+/// that usually accompanies it is written over indices this rewrite would
+/// forget. Refusing is the honest outcome.
+#[test]
+fn a_full_nested_loop_is_not_a_pairwise_walk() {
+    let form = behavior_of(
+        "fn f(values: &[i32]) -> bool {
+             for i in 0..values.len() {
+                 for j in 0..values.len() {
+                     if i != j && values[i] == values[j] { return false; }
+                 }
+             }
+             true
+         }",
+        "f",
+    );
+    assert!(!form.contains("(pairwise"), "{form}");
+}
+
+/// A nested loop that touches the sequence itself is not a walk over pairs.
+///
+/// A bubble sort's inner body swaps through the sequence, so the elements are
+/// not all it reaches.
+#[test]
+fn a_nested_loop_that_swaps_is_not_a_pairwise_walk() {
+    let form = behavior_of(
+        "fn f(values: &mut [i32]) {
+             for i in 0..values.len() {
+                 for j in 0..values.len() - 1 - i {
+                     if values[j] > values[j + 1] { values.swap(j, j + 1); }
+                 }
+             }
+         }",
+        "f",
+    );
+    assert!(!form.contains("(pairwise"), "{form}");
+}
+
+/// Two spellings of one descending bound are one bound.
+#[test]
+fn a_subtraction_chain_has_one_spelling() {
+    let first = behavior_of(
+        "fn f(values: &[i32], i: usize) { for j in 0..values.len() - 1 - i { g(j); } }",
+        "f",
+    );
+    let second = behavior_of(
+        "fn f(values: &[i32], i: usize) { for j in 0..values.len() - i - 1 { g(j); } }",
+        "f",
+    );
+    assert_eq!(first, second);
+}

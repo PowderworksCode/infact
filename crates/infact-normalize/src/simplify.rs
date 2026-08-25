@@ -138,6 +138,7 @@ impl Form {
             Self::Traverse { item, .. }
             | Self::Transform { item, .. }
             | Self::Retain { item, .. } => vec![item],
+            Self::Pairwise { left, right, .. } => vec![left, right],
             Self::Accumulate {
                 accumulator, item, ..
             } => vec![accumulator, item],
@@ -171,6 +172,9 @@ impl Form {
             .or_else(|| rebuilt.as_optional_search())
             .or_else(|| rebuilt.as_escape())
             .or_else(|| rebuilt.as_traversal())
+            .or_else(|| rebuilt.as_canonical_arithmetic())
+            .or_else(|| rebuilt.as_element_traversal())
+            .or_else(|| rebuilt.as_pairwise())
             .or_else(|| rebuilt.as_recovered_escape())
             .or_else(|| rebuilt.as_unfolded(fuel))
             .unwrap_or(rebuilt)
@@ -394,6 +398,205 @@ impl Form {
         }
     }
 
+    /// An index loop that only ever indexes is a walk over the elements.
+    ///
+    /// `for i in 0..v.len() { total += v[i] }` and `for x in v { total += x }`
+    /// are the same visit written two ways, and only the second reduced to a
+    /// traversal of `v`. The first traversed a span of integers, which is a
+    /// traversal of something else entirely and compares against nothing.
+    ///
+    /// The condition is narrow on purpose: `i` must be used for nothing but
+    /// `v[i]`, `v` must be reached no other way, and nothing may write through
+    /// the index. Anything else — `v[i + 1]`, `v.swap(i, j)`, `v[i] = x` — is
+    /// not an element visit, and forgetting the index there would report a walk
+    /// the code does not make.
+    fn as_element_traversal(&self) -> Option<Self> {
+        let Self::Traverse {
+            sequence,
+            item,
+            body,
+            direction,
+        } = self
+        else {
+            return None;
+        };
+        let Pattern::Binding(index) = item.as_ref() else {
+            return None;
+        };
+        let source = whole_index_span(sequence)?;
+        if !body.indexed_only(source, &[*index]) || body.writes_indexed(source) {
+            return None;
+        }
+        Some(Self::Traverse {
+            sequence: Box::new(source.clone()),
+            item: item.clone(),
+            body: Box::new(body.with_indexed_elements(source, &[*index])),
+            direction: *direction,
+        })
+    }
+
+    /// Two nested loops that reach each pair of one sequence once.
+    ///
+    /// Both spellings reduce here: index arithmetic over the upper or lower
+    /// triangle, and `enumerate` with a `skip` past the outer position. What
+    /// they have in common is which pairs get visited, and that is the only
+    /// thing `Pairwise` records.
+    ///
+    /// A nested loop whose inner bound is the whole sequence is NOT this, even
+    /// with an `i != j` guard inside: the guard is written over the indices,
+    /// and this rewrite forgets them. Recognizing that spelling means keeping
+    /// the indices as well as the elements, so it stays two traversals.
+    fn as_pairwise(&self) -> Option<Self> {
+        let Self::Traverse {
+            sequence: outer,
+            item: first,
+            body,
+            direction: Direction::Forward,
+        } = self
+        else {
+            return None;
+        };
+        let inner_traversal = match body.as_ref() {
+            Self::Sequence(steps) => match steps.as_slice() {
+                [only] => only,
+                _ => return None,
+            },
+            other => other,
+        };
+        let Self::Traverse {
+            sequence: inner,
+            item: second,
+            body: inner_body,
+            direction: Direction::Forward,
+        } = inner_traversal
+        else {
+            return None;
+        };
+        self.as_indexed_pairwise(outer, first, inner, second, inner_body)
+            .or_else(|| Self::as_enumerated_pairwise(outer, first, inner, second, inner_body))
+    }
+
+    /// The index spelling: two spans over one sequence's positions.
+    fn as_indexed_pairwise(
+        &self,
+        outer: &Self,
+        first: &Pattern,
+        inner: &Self,
+        second: &Pattern,
+        body: &Self,
+    ) -> Option<Self> {
+        let source = whole_index_span(outer)?;
+        let (Pattern::Binding(left), Pattern::Binding(right)) = (first, second) else {
+            return None;
+        };
+        if !covers_each_pair_once(inner, *left, source) {
+            return None;
+        }
+        let positions = [*left, *right];
+        if !body.indexed_only(source, &positions) || body.writes_indexed(source) {
+            return None;
+        }
+        Some(Self::Pairwise {
+            sequence: Box::new(source.clone()),
+            left: Box::new(first.clone()),
+            right: Box::new(second.clone()),
+            body: Box::new(body.with_indexed_elements(source, &positions)),
+        })
+    }
+
+    /// The iterator spelling: `enumerate` outside, `skip(i + 1)` inside.
+    ///
+    /// The position `enumerate` binds exists only to say where the inner walk
+    /// starts. A body that reads it is doing something with the index besides
+    /// pairing, so this declines rather than dropping it.
+    fn as_enumerated_pairwise(
+        outer: &Self,
+        first: &Pattern,
+        inner: &Self,
+        second: &Pattern,
+        body: &Self,
+    ) -> Option<Self> {
+        let source = receiver_of(outer, "enumerate", 0)?;
+        let Pattern::Tuple(parts) = first else {
+            return None;
+        };
+        let [Pattern::Binding(position), element] = parts.as_slice() else {
+            return None;
+        };
+        let skipped = receiver_of(inner, "skip", 1)?;
+        if skipped != source || !skips_past(inner, *position) || body.references_local(*position) {
+            return None;
+        }
+        Some(Self::Pairwise {
+            sequence: Box::new(source.clone()),
+            left: Box::new(element.clone()),
+            right: Box::new(second.clone()),
+            body: Box::new(body.clone()),
+        })
+    }
+
+    /// Arithmetic that means one thing written several ways.
+    ///
+    /// `len - 1 - i` and `len - i - 1` are the same bound and different trees,
+    /// and a loop bound is exactly where a hand-rolled algorithm keeps its
+    /// content: recognizing which pairs a nested loop visits is reading its
+    /// endpoints. Three rewrites travel together because they only reach a
+    /// normal form together — a subtraction chain re-associates onto one
+    /// subtrahend, that subtrahend's operands then take a deterministic order,
+    /// and constant operands fold.
+    ///
+    /// Reordering assumes the operands can be evaluated in either order. For
+    /// the integer index arithmetic this exists to canonicalize that always
+    /// holds; for an operand that calls something with an effect it is a
+    /// generalization, and the same one `Select` already makes by sorting arms.
+    fn as_canonical_arithmetic(&self) -> Option<Self> {
+        let Self::Binary {
+            operator,
+            left,
+            right,
+        } = self
+        else {
+            return None;
+        };
+        // `(a - b) - c` is `a - (b + c)`, which is what lets the two spellings
+        // of a descending loop bound meet.
+        if operator == "-"
+            && let Self::Binary {
+                operator: inner,
+                left: first,
+                right: second,
+            } = left.as_ref()
+            && inner == "-"
+        {
+            return Some(Self::Binary {
+                operator: "-".to_owned(),
+                left: first.clone(),
+                right: Box::new(Self::Binary {
+                    operator: "+".to_owned(),
+                    left: second.clone(),
+                    right: right.clone(),
+                }),
+            });
+        }
+        if let (Self::Number(first), Self::Number(second)) = (left.as_ref(), right.as_ref())
+            && let Some(folded) = fold(operator, first, second)
+        {
+            return Some(Self::Number(folded));
+        }
+        // A commutative operator says the same thing either way round, so the
+        // two orders must not be two forms. The order is the form's own, which
+        // is arbitrary but total, and swapping only ever moves toward it, so
+        // this cannot swap back and forth forever.
+        if COMMUTATIVE.contains(&operator.as_str()) && right < left {
+            return Some(Self::Binary {
+                operator: operator.clone(),
+                left: right.clone(),
+                right: left.clone(),
+            });
+        }
+        None
+    }
+
     /// A fold whose accumulator is never used is a traversal.
     ///
     /// `try_fold((), f)` walks the sequence applying `f`; the unit accumulator
@@ -604,6 +807,118 @@ fn unfoldable(bindings: &[(u32, Form)]) -> Vec<(u32, Form)> {
             None => return safe,
         }
     }
+}
+
+/// The sequence whose whole index range a span walks.
+///
+/// `0..v.len()` reaches every position of `v` and nothing else. An inclusive
+/// bound reaches one position past the end, which is a different walk and in
+/// Rust a panicking one, so it is not this.
+fn whole_index_span(form: &Form) -> Option<&Form> {
+    let Form::Span {
+        start,
+        end,
+        inclusive,
+    } = form
+    else {
+        return None;
+    };
+    if *inclusive || **start != Form::Number("0".to_owned()) {
+        return None;
+    }
+    let Form::Method {
+        name,
+        receiver,
+        arguments,
+    } = end.as_ref()
+    else {
+        return None;
+    };
+    (name == "len" && arguments.is_empty()).then(|| receiver.as_ref())
+}
+
+/// Whether an inner span visits each pair of a sequence exactly once.
+///
+/// Two spans do it, and they are the two triangles of the index square:
+/// `i + 1 .. len` takes every position after the outer one, and `0 .. i` every
+/// position before it. Either way each unordered pair is reached once. A table
+/// rather than arithmetic — a bound this cannot read is a bound this refuses.
+fn covers_each_pair_once(span: &Form, outer: u32, sequence: &Form) -> bool {
+    let Form::Span {
+        start,
+        end,
+        inclusive: false,
+    } = span
+    else {
+        return false;
+    };
+    let above = is_successor_of(start, outer)
+        && matches!(whole_index_span(&Form::Span {
+            start: Box::new(Form::Number("0".to_owned())),
+            end: end.clone(),
+            inclusive: false,
+        }), Some(walked) if walked == sequence);
+    let below = **start == Form::Number("0".to_owned()) && **end == Form::Local(outer);
+    above || below
+}
+
+/// Whether a form is one more than a named position.
+///
+/// Canonicalized arithmetic puts the name first, but this accepts either order
+/// so that the law does not depend on which way the ordering happened to fall.
+fn is_successor_of(form: &Form, local: u32) -> bool {
+    let Form::Binary {
+        operator,
+        left,
+        right,
+    } = form
+    else {
+        return false;
+    };
+    operator == "+"
+        && ((**left == Form::Local(local) && **right == Form::Number("1".to_owned()))
+            || (**right == Form::Local(local) && **left == Form::Number("1".to_owned())))
+}
+
+/// The receiver of a method call with a given name and argument count.
+fn receiver_of<'a>(form: &'a Form, method: &str, arity: usize) -> Option<&'a Form> {
+    let Form::Method {
+        name,
+        receiver,
+        arguments,
+    } = form
+    else {
+        return None;
+    };
+    (name == method && arguments.len() == arity).then(|| receiver.as_ref())
+}
+
+/// Whether a `skip` starts one past a named position.
+fn skips_past(form: &Form, local: u32) -> bool {
+    matches!(form, Form::Method { arguments, .. }
+        if matches!(arguments.as_slice(), [amount] if is_successor_of(amount, local)))
+}
+
+/// Operators whose operands may be written either way round.
+///
+/// Comparison for equality is here and ordering comparison is not: `a < b` and
+/// `b < a` are opposite questions.
+const COMMUTATIVE: &[&str] = &["+", "*", "==", "!=", "&", "|", "^", "&&", "||"];
+
+/// Two integer literals combined, when the operator has an integer answer.
+///
+/// Only integers fold. A float literal is held as written because its value
+/// does not survive the round trip, and division is left alone because it
+/// truncates in some languages and not others.
+fn fold(operator: &str, left: &str, right: &str) -> Option<String> {
+    let (left, right) = (left.parse::<i128>().ok()?, right.parse::<i128>().ok()?);
+    let value = match operator {
+        "+" => left.checked_add(right),
+        "-" => left.checked_sub(right),
+        "*" => left.checked_mul(right),
+        _ => None,
+    }?;
+    Some(value.to_string())
 }
 
 fn collect_pattern(pattern: &Pattern, bound: &mut Vec<u32>) {

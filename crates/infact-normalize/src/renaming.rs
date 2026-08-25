@@ -95,6 +95,22 @@ impl Renaming {
                     direction: *direction,
                 }
             }
+            Form::Pairwise {
+                sequence,
+                left,
+                right,
+                body,
+            } => {
+                let sequence = self.boxed(sequence);
+                let left = Box::new(self.pattern(left));
+                let right = Box::new(self.pattern(right));
+                Form::Pairwise {
+                    sequence,
+                    left,
+                    right,
+                    body: self.boxed(body),
+                }
+            }
             Form::Sift {
                 sequence,
                 item,
