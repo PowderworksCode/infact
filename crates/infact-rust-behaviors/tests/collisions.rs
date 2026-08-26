@@ -114,3 +114,60 @@ fn distinct_callables_derive_distinct_behaviors() {
         erased.join("\n  ")
     );
 }
+
+/// A behavior another one is broader than stands aside where that one landed.
+///
+/// `Option::and_then` is `match self { Some(x) => f(x), None => None }`, and the
+/// hole swallows what every narrower way of consuming an `Option` puts there.
+/// Measured on clippy's `manual_map` test it landed on fifteen of the same lines
+/// `Option::map` did, saying less about each.
+#[test]
+fn a_broader_behavior_stands_aside_where_a_narrower_one_landed() {
+    use infact_core::Form;
+    use infact_normalize::{Arm, Pattern};
+
+    let hole_applied = || Form::Call {
+        callee: Box::new(Form::Free(1)),
+        arguments: vec![Form::Local(0)],
+    };
+    let none = || Form::Variant {
+        name: "None".to_owned(),
+        payload: Vec::new(),
+    };
+    let consuming = |taken: Form| {
+        Form::select(
+            Form::Free(0),
+            vec![
+                Arm {
+                    pattern: Pattern::Variant {
+                        name: "Some".to_owned(),
+                        parts: vec![Pattern::Binding(0)],
+                    },
+                    body: taken,
+                },
+                Arm {
+                    pattern: Pattern::Variant {
+                        name: "None".to_owned(),
+                        parts: Vec::new(),
+                    },
+                    body: none(),
+                },
+            ],
+        )
+    };
+    // `and_then` hands back whatever the caller's function returned; `map`
+    // wraps it. The first accepts the second and not the other way about.
+    let and_then = consuming(hole_applied());
+    let map = consuming(Form::Variant {
+        name: "Some".to_owned(),
+        payload: vec![hole_applied()],
+    });
+    assert!(
+        map.contains(&and_then),
+        "and_then must accept map, or it is not the broader of the two"
+    );
+    assert!(
+        !and_then.contains(&map),
+        "map must not accept and_then, or neither is broader"
+    );
+}

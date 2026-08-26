@@ -158,6 +158,18 @@ fn collect_functions<'a>(
         "trait_item" => node
             .child_by_field_name("name")
             .and_then(|name| node_text(name, &file.source)),
+        // A function declared inside another function's body is a local helper,
+        // not a method of whatever type surrounds them both. Carrying the
+        // container down made every such helper answer to the same name a
+        // sibling method does, and the resolver refuses a name two callables
+        // answer to — so a method with a perfectly good body reported that no
+        // implementation was found.
+        //
+        // `Iterator::fold` is the case that matters: `max_by` and `min_by`
+        // declare their own `fn fold` helpers, so three callables claimed the
+        // name and none of them resolved. Everything built on `fold` went with
+        // it — `count`, `sum`, `last`, `max`, `min`, `reduce`, `product`, `nth`.
+        "function_item" => None,
         _ => container,
     };
     // an inline `mod` that is not public hides everything inside it

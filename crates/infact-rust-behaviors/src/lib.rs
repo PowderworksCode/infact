@@ -228,7 +228,11 @@ pub fn analyze_repository(
                     .and_modify(|chosen| chosen.0.push(behavior))
                     .or_insert_with(|| (vec![behavior], fused));
             }
-            for (mut sharing, fused) in best.into_values() {
+            // Where each matched behavior actually lands, worked out before
+            // anything is reported, because which behavior to report is a
+            // question about what else matched THERE.
+            let mut found = Vec::new();
+            for (program, (mut sharing, fused)) in best {
                 // Only callables whose catalog is present can be named.
                 sharing.retain(|behavior| catalog_for(catalogs, behavior).is_some());
                 // Name the API a caller should reach for, which is the one
@@ -248,9 +252,6 @@ pub fn analyze_repository(
                 let Some((behavior, rest)) = sharing.split_first() else {
                     continue;
                 };
-                let Some(catalog) = catalog_for(catalogs, behavior) else {
-                    continue;
-                };
                 let alternatives: Vec<LibraryTarget> = rest
                     .iter()
                     .filter_map(|other| {
@@ -267,23 +268,40 @@ pub fn analyze_repository(
                 // Reporting only the first surfaced the rest one re-run at a
                 // time, and a reader fixing the one they were shown had no way
                 // to know the others existed.
-                let mut located = function.form.locate_all(&behavior.program);
+                let mut located = function.form.locate_all(program);
                 if located.is_empty() {
-                    located = candidate.locate_all(&behavior.program);
+                    located = candidate.locate_all(program);
                 }
                 // A behavior that matched but cannot be placed is still a
                 // finding; it just has no span to point at.
-                let placements = if located.is_empty() {
+                let placements: Vec<Option<std::ops::Range<usize>>> = if located.is_empty() {
                     vec![None]
                 } else {
                     located.into_iter().map(Some).collect()
                 };
+                found.push((program, *behavior, alternatives, fused, placements));
+            }
+            for (index, (program, behavior, alternatives, fused, placements)) in
+                found.iter().enumerate()
+            {
+                let catalog = match catalog_for(catalogs, behavior) {
+                    Some(catalog) => catalog,
+                    None => continue,
+                };
                 for steps in placements {
+                    // A behavior that another matched behavior is broader than
+                    // says strictly less about this code than that one does,
+                    // and saying both is saying the weaker thing twice.
+                    if found.iter().enumerate().any(|(other, entry)| {
+                        other != index && entry.4.contains(steps) && is_broader(program, entry.0)
+                    }) {
+                        continue;
+                    }
                     matches.insert(behavior_match(
                         file,
                         &function,
-                        steps,
-                        fused,
+                        steps.clone(),
+                        *fused,
                         catalog,
                         behavior,
                         alternatives.clone(),
@@ -345,6 +363,24 @@ fn delegates_to(outer: &DerivedLibraryBehavior, inner: &DerivedLibraryBehavior) 
             .iter()
             .skip(1)
             .any(|step| step.callable_path == target)
+}
+
+/// Whether one behavior's form describes everything another's does, and more.
+///
+/// A form used as a pattern accepts wherever it matches, so a form that matches
+/// ANOTHER behavior's form accepts everywhere that one does and elsewhere
+/// besides. `Option::and_then` is `match self { Some(x) => f(x), None => None }`
+/// and the hole swallows what every narrower way of consuming an `Option` puts
+/// there — `map`, `filter`, `ok_or`. Measured on clippy's `manual_map` test it
+/// landed on fifteen of the same lines `map` did, saying less about each.
+///
+/// Being broader is not being wrong, and it is not grounds for leaving a
+/// behavior out of a pack: code that really does reimplement `and_then` should
+/// hear about it. It is only grounds for standing aside where something
+/// narrower has already landed, which is why this is asked per placement rather
+/// than once per pack.
+fn is_broader(broad: &Form, narrow: &Form) -> bool {
+    broad != narrow && narrow.contains(broad) && !broad.contains(narrow)
 }
 
 fn catalog_for<'a>(
