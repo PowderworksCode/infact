@@ -80,3 +80,38 @@ fn a_constructor_still_reaches_its_own_types_method() {
         "`keys` should carry its own Cursor::next, which reads `self.inner`:\n  {form}"
     );
 }
+
+/// A helper nested in a method body does not answer to the surrounding type.
+///
+/// Carried down, the container made a local `fn total` a second callable named
+/// `Walk::total`, and the resolver refuses a name two callables answer to — so
+/// the real `total`, with a perfectly good body, reported that no
+/// implementation was found.
+///
+/// `Iterator::fold` is the case this was found on: `max_by` and `min_by`
+/// declare their own `fn fold` helpers, and three callables claimed the name.
+#[test]
+fn a_helper_nested_in_a_method_does_not_shadow_its_sibling() {
+    let crate_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let parsers =
+        entl_tree_sitter::ParserCatalog::discover([crate_root.join("../../../entl/parser-packs")]);
+    assert!(parsers.errors.is_empty(), "{:?}", parsers.errors);
+
+    let derived = infact_rust_behaviors::derive_library(
+        crate_root.join("tests/fixtures/nested-helper"),
+        &parsers.catalog,
+        "probe",
+        "0.1.0",
+    )
+    .expect("deriving the fixture");
+
+    let paths: std::collections::BTreeSet<&str> = derived
+        .behaviors
+        .iter()
+        .map(|behavior| behavior.callable_path.as_str())
+        .collect();
+    assert!(
+        paths.contains("probe::Walk::total"),
+        "the method the nested helper shares a name with must still resolve: {paths:?}"
+    );
+}
