@@ -781,7 +781,6 @@ dependencies = [
  "globset",
  "ignore",
  "inventory",
- "langbank",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -801,7 +800,6 @@ name = "entl-tree-sitter"
 version = "0.0.0"
 dependencies = [
  "entl-codebase",
- "langbank",
  "serde",
  "sha2 0.10.9",
  "thiserror",
@@ -1754,16 +1752,6 @@ name = "konst_macro_rules"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4933f3f57a8e9d9da04db23fb153356ecaf00cbd14aee46279c33dc80925c37"
-
-[[package]]
-name = "langbank"
-version = "0.0.0"
-source = "git+https://github.com/PowderworksCode/langbank?branch=main#c28e3320a5c4c0ca36c708b52712184e2e70dc2c"
-dependencies = [
- "inventory",
- "serde",
- "toml",
-]
 
 [[package]]
 name = "lazy_static"
