@@ -44,25 +44,6 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: infact
-      # Every CI run contributes this build to the public compile-time census
-      # at <https://cratebank.io/>. It builds what the steps below would have
-      # built anyway, measured, so what is added here is mostly the measuring.
-      #
-      # `strict` because this is the build. A measurement that quietly did not
-      # happen would mean nothing built the project either, and a green check
-      # would be saying so about work that never ran.
-      - uses: PowderworksCode/cratebank/action@v0.1.1
-        with:
-          args: --workspace
-          # This job checks out into a subdirectory and sets a
-          # `working-directory` default for it. A composite action's steps do
-          # not inherit that default, so it has to be said again here --
-          # without it the action looks for a `Cargo.toml` at the workspace
-          # root and finds nothing.
-          working-directory: infact
-          org-id: powderworks
-          strict: "true"
-
       # The toolchain comes from rust-toolchain.toml, which rustup installs on
       # first use, so no setup action decides the version.
       - run: cargo fmt --all --check
