@@ -1,0 +1,11 @@
+# Fixture directories are test inputs, not authored prose; their bytes are
+# what the tests exercise, so codespell must not rewrite them.
+# Words codespell's dictionary wrongly "corrects" here:
+#   infact            — this project's name, not "in fact"
+#   ser               — Rust serialization module path (toml::ser), not "set"
+#   ans               — identifier quoted from the analyzed corpus
+#   canonicalizations — deliberate plural
+#   deriver           — the tool that derives packs, an intentional agent noun
+[codespell]
+skip = ./crates/*/tests/fixtures
+ignore-words-list = infact,ser,ans,canonicalizations,deriver
