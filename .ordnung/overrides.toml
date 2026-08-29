@@ -3,3 +3,6 @@
 # owing CI tasks, a type layer, and a fleet-managed Biome config — none of which
 # they want, and the Biome config would have changed what the fixtures exercise.
 ignore = ["**/tests/fixtures/**"]
+
+[overrides]
+website = { severity = "off", reason = "no project website yet" }
