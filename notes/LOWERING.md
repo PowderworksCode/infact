@@ -349,7 +349,7 @@ unbuilt.**
 ## Reproducing
 
 ```
-scripts/roundtrip-workspace.sh                        # the whole claim, one command
+scripts/roundtrip-workspace.sh                      # the whole claim, one command
 cargo run --example roundtrip -p infact-rust-lower -- crates
 cargo test -p infact-rust-lower                     # the contract
 ```
