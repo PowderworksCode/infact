@@ -39,6 +39,31 @@ Machine-readable facts are JSON Lines:
 infact duplication . --parser-path /path/to/parser-packs --jsonl
 ```
 
+## Development
+
+Infact reads Entl through Cargo path dependencies, so an
+[entl](https://github.com/PowderworksCode/entl) checkout has to sit beside this
+one:
+
+```text
+powderworks/
+  entl/
+  infact/
+```
+
+`scripts/dev.sh` checks for that sibling before anything else, points git at the
+committed hooks, and builds the workspace along with the measurement harnesses
+under `tools/`, each of which is its own workspace and so is not covered by
+`--workspace`.
+
+```sh
+scripts/dev.sh
+
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
 ## Discarded errors
 
 `infact-rust-errors` records the sites where a fallible expression's error is

@@ -6,7 +6,7 @@
 # replaced by what printing them produced, and the suite still green. It works
 # on a copy, so the tree you are sitting in is never touched.
 #
-#   tools/roundtrip-workspace.sh [destination]
+#   scripts/roundtrip-workspace.sh [destination]
 #
 # The destination defaults to a temporary directory and is reported at the end
 # so the diff can be read.
