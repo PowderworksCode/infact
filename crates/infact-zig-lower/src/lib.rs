@@ -14,6 +14,11 @@
 //! That makes the number to maximize *coverage with zero wrong answers*, rather
 //! than the round-trip fidelity the Rust crate measures.
 
+// The module doc quotes the porting protocol's refusal spelling, which is the
+// literal text a translator emits — the thing being specified, not work this
+// crate deferred. File-scoped because the rule matches the quoted spelling.
+// straitjacket-allow-file:stray-todo
+
 /// Rewrite Bun's `#private` field syntax so the grammar can read it.
 ///
 /// `tree-sitter-zig` rejects `#` in an identifier. Bun uses it for private

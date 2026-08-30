@@ -16,6 +16,11 @@
 //! cargo run --release -p infact-python-normalize --example ambiguity -- PACKS ROOT...
 //! ```
 
+// `notes/todo.txt` is a checked-in census file, so the module doc naming it is
+// a citation of where a number came from, not deferred work. File-scoped
+// because the rule matches the filename itself.
+// straitjacket-allow-file:stray-todo
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 

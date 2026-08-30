@@ -1,0 +1,16 @@
+# Straitjacket runs on every commit. Defaults are taken as they come; the one
+# entry below is a file whose length is a property of what it holds rather than
+# of how it is written.
+
+file-size-exclude = [
+    # A catalogue of eighteen rewrite laws — `as_fused`, `as_searched`,
+    # `as_counted_traversal` and the rest — each thirty to ninety lines, all
+    # dispatched from a single `or_else` chain in `sweep` where the order
+    # decides which law claims a form first. Moving laws to other files would
+    # put each one somewhere other than the chain that ranks it, and the only
+    # boundaries inside the catalogue fall between individual laws. What is
+    # separable here (the lifting block, the free predicates each serving one
+    # law) does not add up to the overage, so clearing the budget would mean
+    # relocating the file's parts rather than finding a seam in it.
+    "crates/infact-normalize/src/simplify.rs",
+]

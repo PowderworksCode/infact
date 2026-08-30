@@ -789,27 +789,10 @@ impl<'a> Lifter<'a> {
                     match child.kind() {
                         "remaining_field_pattern" => rest = true,
                         "field_pattern" => {
-                            let name = child
-                                .child_by_field_name("name")
-                                .map(|name| text(name, self.source).to_owned());
-                            let bound = child.child_by_field_name("pattern");
-                            match (name, bound) {
-                                (Some(name), Some(bound)) => fields.push(FieldPat::Named {
-                                    name,
-                                    pattern: self.pattern(bound),
-                                }),
-                                // `Point { x }`, and `ref mut` forms of it.
-                                (Some(name), None) => fields.push(FieldPat::Shorthand {
-                                    by_reference: children(child)
-                                        .iter()
-                                        .any(|token| token.kind() == "ref"),
-                                    mutable: children(child)
-                                        .iter()
-                                        .any(|token| token.kind() == "mutable_specifier"),
-                                    name,
-                                }),
-                                _ => return Pat::Verbatim(text(node, self.source).to_owned()),
-                            }
+                            let Some(field) = self.struct_field_pattern(child) else {
+                                return Pat::Verbatim(text(node, self.source).to_owned());
+                            };
+                            fields.push(field);
                         }
                         "shorthand_field_identifier" => fields.push(FieldPat::Shorthand {
                             by_reference: false,
@@ -874,6 +857,29 @@ impl<'a> Lifter<'a> {
             }
             _ => Pat::Verbatim(text(node, self.source).to_owned()),
         }
+    }
+
+    /// One `field_pattern` of a struct pattern. `None` means the field has no
+    /// name, a shape the lift has no representation for, so the whole struct
+    /// pattern falls back to verbatim text.
+    fn struct_field_pattern(&self, field: Node<'a>) -> Option<FieldPat> {
+        let name = field
+            .child_by_field_name("name")
+            .map(|name| text(name, self.source).to_owned())?;
+        let Some(bound) = field.child_by_field_name("pattern") else {
+            // `Point { x }`, and `ref mut` forms of it.
+            return Some(FieldPat::Shorthand {
+                by_reference: children(field).iter().any(|token| token.kind() == "ref"),
+                mutable: children(field)
+                    .iter()
+                    .any(|token| token.kind() == "mutable_specifier"),
+                name,
+            });
+        };
+        Some(FieldPat::Named {
+            name,
+            pattern: self.pattern(bound),
+        })
     }
 
     /// A pattern's parts, including the ones the grammar leaves anonymous.
