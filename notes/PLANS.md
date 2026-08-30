@@ -528,7 +528,7 @@ children of `enum_variant_list`. Today's `unit_enum` (lib.rs:548) requires
 *every* named child to be an `enum_variant`, so **any enum whose variants carry
 doc comments is silently invisible to macro-behavior matching.** The strum
 fixture has zero doc comments, so no test exercises it. The query version fixes
-this for free and surfaces `DiscardForm` in infact's own `infact-core` — a real
+this as a by-product and surfaces `DiscardForm` in infact's own `infact-core` — a real
 match the current code cannot see. This is a behavior change and needs a
 deliberate decision, not a silent fix.
 
