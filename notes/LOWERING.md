@@ -9,7 +9,7 @@ rather than fixable.
 **Part two** is `infact-rust-lower`, which does it on a tree built for the job.
 The whole workspace — **1,179 bodies across 116 files** — is lifted, printed
 back, and rebuilt with **269 tests passing and nothing failing**, at **99.63%
-structural coverage**. Run it with `tools/roundtrip-workspace.sh`.
+structural coverage**. Run it with `scripts/roundtrip-workspace.sh`.
 
 The conclusion of part one is what part two is built on, so the two are not in
 tension: lowering works exactly when it stops being asked of `Form`.
@@ -257,7 +257,7 @@ the whole workspace.
 | structural coverage | **99.63%** |
 | lines differing from the original after `rustfmt` | 283 of ~48,000 |
 
-`tools/roundtrip-workspace.sh` copies the workspace, rewrites every function
+`scripts/roundtrip-workspace.sh` copies the workspace, rewrites every function
 body from the lifted tree, and runs the suite against the result. It reprints
 `infact-rust-lower`'s own source too, so the crate round-trips itself.
 
@@ -349,7 +349,7 @@ unbuilt.**
 ## Reproducing
 
 ```
-tools/roundtrip-workspace.sh                        # the whole claim, one command
+scripts/roundtrip-workspace.sh                      # the whole claim, one command
 cargo run --example roundtrip -p infact-rust-lower -- crates
 cargo test -p infact-rust-lower                     # the contract
 ```
