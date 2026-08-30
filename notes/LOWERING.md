@@ -160,7 +160,7 @@ The brief listed four. The evidence picks the last one.
   the form contribute nothing to lowering.
 - **Extend `Form` with what lowering needs and matching ignores.** Every item on
   that list is a distinction normalization exists to destroy. Recording whether
-  a receiver was `.iter()` or `.into_iter()` un-normalizes the very equality the
+  a receiver was `.iter()` or `.into_iter()` un-normalizes the equality the
   crate is built on — a loop and a combinator agreeing is the central claim, and
   `SEQUENCE_ADAPTERS` is what makes it true. Note that `collisions.rs` would not
   catch this: it asserts distinct callables derive *distinct* forms, so it
@@ -180,7 +180,7 @@ has never seen one.
 `infact-python-normalize` is the most recent evidence of that cost: 1,600 lines,
 and `todo.txt` records it finding two bugs in the shared core on the way.
 
-But building it would not help, and the reason is in baozi rather than here.
+Building it would not help, though, and the reason is in baozi rather than here.
 `PORTING.md` says every other module's **signatures already exist** — "types,
 fields, enums, constants and function signatures, ported and fixed" — and are
 handed to the model as context. So the declaration layer, which is the part a

@@ -214,7 +214,7 @@ What the split looks like in practice:
   (direction), the indexed-sequence search, body construction — and
   counted-`while`'s "the body advances the counter," which is a text search
   no query can express.
-- Op vocabulary after two languages: 23 (C) / 26 (TS), 14 shared. Python —
+- Op vocabulary after two languages: 23 in C / 26 in TS, 14 shared. Python —
   the largest normalizer, 2,081 lines — is the convergence test.
 
 ### The query out-recognized production
