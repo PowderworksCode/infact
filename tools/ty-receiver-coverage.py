@@ -3,11 +3,14 @@
 RECORDED 08-04 against ty 0.0.66. Receivers of method calls, revealed:
 
                         stdlib (45,116)   third-party (33,046)
-    <module ...>              22.3%             25.0%   already free from
-                                                        syntactic resolution
-    Unknown                   36.5%             32.3%   ty adds nothing
+    <module ...>              22.3%             25.0%
+    Unknown                   36.5%             32.3%
     partly Unknown             9.3%              4.7%
-    CONCRETE, non-module      31.8%             37.9%   <- the marginal gain
+    CONCRETE, non-module      31.8%             37.9%
+
+`<module ...>` receivers are already free from syntactic resolution, and
+`Unknown` is where ty adds nothing. The CONCRETE, non-module row is the
+marginal gain.
 
 About one receiver in three, and generous: 512 of the stdlib wins are `Never`.
 

@@ -740,3 +740,228 @@ impl Bindings {
         }
     }
 }
+
+/// The `Form` side of matching: asking where, and how often, a pattern occurs.
+///
+/// These read as methods on `Form` but are all `Bindings` driven, so they live
+/// with the matcher rather than with the form definition.
+impl Form {
+    /// Every place `pattern` matches, with what its roles stood for.
+    ///
+    /// The companion to [`Form::contains`], which answers whether a pattern is
+    /// here and discards what it found. A recognizer that has to say something
+    /// about a *part* of what matched — this hole must not mention that name —
+    /// needs the parts, and working them out by walking the subject again is
+    /// how a matcher comes to be reimplemented beside itself.
+    ///
+    /// Matches at nodes, not at runs of statements: a pattern spread over
+    /// several steps has no single node to have matched, so [`Form::locate_all`]
+    /// is what places those.
+    #[must_use]
+    pub fn resolve_all(&self, pattern: &Self) -> Vec<Resolved> {
+        let mut found = Vec::new();
+        self.resolve_into(pattern, &mut found);
+        found
+    }
+
+    fn resolve_into(&self, pattern: &Self, found: &mut Vec<Resolved>) {
+        let mut bindings = Bindings::default();
+        if bindings.form(self, pattern) {
+            found.push(bindings.resolved());
+        }
+        for child in self.children() {
+            child.resolve_into(pattern, found);
+        }
+    }
+
+    /// Whether this form contains `pattern` anywhere within it.
+    ///
+    /// Repository code rarely consists of nothing but the behavior in question,
+    /// so a match is a subtree relationship rather than whole-body equality.
+    pub fn contains(&self, pattern: &Self) -> bool {
+        self.search(pattern, false)
+    }
+
+    /// Every position at which `pattern` occurs, outermost first.
+    pub fn occurrences<'a>(&'a self, pattern: &Self) -> Vec<&'a Self> {
+        let mut found = Vec::new();
+        self.find(pattern, &mut found);
+        if found.is_empty()
+            && let Some(work) = pattern.without_result_reference()
+        {
+            self.find(&work, &mut found);
+        }
+        found
+    }
+
+    fn find<'a>(&'a self, pattern: &Self, found: &mut Vec<&'a Self>) {
+        if self.matches_with(pattern, false) || self.contains_steps_with(pattern, false) {
+            found.push(self);
+        }
+        for child in self.children() {
+            child.find(pattern, found);
+        }
+    }
+
+    /// Where in a sequence a pattern matches, as a range of steps.
+    ///
+    /// A finding is only useful if it points at the code. The steps that make
+    /// up a behavior need not be adjacent, so this reports from the first to
+    /// the last of them: the extent the behavior is spread over, which is
+    /// exactly what a reader has to look at.
+    pub fn matching_steps(&self, pattern: &Self) -> Option<std::ops::Range<usize>> {
+        let Self::Sequence(haystack) = self else {
+            return None;
+        };
+        let steps = match pattern {
+            Self::Sequence(steps) => steps.as_slice(),
+            other => std::slice::from_ref(other),
+        };
+        let (first, rest) = steps.split_first()?;
+        if steps.len() > haystack.len() {
+            return None;
+        }
+        haystack.iter().enumerate().find_map(|(start, candidate)| {
+            let mut bindings = Bindings::default();
+            if !bindings.form(candidate, first) {
+                return None;
+            }
+            let mut matched = vec![start];
+            bindings
+                .follow_recording(&haystack[start + 1..], rest, start + 1, &mut matched)
+                .then(|| start..matched.last().map_or(start, |last| last + 1))
+        })
+    }
+
+    /// Where a pattern matches, trying the behavior without its closing
+    /// reference when the whole of it does not appear.
+    pub fn locate(&self, pattern: &Self) -> Option<std::ops::Range<usize>> {
+        self.matching_steps(pattern).or_else(|| {
+            pattern
+                .without_result_reference()
+                .and_then(|work| self.matching_steps(&work))
+        })
+    }
+
+    /// Every place a pattern matches, not just the first.
+    ///
+    /// A function that writes the same `match` out four times has done the
+    /// thing four times, and reporting one of them surfaces the rest a re-run
+    /// at a time. Matches are non-overlapping: a run of steps that has been
+    /// claimed cannot also be the start of the next match, or one behavior
+    /// spread over several statements would be reported once per statement it
+    /// touches.
+    pub fn locate_all(&self, pattern: &Self) -> Vec<std::ops::Range<usize>> {
+        let Self::Sequence(haystack) = self else {
+            return Vec::new();
+        };
+        let mut found = Vec::new();
+        let mut from = 0;
+        while from < haystack.len() {
+            let rest = Self::Sequence(haystack[from..].to_vec());
+            let Some(range) = rest.locate(pattern) else {
+                break;
+            };
+            found.push(from + range.start..from + range.end);
+            from += range.end.max(range.start + 1);
+        }
+        found
+    }
+
+    /// The same behavior without its closing reference to what it built.
+    ///
+    /// A library function ends by naming its result, because it has to return
+    /// it. Code that does the same work inline rarely does: it goes on to use
+    /// the value, or returns something computed from it. That closing step is
+    /// the function's obligation rather than part of the behavior, so matching
+    /// looks for the work with and without it.
+    pub fn without_result_reference(&self) -> Option<Self> {
+        let Self::Sequence(steps) = self else {
+            return None;
+        };
+        let (Self::Local(index), bound) = (steps.last()?, &steps[..steps.len() - 1]) else {
+            return None;
+        };
+        if bound.len() < 2 {
+            return None;
+        }
+        // only when this sequence is what bound the name, or the trailing
+        // reference is to something from outside and cannot be dropped
+        bound
+            .iter()
+            .any(|step| {
+                matches!(step, Self::Let { pattern, .. }
+                    if matches!(pattern.as_ref(), Pattern::Binding(bound) if bound == index))
+            })
+            .then(|| Self::Sequence(bound.to_vec()))
+    }
+
+    /// Whether this form performs `pattern` among other work.
+    ///
+    /// Real loops are rarely dedicated to one thing. A loop that groups values
+    /// and also counts them still groups them, and saying so is useful even
+    /// though the replacement is not mechanical. A loop that `break`s or
+    /// `continue`s is different in kind: it does not visit every element, so it
+    /// is not the behavior at all, however much of the shape it shares.
+    pub fn contains_fused(&self, pattern: &Self) -> bool {
+        self.search(pattern, true)
+    }
+
+    /// Look for a pattern anywhere in this form, by every route that counts as
+    /// finding it: as a whole, as a run of consecutive steps, and without the
+    /// closing reference a library function needs but inline code does not.
+    fn search(&self, pattern: &Self, fused: bool) -> bool {
+        if self.matches_with(pattern, fused) || self.contains_steps_with(pattern, fused) {
+            return true;
+        }
+        if let Some(work) = pattern.without_result_reference()
+            && (self.matches_with(&work, fused) || self.contains_steps_with(&work, fused))
+        {
+            return true;
+        }
+        self.children()
+            .into_iter()
+            .any(|child| child.search(pattern, fused))
+    }
+
+    fn matches_with(&self, pattern: &Self, fused: bool) -> bool {
+        let mut bindings = Bindings::with_fusion(fused);
+        bindings.form(self, pattern)
+    }
+
+    /// Whether a sequence performs the pattern's steps, in order, ignoring
+    /// unrelated statements written among them.
+    ///
+    /// Code does not lay a behavior out contiguously. An accumulator is
+    /// declared, then something unrelated, then the loop that fills it. Those
+    /// interruptions are only unrelated if they leave the behavior alone, so a
+    /// statement may be stepped over exactly when it touches nothing the match
+    /// has bound. A statement that reads or rewrites the accumulator is part of
+    /// what the code does and cannot be skipped past.
+    fn contains_steps_with(&self, pattern: &Self, fused: bool) -> bool {
+        let (Self::Sequence(haystack), Self::Sequence(steps)) = (self, pattern) else {
+            return false;
+        };
+        let Some((first, rest)) = steps.split_first() else {
+            return false;
+        };
+        if steps.len() > haystack.len() {
+            return false;
+        }
+        haystack.iter().enumerate().any(|(start, candidate)| {
+            let mut bindings = Bindings::with_fusion(fused);
+            bindings.form(candidate, first) && bindings.follow(&haystack[start + 1..], rest)
+        })
+    }
+
+    /// Whether this form is an instance of `pattern`.
+    ///
+    /// A derived behavior is a pattern, not a literal. What the library takes as
+    /// a parameter is a hole: `sorted_by` receives its comparator from the
+    /// caller, so any comparator matches, including a closure written inline.
+    /// A hole that appears twice must be filled the same way both times.
+    pub fn matches(&self, pattern: &Self) -> bool {
+        let mut bindings = Bindings::default();
+        bindings.form(self, pattern)
+    }
+}

@@ -1054,6 +1054,11 @@ fn a_conditional_advance_is_not_a_walk() {
     );
 }
 
+// `notes/todo.txt` is a checked-in census file, so naming it below is a
+// citation of where a number came from, not deferred work. File-scoped because
+// the rule matches the filename itself.
+// straitjacket-allow-file:stray-todo
+
 /// A `while` that walks nothing stays opaque, and says what it is.
 ///
 /// 30.3% of `while` loops in the installed corpus are `while True`, which
