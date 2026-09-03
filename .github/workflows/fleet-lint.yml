@@ -10,7 +10,13 @@ name: fleet-lint
 on:
   push:
     branches: [main]
+  # `edited` joins the three default types because pr-title reads the title out
+  # of the event payload: without it, a title corrected in response to the
+  # check raises no event, and a re-run replays the payload that failed. The
+  # only way left to clear the gate would be another push, which a title fix
+  # does not have.
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   # Periodic coverage: these tools grow rules between releases, so a repository
   # nobody has touched can start failing for a reason worth knowing about.
   schedule:
@@ -86,6 +92,35 @@ jobs:
         with:
           min-severity: high
           advanced-security: false
+
+  # Pull-request titles, held to the rule the commit-msg hook holds subjects to.
+  # A squash merge writes the title into the history, so on the default branch it
+  # is the message that lasts, and nothing was checking it.
+  title:
+    name: pr-title
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # The title arrives through the environment rather than interpolated into
+      # the script. It is text somebody else wrote, and `${{ }}` would paste it
+      # in as shell before the shell ever sees it as data.
+      - name: Conventional Commits
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # Git's own generated subjects pass untouched, as they do in the hook.
+          case "$TITLE" in
+              "Merge "*|"Revert "*) exit 0 ;;
+          esac
+          if printf '%s' "$TITLE" |
+              grep -qE '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9./_-]+\))?!?: .+'; then
+              exit 0
+          fi
+          echo "::error::pull-request title must follow Conventional Commits: type(scope): summary"
+          echo "  types: feat fix docs style refactor perf test build ci chore revert"
+          echo "  got:   $TITLE"
+          exit 1
 
   # Prose style, over the Markdown a member writes. Vale fetches the packages
   # named in .vale.ini at run time, so the styles are versioned by that file
@@ -180,7 +215,10 @@ jobs:
     # drives the compiler over the whole workspace, and a pull request that
     # touches no Rust cannot change what it would say.
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    # Not on an edited title or body: nothing a description says changes what
+    # the compiler sees, and this is the one job here that can run half an
+    # hour. The rest are seconds and can afford to answer every event.
+    if: needs.changes.outputs.rust == 'true' && github.event.action != 'edited'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Whether hawk applies is answered on the runner, after checkout: a
