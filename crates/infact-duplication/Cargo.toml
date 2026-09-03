@@ -8,7 +8,7 @@ repository.workspace = true
 description = "Exact and similar syntax-token duplication facts."
 
 [dependencies]
-entl-codebase.workspace = true
+entl.workspace = true
 entl-tree-sitter.workspace = true
 infact-core = { path = "../infact-core" }
 serde.workspace = true

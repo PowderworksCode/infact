@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand, ValueEnum};
-use entl_codebase::observe_rust_compiler;
+use entl::codebase::observe_rust_compiler;
 use entl_tree_sitter::ParserCatalog;
 use infact_catalog::{CatalogRequest, build_catalog};
 use infact_core::{DerivedLibraryBehavior, DerivedMacroBehavior, ExternalCatalog, LibraryTarget};

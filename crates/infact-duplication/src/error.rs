@@ -3,7 +3,7 @@ use std::path::PathBuf;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
-    Codebase(#[from] entl_codebase::Error),
+    Codebase(#[from] entl::codebase::Error),
 
     #[error(transparent)]
     Parser(#[from] entl_tree_sitter::Error),

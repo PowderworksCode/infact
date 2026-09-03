@@ -775,8 +775,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
-name = "entl-codebase"
-version = "0.0.0"
+name = "entl"
+version = "0.1.0"
 dependencies = [
  "globset",
  "ignore",
@@ -784,22 +784,23 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml_ng",
+ "shell-words",
  "thiserror",
  "toml",
 ]
 
 [[package]]
 name = "entl-semantics"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "entl-tree-sitter"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
- "entl-codebase",
+ "entl",
  "serde",
  "sha2 0.10.9",
  "thiserror",
@@ -809,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "entl-zig-observe"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "entl-tree-sitter",
  "tree-sitter",
@@ -1378,7 +1379,7 @@ name = "infact-cli"
 version = "0.0.0"
 dependencies = [
  "clap",
- "entl-codebase",
+ "entl",
  "entl-tree-sitter",
  "infact-catalog",
  "infact-core",
@@ -1410,7 +1411,7 @@ dependencies = [
 name = "infact-duplication"
 version = "0.0.0"
 dependencies = [
- "entl-codebase",
+ "entl",
  "entl-tree-sitter",
  "infact-core",
  "serde",
@@ -1494,7 +1495,7 @@ dependencies = [
 name = "infact-rust-behaviors"
 version = "0.0.0"
 dependencies = [
- "entl-codebase",
+ "entl",
  "entl-tree-sitter",
  "heck",
  "infact-behaviors",
@@ -1548,7 +1549,7 @@ dependencies = [
 name = "infact-ts-behaviors"
 version = "0.0.0"
 dependencies = [
- "entl-codebase",
+ "entl",
  "entl-tree-sitter",
  "infact-behaviors",
  "infact-core",
@@ -2497,6 +2498,12 @@ dependencies = [
  "cpufeatures 0.3.0",
  "digest 0.11.3",
 ]
+
+[[package]]
+name = "shell-words"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
 
 [[package]]
 name = "shlex"

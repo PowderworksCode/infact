@@ -35,7 +35,7 @@ repository = "https://github.com/zmaril/infact"
 [workspace.dependencies]
 ascent = { version = "0.8", default-features = false }
 clap = { version = "4", features = ["derive"] }
-entl-codebase = { path = "../entl/crates/entl-codebase" }
+entl = { path = "../entl/crates/entl" }
 entl-tree-sitter = { path = "../entl/crates/entl-tree-sitter" }
 heck = "0.5"
 pathfinding = "4"
