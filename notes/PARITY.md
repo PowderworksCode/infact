@@ -53,7 +53,7 @@ reach it. `—` means absent.
 
 | capability | mechanism | rust | ts `.ts` | ts `.tsx` | js | python | zig |
 |---|---|---|---|---|---|---|---|
-| detect / inventory | `entl-codebase` profiles | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| detect / inventory | `entl::codebase` profiles | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | parse | parser pack | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | exact / near clones | `[tokenization]` + `infact-duplication` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | text rules (todo, size, nesting…) | straitjacket + profiles | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -71,7 +71,7 @@ a finding rather than a gap:
 ### `.tsx` gets less than `.ts`, from the same bytes, silently
 
 `tsx` is **not a language**. `parser-packs/tsx/parser.toml` declares
-`language = "typescript"` with `grammar-name = "tsx"`; `entl-codebase` has one
+`language = "typescript"` with `grammar-name = "tsx"`; `entl::codebase` has one
 `typescript` profile covering `ts, tsx, mts, cts` and no `tsx` id at all. So
 `.tsx` and `.ts` are one language read by two grammars — and the `tsx` pack
 ships no queries and no `[error-handling]`.

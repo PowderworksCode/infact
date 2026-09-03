@@ -8,7 +8,7 @@ repository.workspace = true
 description = "Rust library-behavior match facts derived by Infact."
 
 [dependencies]
-entl-codebase.workspace = true
+entl.workspace = true
 entl-tree-sitter.workspace = true
 heck.workspace = true
 infact-core = { path = "../infact-core" }

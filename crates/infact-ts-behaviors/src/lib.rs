@@ -41,7 +41,7 @@ pub enum Error {
     #[error(transparent)]
     Parser(#[from] entl_tree_sitter::Error),
     #[error(transparent)]
-    Codebase(#[from] entl_codebase::Error),
+    Codebase(#[from] entl::codebase::Error),
     #[error("source file {path} is too large for source coordinates")]
     SourceTooLarge { path: PathBuf },
     #[error(

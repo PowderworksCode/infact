@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use entl_codebase::{InventoryOptions, walk};
+use entl::codebase::{InventoryOptions, walk};
 use entl_tree_sitter::{ParsedFile, ParserCatalog, ParserRuntime};
 use infact_behaviors::{Library, LibraryCallable, Refusal, SourceId, container_name, leaf_name};
 use infact_core::{
