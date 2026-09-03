@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
-entl-codebase.workspace = true
+entl.workspace = true
 entl-tree-sitter.workspace = true
 infact-catalog = { path = "../infact-catalog" }
 infact-core = { path = "../infact-core" }
